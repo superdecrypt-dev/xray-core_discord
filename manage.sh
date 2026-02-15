@@ -114,7 +114,8 @@ now_ts() {
 }
 
 bytes_from_gb() {
-  # GB (GiB) -> bytes
+  # GB (decimal) -> bytes
+  # Catatan: 1 GB = 1.000.000.000 bytes
   local gb="${1:-0}"
   python3 - <<'PY' "${gb}"
 import sys
@@ -122,7 +123,7 @@ try:
   gb=float(sys.argv[1])
 except Exception:
   gb=0.0
-b=int(gb*(1024**3))
+b=int(gb*(1000**3))
 if b < 0:
   b=0
 print(b)
@@ -355,7 +356,11 @@ except Exception:
   raise SystemExit(0)
 
 ql=int(d.get("quota_limit") or 0)
-quota_gb=int(round(ql/(1024**3))) if ql else 0
+unit=str(d.get("quota_unit") or "").strip().lower()
+bpg=int(d.get("quota_bytes_per_gb") or 0)
+if bpg <= 0:
+  bpg=(1024**3) if unit in ("gib","binary","1024","gibibyte") else (1000**3)
+quota_gb=int(round(ql/bpg)) if ql else 0
 expired=d.get("expired_at") or "-"
 created=d.get("created_at") or "-"
 st=d.get("status") or {}
@@ -1077,6 +1082,8 @@ meta={
   "username": username + "@" + proto,
   "protocol": proto,
   "quota_limit": quota_bytes,
+  "quota_unit": "decimal",
+  "quota_bytes_per_gb": 1000000000,
   "quota_used": 0,
   "created_at": created_at,
   "expired_at": expired_at,
@@ -1653,9 +1660,13 @@ u=str(d.get("username") or "-")
 ql=int(d.get("quota_limit") or 0)
 qu=int(d.get("quota_used") or 0)
 
-# Limit tampil integer GB (GiB), USED tampil 2 desimal supaya terlihat progres walau belum 1GiB penuh.
-ql_gb=int(round(ql/(1024**3))) if ql else 0
-qu_gb=f"{(qu/(1024**3)):.2f}" if qu else "0.00"
+# Limit tampil integer GB, USED tampil 2 desimal supaya terlihat progres.
+unit=str(d.get("quota_unit") or "").strip().lower()
+bpg=int(d.get("quota_bytes_per_gb") or 0)
+if bpg <= 0:
+  bpg=(1024**3) if unit in ("gib","binary","1024","gibibyte") else (1000**3)
+ql_gb=int(round(ql/bpg)) if ql else 0
+qu_gb=f"{(qu/bpg):.2f}" if qu else "0.00"
 
 exp=str(d.get("expired_at") or "-")
 st=d.get("status") or {}
@@ -1860,7 +1871,7 @@ quota_edit_flow() {
           continue
         fi
         qb="$(bytes_from_gb "${gb_num}")"
-        quota_atomic_update_file "${qf}" "d['quota_limit']=int(${qb})"
+        quota_atomic_update_file "${qf}" "d['quota_limit']=int(${qb}); d['quota_unit']='decimal'; d['quota_bytes_per_gb']=1000000000"
         log "Quota limit diubah: ${gb_num} GB"
         pause
         ;;

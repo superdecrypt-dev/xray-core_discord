@@ -2357,6 +2357,9 @@ API_SERVER_DEFAULT = "127.0.0.1:10080"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 
+GB_DECIMAL = 1000 ** 3
+GB_BINARY = 1024 ** 3
+
 def now_iso():
   return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -2388,6 +2391,28 @@ def parse_int(v):
     return int(float(s))
   except Exception:
     return 0
+
+def normalize_quota_limit(meta, raw_limit):
+  unit_raw = (meta.get("quota_unit") if isinstance(meta, dict) else "") or ""
+  unit = str(unit_raw).strip().lower()
+
+  # Explicit binary unit
+  if unit in ("gib", "binary", "1024", "gibibyte"):
+    return raw_limit, "gib", GB_BINARY
+
+  # Explicit decimal unit
+  if unit in ("decimal", "gb", "1000", "gigabyte"):
+    return raw_limit, "decimal", GB_DECIMAL
+
+  # Heuristic (backward compat):
+  # Older metadata often used GiB bytes while UI said "GB".
+  # If the limit is an exact multiple of GiB but not decimal GB, normalize to decimal.
+  if raw_limit > 0 and raw_limit % GB_BINARY == 0 and raw_limit % GB_DECIMAL != 0:
+    gb = raw_limit // GB_BINARY
+    return gb * GB_DECIMAL, "decimal", GB_DECIMAL
+
+  # Default
+  return raw_limit, "decimal", GB_DECIMAL
 
 def find_marker_rule(cfg, marker, outbound_tag):
   rules = ((cfg.get("routing") or {}).get("rules")) or []
@@ -2461,7 +2486,7 @@ def fetch_all_user_traffic(api_server):
     totals[email] = parse_int(d.get("uplink")) + parse_int(d.get("downlink"))
   return totals
 
-def ensure_quota_status(meta, exhausted, q_limit, q_used):
+def ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg):
   st = meta.get("status") or {}
   changed = False
 
@@ -2470,6 +2495,13 @@ def ensure_quota_status(meta, exhausted, q_limit, q_used):
     changed = True
   if meta.get("quota_used") != q_used:
     meta["quota_used"] = q_used
+    changed = True
+
+  if meta.get("quota_unit") != q_unit:
+    meta["quota_unit"] = q_unit
+    changed = True
+  if parse_int(meta.get("quota_bytes_per_gb")) != parse_int(bpg):
+    meta["quota_bytes_per_gb"] = int(bpg)
     changed = True
 
   if bool(st.get("quota_exhausted", False)) != bool(exhausted):
@@ -2514,11 +2546,12 @@ def run_once(config_path, marker, api_server, dry_run=False):
     if not username:
       continue
 
-    q_limit = parse_int(meta.get("quota_limit") if isinstance(meta, dict) else 0)
+    raw_limit = parse_int(meta.get("quota_limit") if isinstance(meta, dict) else 0)
+    q_limit, q_unit, bpg = normalize_quota_limit(meta, raw_limit) if isinstance(meta, dict) else (raw_limit, "decimal", GB_DECIMAL)
     q_used = parse_int(totals.get(username, 0))
 
     exhausted = (q_limit > 0 and q_used >= q_limit)
-    meta_changed = ensure_quota_status(meta, exhausted, q_limit, q_used) if isinstance(meta, dict) else False
+    meta_changed = ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg) if isinstance(meta, dict) else False
 
     if meta_changed and not dry_run:
       try:
