@@ -1717,6 +1717,66 @@ print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{flags}")
 PY
 }
 
+quota_read_detail_fields() {
+  # args: json_file
+  # prints: username|quota_limit_disp|quota_used_disp|expired_at_date|ip_limit_onoff|ip_limit_value|block_reason
+  local qf="$1"
+  need_python3
+  python3 - <<'PY' "${qf}"
+import json, sys
+p=sys.argv[1]
+try:
+  d=json.load(open(p,'r',encoding='utf-8'))
+except Exception:
+  print("-|0 GB|0 B|-|OFF|0|-")
+  raise SystemExit(0)
+
+u=str(d.get("username") or "-")
+ql=int(d.get("quota_limit") or 0)
+qu=int(d.get("quota_used") or 0)
+
+ql_gb=int(round(ql/(1024**3))) if ql else 0
+ql_disp=f"{ql_gb} GB" if ql_gb else "0 GB"
+
+def used_disp(b):
+  try:
+    b=int(b)
+  except Exception:
+    b=0
+  if b >= 1024**3:
+    return f"{b/(1024**3):.2f} GB"
+  if b >= 1024**2:
+    return f"{b/(1024**2):.2f} MB"
+  if b >= 1024:
+    return f"{b/1024:.2f} KB"
+  return f"{b} B"
+
+qu_disp=used_disp(qu)
+
+exp=str(d.get("expired_at") or "-")
+exp_date=exp[:10] if exp and exp != "-" else "-"
+
+st=d.get("status") or {}
+ip_en=bool(st.get("ip_limit_enabled"))
+try:
+  ip_lim=int(st.get("ip_limit") or 0)
+except Exception:
+  ip_lim=0
+ip_lim = ip_lim if ip_en else 0
+
+lr=str(st.get("lock_reason") or "").strip().lower()
+reason="-"
+if st.get("manual_block") or lr == "manual":
+  reason="MANUAL"
+elif st.get("quota_exhausted") or lr == "quota":
+  reason="QUOTA"
+elif st.get("ip_limit_locked") or lr == "ip_limit":
+  reason="IP_LIMIT"
+
+print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{'ON' if ip_en else 'OFF'}|{ip_lim}|{reason}")
+PY
+}
+
 
 
 quota_print_table_page() {
@@ -1877,8 +1937,8 @@ quota_edit_flow() {
     echo "File  : ${qf}"
     hr
 
-    local fields username ql_disp qu_disp exp_date flags_disp
-    fields="$(quota_read_summary_fields "${qf}")"
+    local fields username ql_disp qu_disp exp_date ip_state ip_lim block_reason
+    fields="$(quota_read_detail_fields "${qf}")"
     username="${fields%%|*}"
     fields="${fields#*|}"
     ql_disp="${fields%%|*}"
@@ -1886,13 +1946,19 @@ quota_edit_flow() {
     qu_disp="${fields%%|*}"
     fields="${fields#*|}"
     exp_date="${fields%%|*}"
-    flags_disp="${fields##*|}"
+    fields="${fields#*|}"
+    ip_state="${fields%%|*}"
+    fields="${fields#*|}"
+    ip_lim="${fields%%|*}"
+    block_reason="${fields##*|}"
 
     echo "Username     : ${username}"
     echo "Quota Limit : ${ql_disp}"
     echo "Quota Used  : ${qu_disp}"
     echo "Expired At   : ${exp_date}"
-    echo "Flags        : ${flags_disp:-"-"}"
+    echo "IP Limit     : ${ip_state}"
+    echo "Block Reason : ${block_reason}"
+    echo "IP Limit Max : ${ip_lim}"
     hr
 
     echo "  1) View JSON"
