@@ -1552,7 +1552,8 @@ quota_collect_files() {
   QUOTA_FILE_PROTOS=()
 
   local proto dir f base u key
-  declare -A seen=()
+  declare -A pos=()
+  declare -A has_at=()
 
   for proto in "${QUOTA_PROTO_DIRS[@]}"; do
     dir="${QUOTA_ROOT}/${proto}"
@@ -1565,16 +1566,32 @@ quota_collect_files() {
       else
         u="${base}"
       fi
+
       key="${proto}:${u}"
-      if [[ -n "${seen[${key}]:-}" ]]; then
+
+      # Prefer file "username@proto.json" over legacy "username.json" if both exist.
+      if [[ -n "${pos[${key}]:-}" ]]; then
+        if [[ "${base}" == *"@"* && "${has_at[${key}]:-0}" != "1" ]]; then
+          QUOTA_FILES[${pos[${key}]}]="${f}"
+          QUOTA_FILE_PROTOS[${pos[${key}]}]="${proto}"
+          has_at["${key}"]=1
+        fi
         continue
       fi
-      seen["${key}"]=1
+
+      pos["${key}"]="${#QUOTA_FILES[@]}"
+      if [[ "${base}" == *"@"* ]]; then
+        has_at["${key}"]=1
+      else
+        has_at["${key}"]=0
+      fi
+
       QUOTA_FILES+=("${f}")
       QUOTA_FILE_PROTOS+=("${proto}")
     done < <(find "${dir}" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null | sort -z)
   done
 }
+
 
 quota_total_pages_for_indexes() {
   local total="${#QUOTA_VIEW_INDEXES[@]}"
@@ -1635,8 +1652,11 @@ except Exception:
 u=str(d.get("username") or "-")
 ql=int(d.get("quota_limit") or 0)
 qu=int(d.get("quota_used") or 0)
+
+# Limit tampil integer GB (GiB), USED tampil 2 desimal supaya terlihat progres walau belum 1GiB penuh.
 ql_gb=int(round(ql/(1024**3))) if ql else 0
-qu_gb=int(round(qu/(1024**3))) if qu else 0
+qu_gb=f"{(qu/(1024**3)):.2f}" if qu else "0.00"
+
 exp=str(d.get("expired_at") or "-")
 st=d.get("status") or {}
 flags=[]
@@ -1649,6 +1669,7 @@ if st.get("ip_limit_enabled"):
 print(f"{u}|{ql_gb}|{qu_gb}|{exp}|{','.join(flags)}")
 PY
 }
+
 
 quota_print_table_page() {
   # args: page
