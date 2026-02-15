@@ -2000,7 +2000,7 @@ QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 XRAY_ACCESS_LOG = "/var/log/xray/access.log"
 
-EMAIL_RE = re.compile(r"(?:email|user)\s*[:=]\s*([a-zA-Z0-9._-]{1,64})")
+EMAIL_RE = re.compile(r"(?:email|user)\s*[:=]\s*([A-Za-z0-9._%+-]{1,128}@[A-Za-z0-9._-]{1,128})")
 IP_RE = re.compile(r"\bfrom\s+(\d{1,3}(?:\.\d{1,3}){3})\:\d{1,5}\b")
 
 def now_iso():
@@ -2548,7 +2548,9 @@ def run_once(config_path, marker, api_server, dry_run=False):
 
     raw_limit = parse_int(meta.get("quota_limit") if isinstance(meta, dict) else 0)
     q_limit, q_unit, bpg = normalize_quota_limit(meta, raw_limit) if isinstance(meta, dict) else (raw_limit, "decimal", GB_DECIMAL)
-    q_used = parse_int(totals.get(username, 0))
+    prev_used = parse_int(meta.get("quota_used") if isinstance(meta, dict) else 0)
+    api_used = parse_int(totals.get(username, 0))
+    q_used = max(prev_used, api_used)
 
     exhausted = (q_limit > 0 and q_used >= q_limit)
     meta_changed = ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg) if isinstance(meta, dict) else False

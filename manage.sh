@@ -1644,7 +1644,7 @@ quota_build_view_indexes() {
 
 quota_read_summary_fields() {
   # args: json_file
-  # prints: username|quota_limit_gb|quota_used_gb|expired_at|flags
+  # prints: username|quota_limit|quota_used|expired_at|flags
   local qf="$1"
   need_python3
   python3 - <<'PY' "${qf}"
@@ -1660,13 +1660,33 @@ u=str(d.get("username") or "-")
 ql=int(d.get("quota_limit") or 0)
 qu=int(d.get("quota_used") or 0)
 
-# Limit tampil integer GB, USED tampil 2 desimal supaya terlihat progres.
 unit=str(d.get("quota_unit") or "").strip().lower()
 bpg=int(d.get("quota_bytes_per_gb") or 0)
 if bpg <= 0:
   bpg=(1024**3) if unit in ("gib","binary","1024","gibibyte") else (1000**3)
-ql_gb=int(round(ql/bpg)) if ql else 0
-qu_gb=f"{(qu/bpg):.2f}" if qu else "0.00"
+
+def human_used(n):
+  if n is None:
+    n = 0
+  try:
+    n = float(n)
+  except Exception:
+    n = 0
+  if n <= 0:
+    return "0 B"
+  gb=float(bpg)
+  mb=gb/1000.0
+  kb=mb/1000.0
+  if n >= gb:
+    return f"{(n/gb):.2f} GB"
+  if n >= mb:
+    return f"{(n/mb):.2f} MB"
+  if n >= kb:
+    return f"{(n/kb):.2f} KB"
+  return f"{int(n)} B"
+
+ql_show=f"{(ql/bpg):.0f} GB" if ql else "-"
+qu_show=human_used(qu)
 
 exp=str(d.get("expired_at") or "-")
 st=d.get("status") or {}
@@ -1677,7 +1697,7 @@ if st.get("ip_limit_locked"): flags.append("IP_LOCK")
 if st.get("ip_limit_enabled"):
   lim=int(st.get("ip_limit") or 0)
   flags.append(f"IP({lim})" if lim else "IP(ON)")
-print(f"{u}|{ql_gb}|{qu_gb}|{exp}|{','.join(flags)}")
+print(f"{u}|{ql_show}|{qu_show}|{exp}|{','.join(flags)}")
 PY
 }
 
@@ -1697,7 +1717,7 @@ quota_print_table_page() {
   if (( page < 0 )); then page=0; fi
   if (( pages > 0 && page >= pages )); then page=$((pages - 1)); fi
 
-  local start end i real_idx f proto fields username ql_gb qu_gb exp flags
+  local start end i real_idx f proto fields username ql_show qu_show exp flags
   start=$((page * QUOTA_PAGE_SIZE))
   end=$((start + QUOTA_PAGE_SIZE))
   if (( end > total )); then end="${total}"; fi
@@ -1707,10 +1727,8 @@ quota_print_table_page() {
     hr
   fi
 
-  printf "%-4s %-8s %-18s %-10s %-10s %-19s %-18s
-" "NO" "PROTO" "USERNAME" "LIMIT" "USED" "EXPIRED AT" "FLAGS"
-  printf "%-4s %-8s %-18s %-10s %-10s %-19s %-18s
-" "----" "--------" "------------------" "----------" "----------" "-------------------" "------------------"
+  printf "%-4s %-8s %-24s %-12s %-12s %-19s %-18s\n" "NO" "PROTO" "USERNAME" "LIMIT" "USED" "EXPIRED AT" "FLAGS"
+  printf "%-4s %-8s %-24s %-12s %-12s %-19s %-18s\n" "----" "--------" "------------------------" "------------" "------------" "-------------------" "------------------"
 
   for (( i=start; i<end; i++ )); do
     real_idx="${QUOTA_VIEW_INDEXES[$i]}"
@@ -1720,15 +1738,14 @@ quota_print_table_page() {
     fields="$(quota_read_summary_fields "${f}")"
     username="${fields%%|*}"
     fields="${fields#*|}"
-    ql_gb="${fields%%|*}"
+    ql_show="${fields%%|*}"
     fields="${fields#*|}"
-    qu_gb="${fields%%|*}"
+    qu_show="${fields%%|*}"
     fields="${fields#*|}"
     exp="${fields%%|*}"
     flags="${fields##*|}"
 
-    printf "%-4s %-8s %-18s %-10s %-10s %-19s %-18s
-" "$((i + 1))" "${proto}" "${username}" "${ql_gb} GB" "${qu_gb} GB" "${exp}" "${flags:-"-"}"
+    printf "%-4s %-8s %-24s %-12s %-12s %-19s %-18s\n" "$((i + 1))" "${proto}" "${username}" "${ql_show}" "${qu_show}" "${exp}" "${flags:-"-"}"
   done
 
   echo
