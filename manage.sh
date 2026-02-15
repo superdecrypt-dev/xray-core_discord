@@ -261,7 +261,7 @@ hr() {
 
 title() {
   clear || true
-  echo "Gembul Xray - CLI Menu Manajemen"
+  echo "HM Xray - CLI Menu Manajemen"
   echo "File: ${0}"
   hr
 }
@@ -1953,8 +1953,8 @@ quota_edit_flow() {
     block_reason="${fields##*|}"
 
     echo "Username     : ${username}"
-    echo "Quota Limit : ${ql_disp}"
-    echo "Quota Used  : ${qu_disp}"
+    echo "Quota Limit  : ${ql_disp}"
+    echo "Quota Used   : ${qu_disp}"
     echo "Expired At   : ${exp_date}"
     echo "IP Limit     : ${ip_state}"
     echo "Block Reason : ${block_reason}"
