@@ -1955,7 +1955,7 @@ def run_once(config_path, dry_run=False):
 def main():
   ap = argparse.ArgumentParser(prog="xray-expired")
   ap.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
-  ap.add_argument("--interval", type=int, default=10)
+  ap.add_argument("--interval", type=int, default=2)
   ap.add_argument("--once", action="store_true")
   ap.add_argument("--dry-run", action="store_true")
   args = ap.parse_args()
@@ -2004,7 +2004,7 @@ EMAIL_RE = re.compile(r"(?:email|user)\s*[:=]\s*([A-Za-z0-9._%+-]{1,128}@[A-Za-z
 IP_RE = re.compile(r"\bfrom\s+(\d{1,3}(?:\.\d{1,3}){3})\:\d{1,5}\b")
 
 def now_iso():
-  return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+  return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def load_json(path):
   with open(path, "r", encoding="utf-8") as f:
@@ -2104,7 +2104,7 @@ def unlock_user(username):
     st["ip_limit_locked"] = False
     if st.get("lock_reason") == "ip_limit":
       st["lock_reason"] = None
-      st["locked_at"] = None
+      st["locked_at"] = ""
     meta["status"] = st
     save_json_atomic(p, meta)
 
@@ -2241,7 +2241,7 @@ QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 
 def now_iso():
-  return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+  return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def load_json(path):
   with open(path, "r", encoding="utf-8") as f:
@@ -2306,7 +2306,7 @@ def update_quota_status(username, manual_block):
     else:
       if st.get("lock_reason") == "manual":
         st["lock_reason"] = None
-        st["locked_at"] = None
+        st["locked_at"] = ""
     meta["status"] = st
     save_json_atomic(p, meta)
 
@@ -2361,7 +2361,7 @@ GB_DECIMAL = 1000 ** 3
 GB_BINARY = 1024 ** 3
 
 def now_iso():
-  return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+  return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def load_json(path):
   with open(path, "r", encoding="utf-8") as f:
@@ -2396,23 +2396,21 @@ def normalize_quota_limit(meta, raw_limit):
   unit_raw = (meta.get("quota_unit") if isinstance(meta, dict) else "") or ""
   unit = str(unit_raw).strip().lower()
 
-  # Explicit binary unit
+  # Explicit binary unit (GiB)
   if unit in ("gib", "binary", "1024", "gibibyte"):
     return raw_limit, "gib", GB_BINARY
 
-  # Explicit decimal unit
+  # Explicit decimal unit (GB, 1000^3)
   if unit in ("decimal", "gb", "1000", "gigabyte"):
     return raw_limit, "decimal", GB_DECIMAL
 
   # Heuristic (backward compat):
-  # Older metadata often used GiB bytes while UI said "GB".
-  # If the limit is an exact multiple of GiB but not decimal GB, normalize to decimal.
-  if raw_limit > 0 and raw_limit % GB_BINARY == 0 and raw_limit % GB_DECIMAL != 0:
-    gb = raw_limit // GB_BINARY
-    return gb * GB_DECIMAL, "decimal", GB_DECIMAL
+  # If limit is an exact multiple of decimal GB but not GiB, keep decimal.
+  if raw_limit > 0 and raw_limit % GB_DECIMAL == 0 and raw_limit % GB_BINARY != 0:
+    return raw_limit, "decimal", GB_DECIMAL
 
-  # Default
-  return raw_limit, "decimal", GB_DECIMAL
+  # Default: treat as GiB bytes (1 GB = 1073741824 B)
+  return raw_limit, "gib", GB_BINARY
 
 def find_marker_rule(cfg, marker, outbound_tag):
   rules = ((cfg.get("routing") or {}).get("rules")) or []
@@ -2588,7 +2586,7 @@ def main():
   p_watch.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
   p_watch.add_argument("--marker", default="dummy-quota-user")
   p_watch.add_argument("--api-server", default=API_SERVER_DEFAULT)
-  p_watch.add_argument("--interval", type=int, default=10)
+  p_watch.add_argument("--interval", type=int, default=2)
   p_watch.add_argument("--dry-run", action="store_true")
 
   args = ap.parse_args()
@@ -2596,7 +2594,7 @@ def main():
   if args.cmd == "once":
     return run_once(args.config, args.marker, args.api_server, dry_run=args.dry_run)
 
-  interval = max(5, int(args.interval))
+  interval = max(2, int(args.interval))
   while True:
     try:
       run_once(args.config, args.marker, args.api_server, dry_run=args.dry_run)
@@ -2617,7 +2615,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xray-expired --config /usr/local/etc/xray/config.json --interval 10
+ExecStart=/usr/local/bin/xray-expired --config /usr/local/etc/xray/config.json --interval 2
 Restart=always
 RestartSec=2
 Nice=10
@@ -2650,7 +2648,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xray-quota watch --config /usr/local/etc/xray/config.json --marker dummy-quota-user --interval 10
+ExecStart=/usr/local/bin/xray-quota watch --config /usr/local/etc/xray/config.json --marker dummy-quota-user --interval 2
 Restart=always
 RestartSec=3
 
@@ -2764,6 +2762,7 @@ main() {
   setup_logrotate
   configure_fail2ban_aggressive_jails
   sanity_check
+  ok "Setup telah selesai ✅"
 }
 
 main "$@"

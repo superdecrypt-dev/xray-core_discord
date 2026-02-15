@@ -968,7 +968,7 @@ write_account_artifacts() {
   domain="$(detect_domain)"
   ip="$(detect_public_ip_ipapi)"
   created="$(now_ts)"
-  expired="$(date -d "+${days} days" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')"
+  expired="$(date -d "+${days} days" '+%Y-%m-%d' 2>/dev/null || date '+%Y-%m-%d')"
 
   local acc_file quota_file
   acc_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
@@ -1654,7 +1654,7 @@ quota_build_view_indexes() {
 
 quota_read_summary_fields() {
   # args: json_file
-  # prints: username|quota_limit_gb|quota_used_gb|expired_at|flags
+  # prints: username|quota_limit_disp|quota_used_disp|expired_at_date|flags_disp
   local qf="$1"
   need_python3
   python3 - <<'PY' "${qf}"
@@ -1663,29 +1663,60 @@ p=sys.argv[1]
 try:
   d=json.load(open(p,'r',encoding='utf-8'))
 except Exception:
-  print("-|-|-|-|BROKEN")
+  print("-|0 GB|0 B|-|BROKEN")
   raise SystemExit(0)
 
 u=str(d.get("username") or "-")
 ql=int(d.get("quota_limit") or 0)
 qu=int(d.get("quota_used") or 0)
 
-# Limit tampil integer GB (GiB), USED tampil 2 desimal supaya terlihat progres walau belum 1GiB penuh.
+# Limit tampil integer GB (GiB).
 ql_gb=int(round(ql/(1024**3))) if ql else 0
-qu_gb=f"{(qu/(1024**3)):.2f}" if qu else "0.00"
+ql_disp=f"{ql_gb} GB" if ql_gb else "0 GB"
+
+def used_disp(b):
+  try:
+    b=int(b)
+  except Exception:
+    b=0
+  if b >= 1024**3:
+    return f"{b/(1024**3):.2f} GB"
+  if b >= 1024**2:
+    return f"{b/(1024**2):.2f} MB"
+  if b >= 1024:
+    return f"{b/1024:.2f} KB"
+  return f"{b} B"
+
+qu_disp=used_disp(qu)
 
 exp=str(d.get("expired_at") or "-")
+exp_date=exp[:10] if exp and exp != "-" else "-"
+
 st=d.get("status") or {}
-flags=[]
-if st.get("manual_block"): flags.append("MANUAL")
-if st.get("quota_exhausted"): flags.append("QUOTA")
-if st.get("ip_limit_locked"): flags.append("IP_LOCK")
-if st.get("ip_limit_enabled"):
-  lim=int(st.get("ip_limit") or 0)
-  flags.append(f"IP({lim})" if lim else "IP(ON)")
-print(f"{u}|{ql_gb}|{qu_gb}|{exp}|{','.join(flags)}")
+ip_en=bool(st.get("ip_limit_enabled"))
+try:
+  ip_lim=int(st.get("ip_limit") or 0)
+except Exception:
+  ip_lim=0
+
+ip_str="ON" if ip_en else "OFF"
+if ip_en:
+  ip_str += f"({ip_lim})" if ip_lim else "(ON)"
+
+lr=str(st.get("lock_reason") or "").strip().lower()
+reason="-"
+if st.get("manual_block") or lr == "manual":
+  reason="MANUAL"
+elif st.get("quota_exhausted") or lr == "quota":
+  reason="QUOTA"
+elif st.get("ip_limit_locked") or lr == "ip_limit":
+  reason="IP_LIMIT"
+
+flags=f"IP_LIMIT={ip_str} | BLOCK={reason}"
+print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{flags}")
 PY
 }
+
 
 
 quota_print_table_page() {
@@ -1703,7 +1734,7 @@ quota_print_table_page() {
   if (( page < 0 )); then page=0; fi
   if (( pages > 0 && page >= pages )); then page=$((pages - 1)); fi
 
-  local start end i real_idx f proto fields username ql_gb qu_gb ql_disp qu_disp exp flags
+  local start end i real_idx f proto fields username ql_disp qu_disp exp_date
   start=$((page * QUOTA_PAGE_SIZE))
   end=$((start + QUOTA_PAGE_SIZE))
   if (( end > total )); then end="${total}"; fi
@@ -1713,10 +1744,10 @@ quota_print_table_page() {
     hr
   fi
 
-  printf "%-4s %-8s %-18s %-10s %-10s %-19s %-18s
-" "NO" "PROTO" "USERNAME" "LIMIT" "USED" "EXPIRED AT" "FLAGS"
-  printf "%-4s %-8s %-18s %-10s %-10s %-19s %-18s
-" "----" "--------" "------------------" "----------" "----------" "-------------------" "------------------"
+  printf "%-4s %-8s %-18s %-10s %-12s %-10s\n" "NO" "PROTO" "USERNAME" "LIMIT" "USED" "EXPIRED AT"
+
+  printf "%-4s %-8s %-18s %-10s %-12s %-10s\n" "----" "--------" "------------------" "----------" "------------" "----------"
+
 
   for (( i=start; i<end; i++ )); do
     real_idx="${QUOTA_VIEW_INDEXES[$i]}"
@@ -1726,18 +1757,13 @@ quota_print_table_page() {
     fields="$(quota_read_summary_fields "${f}")"
     username="${fields%%|*}"
     fields="${fields#*|}"
-    ql_gb="${fields%%|*}"
+    ql_disp="${fields%%|*}"
     fields="${fields#*|}"
-    qu_gb="${fields%%|*}"
+    qu_disp="${fields%%|*}"
     fields="${fields#*|}"
-    exp="${fields%%|*}"
-    flags="${fields##*|}"
+    exp_date="${fields%%|*}"
+    printf "%-4s %-8s %-18s %-10s %-12s %-10s\n" "$((i + 1))" "${proto}" "${username}" "${ql_disp}" "${qu_disp}" "${exp_date}"
 
-    ql_disp="$(quota_disp "${ql_gb}" "GB")"
-    qu_disp="$(quota_disp "${qu_gb}" "GB")"
-
-    printf "%-4s %-8s %-18s %-10s %-10s %-19s %-18s
-" "$((i + 1))" "${proto}" "${username}" "${ql_disp}" "${qu_disp}" "${exp}" "${flags:-"-"}"
   done
 
   echo
@@ -1791,10 +1817,35 @@ quota_view_json() {
   title
   echo "Quota metadata: ${qf}"
   hr
+  need_python3
   if have_cmd less; then
-    less -R "${qf}"
+    python3 - <<'PY' "${qf}" | less -R
+import json, sys
+p=sys.argv[1]
+try:
+  d=json.load(open(p,'r',encoding='utf-8'))
+except Exception:
+  print(open(p,'r',encoding='utf-8',errors='replace').read())
+  raise SystemExit(0)
+exp=d.get("expired_at")
+if isinstance(exp, str) and exp:
+  d["expired_at"]=exp[:10]
+print(json.dumps(d, ensure_ascii=False, indent=2))
+PY
   else
-    cat "${qf}"
+    python3 - <<'PY' "${qf}"
+import json, sys
+p=sys.argv[1]
+try:
+  d=json.load(open(p,'r',encoding='utf-8'))
+except Exception:
+  print(open(p,'r',encoding='utf-8',errors='replace').read())
+  raise SystemExit(0)
+exp=d.get("expired_at")
+if isinstance(exp, str) and exp:
+  d["expired_at"]=exp[:10]
+print(json.dumps(d, ensure_ascii=False, indent=2))
+PY
   fi
   hr
   pause
@@ -1826,22 +1877,22 @@ quota_edit_flow() {
     echo "File  : ${qf}"
     hr
 
-    local fields username ql_gb qu_gb exp flags
+    local fields username ql_disp qu_disp exp_date flags_disp
     fields="$(quota_read_summary_fields "${qf}")"
     username="${fields%%|*}"
     fields="${fields#*|}"
-    ql_gb="${fields%%|*}"
+    ql_disp="${fields%%|*}"
     fields="${fields#*|}"
-    qu_gb="${fields%%|*}"
+    qu_disp="${fields%%|*}"
     fields="${fields#*|}"
-    exp="${fields%%|*}"
-    flags="${fields##*|}"
+    exp_date="${fields%%|*}"
+    flags_disp="${fields##*|}"
 
     echo "Username     : ${username}"
-    echo "Quota Limit : $(quota_disp "${ql_gb}" "GB")"
-    echo "Quota Used  : $(quota_disp "${qu_gb}" "GB")"
-    echo "Expired At   : ${exp}"
-    echo "Flags        : ${flags:-"-"}"
+    echo "Quota Limit : ${ql_disp}"
+    echo "Quota Used  : ${qu_disp}"
+    echo "Expired At   : ${exp_date}"
+    echo "Flags        : ${flags_disp:-"-"}"
     hr
 
     echo "  1) View JSON"
