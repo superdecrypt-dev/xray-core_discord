@@ -26,10 +26,10 @@ CLOUDFLARE_API_TOKEN="ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ"
 
 # Daftar domain induk yang disediakan (private)
 PROVIDED_ROOT_DOMAINS=(
-  "vyxara1.web.id"
-  "vyxara2.web.id"
-  "vyxara1.qzz.io"
-  "vyxara2.qzz.io"
+"vyxara1.web.id"
+"vyxara2.web.id"
+"vyxara1.qzz.io"
+"vyxara2.qzz.io"
 )
 
 # NOTE: Script ini dipakai pribadi. Isi token di atas jika tidak memakai env var.
@@ -86,8 +86,8 @@ PY
     [[ $? -eq 0 ]] || die "Debian minimal 11. Versi terdeteksi: $ver"
     ok "OS: Debian $ver ($codename)"
   else
-    die "OS tidak didukung: $id. Hanya Ubuntu >=20.04 atau Debian >=11."
-  fi
+  die "OS tidak didukung: $id. Hanya Ubuntu >=20.04 atau Debian >=11."
+fi
 }
 
 install_base_deps() {
@@ -119,9 +119,9 @@ domain_menu() {
       ok "Domain valid: $DOMAIN"
       break
     else
-      echo "Domain tidak valid. Coba lagi."
-    fi
-  done
+    echo "Domain tidak valid. Coba lagi."
+  fi
+done
 }
 
 # =========================
@@ -163,41 +163,41 @@ cf_api() {
   if [[ -n "$data" ]]; then
     resp="$(curl -sS -L -X "$method" "$url"       -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"       -H "Content-Type: application/json"       --connect-timeout 10       --max-time 30       --data "$data"       -w $'\n%{http_code}' || true)"
   else
-    resp="$(curl -sS -L -X "$method" "$url"       -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"       -H "Content-Type: application/json"       --connect-timeout 10       --max-time 30       -w $'\n%{http_code}' || true)"
-  fi
+  resp="$(curl -sS -L -X "$method" "$url"       -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"       -H "Content-Type: application/json"       --connect-timeout 10       --max-time 30       -w $'\n%{http_code}' || true)"
+fi
 
-  code="${resp##*$'\n'}"
-  body="${resp%$'\n'*}"
+code="${resp##*$'\n'}"
+body="${resp%$'\n'*}"
 
-  if [[ -z "${body:-}" ]]; then
-    echo "[Cloudflare] Empty response (HTTP ${code:-?}) for ${endpoint}" >&2
-    return 1
-  fi
+if [[ -z "${body:-}" ]]; then
+  echo "[Cloudflare] Empty response (HTTP ${code:-?}) for ${endpoint}" >&2
+  return 1
+fi
 
-  trimmed="${body#"${body%%[![:space:]]*}"}"
-  if [[ ! "$trimmed" =~ ^[\{\[] ]]; then
-    echo "[Cloudflare] Non-JSON response (HTTP ${code:-?}) for ${endpoint}:" >&2
-    echo "$body" >&2
-    return 1
-  fi
+trimmed="${body#"${body%%[![:space:]]*}"}"
+if [[ ! "$trimmed" =~ ^[\{\[] ]]; then
+  echo "[Cloudflare] Non-JSON response (HTTP ${code:-?}) for ${endpoint}:" >&2
+  echo "$body" >&2
+  return 1
+fi
 
-  if [[ ! "${code:-}" =~ ^2 ]]; then
-    echo "[Cloudflare] HTTP ${code:-?} for ${endpoint}:" >&2
-    echo "$body" >&2
-    return 1
-  fi
+if [[ ! "${code:-}" =~ ^2 ]]; then
+  echo "[Cloudflare] HTTP ${code:-?} for ${endpoint}:" >&2
+  echo "$body" >&2
+  return 1
+fi
 
-  printf '%s' "$body"
+printf '%s' "$body"
 }
 
 
 cf_list_zones() {
   cf_api GET "/zones?per_page=50" | jq -r '
-    if .success == true then
-      .result[] | "\(.id)	\(.name)"
-    else
-      empty
-    end
+  if .success == true then
+    .result[] | "\(.id)	\(.name)"
+  else
+  empty
+  end
   '
 }
 cf_get_zone_id_by_name() {
@@ -272,7 +272,7 @@ cf_create_a_record() {
   payload="$(cat <<EOF
 {"type":"A","name":"$name","content":"$ip","ttl":1,"proxied":$proxied}
 EOF
-)"
+  )"
   cf_api POST "/zones/${zone_id}/dns_records" "$payload" >/dev/null || die "Gagal membuat A record Cloudflare untuk $name"
 }
 gen_subdomain_random() {
@@ -310,43 +310,43 @@ cf_prepare_subdomain_a_record() {
         if [[ "$cip" == "$ip" ]]; then
           any_same="1"
         else
-          any_diff="1"
-        fi
-      done
-
-      if [[ "$any_same" == "1" ]]; then
-        warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
-        if confirm_yn "Lanjut menggunakan domain ini?"; then
-          ok "Lanjut."
-          return 0
-        fi
-        die "Dibatalkan oleh user."
-      fi
-
-      if [[ "$any_diff" == "1" ]]; then
-        die "Subdomain $fqdn sudah ada di Cloudflare tetapi IP berbeda (${rec_ips[*]}). Gunakan nama subdomain lain."
-      fi
-    fi
-  fi
-
-  # 2) Sesuai desain sebelumnya: hapus A record lain di zone yang IP-nya sama (kecuali fqdn target)
-  local same_ip=()
-  mapfile -t same_ip < <(cf_list_a_records_by_ip "$zone_id" "$ip" || true)
-  if [[ ${#same_ip[@]} -gt 0 ]]; then
-    local line
-    for line in "${same_ip[@]}"; do
-      local rid="${line%%$'	'*}"
-      local rname="${line#*$'	'}"
-      if [[ "$rname" != "$fqdn" ]]; then
-        warn "Ditemukan A record lain dengan IP sama ($ip): $rname -> $ip"
-        warn "Menghapus A record: $rname"
-        cf_delete_record "$zone_id" "$rid"
+        any_diff="1"
       fi
     done
-  fi
 
-  ok "Membuat DNS A record: $fqdn -> $ip"
-  cf_create_a_record "$zone_id" "$fqdn" "$ip" "$proxied"
+    if [[ "$any_same" == "1" ]]; then
+      warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
+      if confirm_yn "Lanjut menggunakan domain ini?"; then
+        ok "Lanjut."
+        return 0
+      fi
+      die "Dibatalkan oleh user."
+    fi
+
+    if [[ "$any_diff" == "1" ]]; then
+      die "Subdomain $fqdn sudah ada di Cloudflare tetapi IP berbeda (${rec_ips[*]}). Gunakan nama subdomain lain."
+    fi
+  fi
+fi
+
+# 2) Sesuai desain sebelumnya: hapus A record lain di zone yang IP-nya sama (kecuali fqdn target)
+local same_ip=()
+mapfile -t same_ip < <(cf_list_a_records_by_ip "$zone_id" "$ip" || true)
+if [[ ${#same_ip[@]} -gt 0 ]]; then
+  local line
+  for line in "${same_ip[@]}"; do
+    local rid="${line%%$'	'*}"
+    local rname="${line#*$'	'}"
+    if [[ "$rname" != "$fqdn" ]]; then
+      warn "Ditemukan A record lain dengan IP sama ($ip): $rname -> $ip"
+      warn "Menghapus A record: $rname"
+      cf_delete_record "$zone_id" "$rid"
+    fi
+  done
+fi
+
+ok "Membuat DNS A record: $fqdn -> $ip"
+cf_create_a_record "$zone_id" "$fqdn" "$ip" "$proxied"
 }
 domain_menu_v2() {
   echo "============================================"
@@ -385,88 +385,88 @@ domain_menu_v2() {
         CF_ZONE_ID=""
         break
       else
-        echo "Domain tidak valid. Coba lagi."
-      fi
-    done
-    return 0
-  fi
-
-  # Gunakan domain yang disediakan (Cloudflare)
-  VPS_IPV4="$(get_public_ipv4)"
-  ok "Public IPv4 VPS: $VPS_IPV4"
-
-  [[ ${#PROVIDED_ROOT_DOMAINS[@]} -gt 0 ]] || die "Daftar domain induk (PROVIDED_ROOT_DOMAINS) kosong."
-
-  echo
-  echo "Pilih domain induk"
-  local i=1
-  local root=""
-  for root in "${PROVIDED_ROOT_DOMAINS[@]}"; do
-    echo "  $i. $root"
-    i=$((i+1))
+      echo "Domain tidak valid. Coba lagi."
+    fi
   done
+  return 0
+fi
 
-  local pick=""
-  while true; do
-    read -r -p "Pilih nomor domain induk (1-${#PROVIDED_ROOT_DOMAINS[@]}): " pick
-    [[ "$pick" =~ ^[0-9]+$ ]] || { echo "Input harus angka."; continue; }
-    [[ "$pick" -ge 1 && "$pick" -le ${#PROVIDED_ROOT_DOMAINS[@]} ]] || { echo "Di luar range."; continue; }
+# Gunakan domain yang disediakan (Cloudflare)
+VPS_IPV4="$(get_public_ipv4)"
+ok "Public IPv4 VPS: $VPS_IPV4"
+
+[[ ${#PROVIDED_ROOT_DOMAINS[@]} -gt 0 ]] || die "Daftar domain induk (PROVIDED_ROOT_DOMAINS) kosong."
+
+echo
+echo "Pilih domain induk"
+local i=1
+local root=""
+for root in "${PROVIDED_ROOT_DOMAINS[@]}"; do
+  echo "  $i. $root"
+  i=$((i+1))
+done
+
+local pick=""
+while true; do
+  read -r -p "Pilih nomor domain induk (1-${#PROVIDED_ROOT_DOMAINS[@]}): " pick
+  [[ "$pick" =~ ^[0-9]+$ ]] || { echo "Input harus angka."; continue; }
+  [[ "$pick" -ge 1 && "$pick" -le ${#PROVIDED_ROOT_DOMAINS[@]} ]] || { echo "Di luar range."; continue; }
+  break
+done
+
+ACME_ROOT_DOMAIN="${PROVIDED_ROOT_DOMAINS[$((pick-1))]}"
+ok "Domain induk terpilih: $ACME_ROOT_DOMAIN"
+
+CF_ZONE_ID="$(cf_get_zone_id_by_name "$ACME_ROOT_DOMAIN" || true)"
+[[ -n "${CF_ZONE_ID:-}" ]] || die "Zone Cloudflare untuk $ACME_ROOT_DOMAIN tidak ditemukan / token tidak punya akses (butuh Zone:Read + DNS:Edit)."
+
+echo
+echo "Pilih metode pembuatan subdomain"
+echo "1. generate secara acak"
+echo "2. input sendiri"
+
+local mth=""
+while true; do
+  read -r -p "Pilih opsi (1-2): " mth
+  case "$mth" in
+    1|2) break ;;
+    *) echo "Pilihan tidak valid." ;;
+  esac
+done
+
+local sub=""
+if [[ "$mth" == "1" ]]; then
+  sub="$(gen_subdomain_random)"
+  ok "Subdomain generated: $sub"
+else
+while true; do
+  read -r -p "Masukkan nama subdomain: " sub
+  sub="${sub,,}"
+  if validate_subdomain "$sub"; then
+    ok "Subdomain valid: $sub"
     break
-  done
-
-  ACME_ROOT_DOMAIN="${PROVIDED_ROOT_DOMAINS[$((pick-1))]}"
-  ok "Domain induk terpilih: $ACME_ROOT_DOMAIN"
-
-  CF_ZONE_ID="$(cf_get_zone_id_by_name "$ACME_ROOT_DOMAIN" || true)"
-  [[ -n "${CF_ZONE_ID:-}" ]] || die "Zone Cloudflare untuk $ACME_ROOT_DOMAIN tidak ditemukan / token tidak punya akses (butuh Zone:Read + DNS:Edit)."
-
-  echo
-  echo "Pilih metode pembuatan subdomain"
-  echo "1. generate secara acak"
-  echo "2. input sendiri"
-
-  local mth=""
-  while true; do
-    read -r -p "Pilih opsi (1-2): " mth
-    case "$mth" in
-      1|2) break ;;
-      *) echo "Pilihan tidak valid." ;;
-    esac
-  done
-
-  local sub=""
-  if [[ "$mth" == "1" ]]; then
-    sub="$(gen_subdomain_random)"
-    ok "Subdomain generated: $sub"
-  else
-    while true; do
-      read -r -p "Masukkan nama subdomain: " sub
-      sub="${sub,,}"
-      if validate_subdomain "$sub"; then
-        ok "Subdomain valid: $sub"
-        break
-      fi
-      echo "Subdomain tidak valid. Hanya huruf kecil, angka, titik, dan strip (-). Tanpa spasi/kapital/karakter aneh."
-    done
   fi
+  echo "Subdomain tidak valid. Hanya huruf kecil, angka, titik, dan strip (-). Tanpa spasi/kapital/karakter aneh."
+done
+fi
 
 
-  echo
-  if confirm_yn "Aktifkan Cloudflare proxy (orange cloud) untuk DNS A record?"; then
-    CF_PROXIED="true"
-    ok "Cloudflare proxy: ON (proxied=true)"
-  else
-    CF_PROXIED="false"
-    ok "Cloudflare proxy: OFF (proxied=false)"
-  fi
-  DOMAIN="${sub}.${ACME_ROOT_DOMAIN}"
-  ACME_WILDCARD_DOMAIN="$DOMAIN"
-  ok "Domain final: $DOMAIN"
+echo
+if confirm_yn "Aktifkan Cloudflare proxy (orange cloud) untuk DNS A record?"; then
+  CF_PROXIED="true"
+  ok "Cloudflare proxy: ON (proxied=true)"
+else
+CF_PROXIED="false"
+ok "Cloudflare proxy: OFF (proxied=false)"
+fi
+DOMAIN="${sub}.${ACME_ROOT_DOMAIN}"
+ACME_WILDCARD_DOMAIN="$DOMAIN"
+ok "Domain final: $DOMAIN"
 
-  cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"
+cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"
 
-  ACME_CERT_MODE="dns_cf_wildcard"
-  ok "Mode sertifikat: wildcard dns_cf untuk ${DOMAIN} (meliputi *.$DOMAIN)"
+ACME_CERT_MODE="dns_cf_wildcard"
+ok "Mode sertifikat: wildcard dns_cf untuk ${DOMAIN} (meliputi *.$DOMAIN)"
 }
 
 
@@ -522,14 +522,14 @@ install_nginx_official_repo() {
 
   mkdir -p /usr/share/keyrings
   local key_tmp key_gpg_tmp
-key_tmp="$(mktemp)"
-key_gpg_tmp="$(mktemp)"
+  key_tmp="$(mktemp)"
+  key_gpg_tmp="$(mktemp)"
 
-curl -fsSL https://nginx.org/keys/nginx_signing.key -o "$key_tmp"
-gpg --dearmor <"$key_tmp" >"$key_gpg_tmp"
-install -m 644 "$key_gpg_tmp" /usr/share/keyrings/nginx-archive-keyring.gpg
+  curl -fsSL https://nginx.org/keys/nginx_signing.key -o "$key_tmp"
+  gpg --dearmor <"$key_tmp" >"$key_gpg_tmp"
+  install -m 644 "$key_gpg_tmp" /usr/share/keyrings/nginx-archive-keyring.gpg
 
-rm -f "$key_tmp" "$key_gpg_tmp"
+  rm -f "$key_tmp" "$key_gpg_tmp"
 
   local distro
   if [[ "$ID" == "ubuntu" ]]; then
@@ -537,22 +537,22 @@ rm -f "$key_tmp" "$key_gpg_tmp"
   elif [[ "$ID" == "debian" ]]; then
     distro="debian"
   else
-    die "OS tidak didukung untuk repo nginx.org"
-  fi
+  die "OS tidak didukung untuk repo nginx.org"
+fi
 
-  cat > /etc/apt/sources.list.d/nginx.list <<EOF
+cat > /etc/apt/sources.list.d/nginx.list <<EOF
 deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${distro}/ ${codename} nginx
 EOF
 
-  cat > /etc/apt/preferences.d/99nginx <<'EOF'
+cat > /etc/apt/preferences.d/99nginx <<'EOF'
 Package: *
 Pin: origin nginx.org
 Pin-Priority: 900
 EOF
 
-  apt-get update -y
-  apt-get install -y nginx jq
-  ok "Nginx terpasang dari repo resmi nginx.org (mainline)."
+apt-get update -y
+apt-get install -y nginx jq
+ok "Nginx terpasang dari repo resmi nginx.org (mainline)."
 }
 
 install_acme_and_issue_cert() {
@@ -577,29 +577,29 @@ install_acme_and_issue_cert() {
     export CF_Token="$CLOUDFLARE_API_TOKEN"
 
     /root/.acme.sh/acme.sh --issue --force --dns dns_cf \
-      -d "$DOMAIN" -d "*.$DOMAIN" \
-      || die "Gagal issue sertifikat wildcard via dns_cf (pastikan token Cloudflare valid)."
+    -d "$DOMAIN" -d "*.$DOMAIN" \
+    || die "Gagal issue sertifikat wildcard via dns_cf (pastikan token Cloudflare valid)."
 
     /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
-      --key-file "$CERT_PRIVKEY" \
-      --fullchain-file "$CERT_FULLCHAIN" \
-      --reloadcmd "systemctl restart nginx || true" >/dev/null
+    --key-file "$CERT_PRIVKEY" \
+    --fullchain-file "$CERT_FULLCHAIN" \
+    --reloadcmd "systemctl restart nginx || true" >/dev/null
   else
-    ok "Issue sertifikat untuk $DOMAIN via acme.sh (standalone port 80)..."
-    /root/.acme.sh/acme.sh --issue --force --standalone -d "$DOMAIN" --httpport 80 \
-      || die "Gagal issue sertifikat (pastikan port 80 terbuka & DNS domain mengarah ke VPS)."
+  ok "Issue sertifikat untuk $DOMAIN via acme.sh (standalone port 80)..."
+  /root/.acme.sh/acme.sh --issue --force --standalone -d "$DOMAIN" --httpport 80 \
+  || die "Gagal issue sertifikat (pastikan port 80 terbuka & DNS domain mengarah ke VPS)."
 
-    /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
-      --key-file "$CERT_PRIVKEY" \
-      --fullchain-file "$CERT_FULLCHAIN" \
-      --reloadcmd "systemctl restart nginx || true" >/dev/null
-  fi
+  /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+  --key-file "$CERT_PRIVKEY" \
+  --fullchain-file "$CERT_FULLCHAIN" \
+  --reloadcmd "systemctl restart nginx || true" >/dev/null
+fi
 
-  chmod 600 "$CERT_PRIVKEY" "$CERT_FULLCHAIN"
+chmod 600 "$CERT_PRIVKEY" "$CERT_FULLCHAIN"
 
-  ok "Sertifikat tersimpan:"
-  ok "  - $CERT_FULLCHAIN"
-  ok "  - $CERT_PRIVKEY"
+ok "Sertifikat tersimpan:"
+ok "  - $CERT_FULLCHAIN"
+ok "  - $CERT_PRIVKEY"
 }
 
 install_xray() {
@@ -628,7 +628,9 @@ write_xray_config() {
   P_VLESS_GRPC="$(pick_port)"
   P_VMESS_GRPC="$(pick_port)"
   P_TROJAN_GRPC="$(pick_port)"
-  P_API="$(pick_port)"
+  P_API="10080"
+
+  is_port_free "$P_API" || die "Port API Xray ($P_API) sedang dipakai. Bebaskan port ini atau ubah konfigurasi."
 
   local I_VLESS_WS I_VMESS_WS I_TROJAN_WS
   local I_VLESS_HUP I_VMESS_HUP I_TROJAN_HUP
@@ -773,7 +775,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_VLESS_WS},
       "protocol": "vless",
-      "tag": "vless-ws",
+      "tag": "default@vless-ws",
       "settings": {
         "clients": [
           {
@@ -803,7 +805,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_VMESS_WS},
       "protocol": "vmess",
-      "tag": "vmess-ws",
+      "tag": "default@vmess-ws",
       "settings": {
         "clients": [
           {
@@ -833,7 +835,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_TROJAN_WS},
       "protocol": "trojan",
-      "tag": "trojan-ws",
+      "tag": "default@trojan-ws",
       "settings": {
         "clients": [
           {
@@ -862,7 +864,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_VLESS_HUP},
       "protocol": "vless",
-      "tag": "vless-hup",
+      "tag": "default@vless-hup",
       "settings": {
         "clients": [
           {
@@ -892,7 +894,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_VMESS_HUP},
       "protocol": "vmess",
-      "tag": "vmess-hup",
+      "tag": "default@vmess-hup",
       "settings": {
         "clients": [
           {
@@ -922,7 +924,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_TROJAN_HUP},
       "protocol": "trojan",
-      "tag": "trojan-hup",
+      "tag": "default@trojan-hup",
       "settings": {
         "clients": [
           {
@@ -951,7 +953,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_VLESS_GRPC},
       "protocol": "vless",
-      "tag": "vless-grpc",
+      "tag": "default@vless-grpc",
       "settings": {
         "clients": [
           {
@@ -981,7 +983,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_VMESS_GRPC},
       "protocol": "vmess",
-      "tag": "vmess-grpc",
+      "tag": "default@vmess-grpc",
       "settings": {
         "clients": [
           {
@@ -1011,7 +1013,7 @@ write_xray_config() {
       "listen": "127.0.0.1",
       "port": ${P_TROJAN_GRPC},
       "protocol": "trojan",
-      "tag": "trojan-grpc",
+      "tag": "default@trojan-grpc",
       "settings": {
         "clients": [
           {
@@ -1141,7 +1143,7 @@ write_nginx_main_conf() {
 
   cat > /etc/nginx/nginx.conf <<EOF
 user ${nginx_user};
-worker_processes auto;
+worker_processes 1;
 pid /var/run/nginx.pid;
 
 events {
@@ -1609,30 +1611,30 @@ expect {
 }
 EOF
     else
-      # Fallback legacy (lebih rentan), tapi tetap kita log.
-      set +o pipefail
-      yes | wgcf register >"$reg_log" 2>&1
-      set -o pipefail
-    fi
-
-    [[ -f wgcf-account.toml ]] || {
-      tail -n 120 "$reg_log" >&2 || true
-      die "wgcf register gagal. Lihat log: $reg_log"
-    }
+    # Fallback legacy (lebih rentan), tapi tetap kita log.
+    set +o pipefail
+    yes | wgcf register >"$reg_log" 2>&1
+    set -o pipefail
   fi
 
-  local gen_log="/tmp/wgcf-generate.log"
-  wgcf generate >"$gen_log" 2>&1 || {
-    tail -n 120 "$gen_log" >&2 || true
-    die "wgcf generate gagal. Lihat log: $gen_log"
+  [[ -f wgcf-account.toml ]] || {
+    tail -n 120 "$reg_log" >&2 || true
+    die "wgcf register gagal. Lihat log: $reg_log"
   }
-  [[ -f wgcf-profile.conf ]] || {
-    tail -n 120 "$gen_log" >&2 || true
-    die "wgcf-profile.conf tidak ditemukan setelah generate."
-  }
+fi
 
-  popd >/dev/null || die "Gagal kembali dari /etc/wgcf."
-  ok "wgcf selesai."
+local gen_log="/tmp/wgcf-generate.log"
+wgcf generate >"$gen_log" 2>&1 || {
+  tail -n 120 "$gen_log" >&2 || true
+  die "wgcf generate gagal. Lihat log: $gen_log"
+}
+[[ -f wgcf-profile.conf ]] || {
+  tail -n 120 "$gen_log" >&2 || true
+  die "wgcf-profile.conf tidak ditemukan setelah generate."
+}
+
+popd >/dev/null || die "Gagal kembali dari /etc/wgcf."
+ok "wgcf selesai."
 }
 
 setup_wireproxy() {
@@ -1685,8 +1687,8 @@ enable_cron_service() {
   ok "Enable cron..."
 
   systemctl enable cron --now >/dev/null 2>&1 \
-    || systemctl enable crond --now >/dev/null 2>&1 \
-    || true
+  || systemctl enable crond --now >/dev/null 2>&1 \
+  || true
   systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
 
   ok "cron aktif."
@@ -1785,7 +1787,7 @@ install_management_scripts() {
   mkdir -p /opt/account/vless /opt/account/vmess /opt/account/trojan
   mkdir -p /opt/quota/vless /opt/quota/vmess /opt/quota/trojan
 
-  cat > /usr/local/bin/user-expired <<'EOF'
+  cat > /usr/local/bin/xray-expired <<'EOF'
 #!/usr/bin/env python3
 import argparse
 import json
@@ -1824,11 +1826,17 @@ def save_json_atomic(path, data):
   tmp = f"{path}.tmp"
   with open(tmp, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
-    f.write("\n")
+    f.write("
+")
   os.replace(tmp, path)
 
 def restart_xray():
-  subprocess.run(["systemctl", "restart", "xray"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  subprocess.run(
+    ["systemctl", "restart", "xray"],
+    check=False,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+  )
 
 def remove_user_from_inbounds(cfg, username):
   changed = False
@@ -1860,17 +1868,6 @@ def remove_user_from_rules(cfg, username):
       changed = True
   return changed
 
-def delete_user_files(username):
-  for proto in PROTO_DIRS:
-    acc = os.path.join(ACCOUNT_ROOT, proto, f"{username}.txt")
-    quota = os.path.join(QUOTA_ROOT, proto, f"{username}.json")
-    for p in (acc, quota):
-      try:
-        if os.path.exists(p):
-          os.remove(p)
-      except Exception:
-        pass
-
 def iter_quota_files():
   for proto in PROTO_DIRS:
     d = os.path.join(QUOTA_ROOT, proto)
@@ -1880,25 +1877,51 @@ def iter_quota_files():
       if name.endswith(".json"):
         yield proto, os.path.join(d, name)
 
+def quota_key_from_path(path):
+  return os.path.splitext(os.path.basename(path))[0]
+
 def is_expired(meta, ts):
   exp = parse_iso8601(meta.get("expired_at") if isinstance(meta, dict) else None)
   if exp is None:
     return False
   return exp <= ts
 
+def delete_user_artifacts(proto, user_key, quota_path):
+  # 1) quota json: /opt/quota/<proto>/<username@protocol>.json
+  try:
+    if os.path.exists(quota_path):
+      os.remove(quota_path)
+  except Exception:
+    pass
+
+  # 2) account txt: /opt/account/<proto>/<username@protocol>.txt
+  acc = os.path.join(ACCOUNT_ROOT, proto, f"{user_key}.txt")
+  try:
+    if os.path.exists(acc):
+      os.remove(acc)
+  except Exception:
+    pass
+
 def run_once(config_path, dry_run=False):
   ts = now_utc()
-  expired = []
-  for _, path in iter_quota_files():
+  expired = []  # list[(proto, user_key, quota_path)]
+
+  for proto, path in iter_quota_files():
     try:
       meta = load_json(path)
     except Exception:
       continue
-    username = meta.get("username") or os.path.splitext(os.path.basename(path))[0]
-    if not username:
+
+    user_key = quota_key_from_path(path)
+    if isinstance(meta, dict):
+      u2 = meta.get("username")
+      if isinstance(u2, str) and "@" in u2:
+        user_key = u2.strip()
+    if not user_key:
       continue
+
     if is_expired(meta, ts):
-      expired.append(username)
+      expired.append((proto, user_key, path))
 
   if not expired:
     return 0
@@ -1911,17 +1934,17 @@ def run_once(config_path, dry_run=False):
 
   changed = False
   if cfg is not None:
-    for u in expired:
-      changed = remove_user_from_inbounds(cfg, u) or changed
-      changed = remove_user_from_rules(cfg, u) or changed
+    for _, user_key, _ in expired:
+      changed = remove_user_from_inbounds(cfg, user_key) or changed
+      changed = remove_user_from_rules(cfg, user_key) or changed
 
   if dry_run:
-    for u in expired:
-      print(u)
+    for _, user_key, _ in expired:
+      print(user_key)
     return 0
 
-  for u in expired:
-    delete_user_files(u)
+  for proto, user_key, qpath in expired:
+    delete_user_artifacts(proto, user_key, qpath)
 
   if cfg is not None and changed:
     save_json_atomic(config_path, cfg)
@@ -1930,9 +1953,9 @@ def run_once(config_path, dry_run=False):
   return 0
 
 def main():
-  ap = argparse.ArgumentParser(prog="user-expired")
+  ap = argparse.ArgumentParser(prog="xray-expired")
   ap.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
-  ap.add_argument("--interval", type=int, default=15)
+  ap.add_argument("--interval", type=int, default=10)
   ap.add_argument("--once", action="store_true")
   ap.add_argument("--dry-run", action="store_true")
   args = ap.parse_args()
@@ -1940,15 +1963,24 @@ def main():
   if args.once:
     return run_once(args.config, dry_run=args.dry_run)
 
+  interval = max(1, int(args.interval))
   while True:
     try:
       run_once(args.config, dry_run=args.dry_run)
     except Exception:
       pass
-    time.sleep(max(5, args.interval))
+    time.sleep(interval)
 
 if __name__ == "__main__":
   raise SystemExit(main())
+EOF
+  chmod +x /usr/local/bin/xray-expired
+
+  # Legacy wrapper for backward compatibility
+  cat > /usr/local/bin/user-expired <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/bin/xray-expired "$@"
 EOF
   chmod +x /usr/local/bin/user-expired
 
@@ -1969,7 +2001,7 @@ PROTO_DIRS = ("vless", "vmess", "trojan")
 XRAY_ACCESS_LOG = "/var/log/xray/access.log"
 
 EMAIL_RE = re.compile(r"(?:email|user)\s*[:=]\s*([a-zA-Z0-9._-]{1,64})")
-IP_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})\:\d{1,5}")
+IP_RE = re.compile(r"\bfrom\s+(\d{1,3}(?:\.\d{1,3}){3})\:\d{1,5}\b")
 
 def now_iso():
   return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -2237,14 +2269,17 @@ def find_marker_rule(cfg, marker, outbound_tag):
       return r
   return None
 
-def ensure_user(rule, username):
+def ensure_user(rule, username, marker):
   users = rule.get("user") or []
   if not isinstance(users, list):
     users = []
+  if marker not in users:
+    users.insert(0, marker)
   if username not in users:
     users.append(username)
     rule["user"] = users
     return True
+  rule["user"] = users
   return False
 
 def remove_user(rule, username):
@@ -2290,7 +2325,7 @@ def main():
 
   changed = False
   if args.action == "block":
-    changed = ensure_user(rule, args.username)
+    changed = ensure_user(rule, args.username, args.marker)
     update_quota_status(args.username, True)
   else:
     changed = remove_user(rule, args.username)
@@ -2318,6 +2353,7 @@ import time
 from datetime import datetime, timezone
 
 XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/config.json"
+API_SERVER_DEFAULT = "127.0.0.1:10080"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 
@@ -2338,6 +2374,21 @@ def save_json_atomic(path, data):
 def restart_xray():
   subprocess.run(["systemctl", "restart", "xray"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def parse_int(v):
+  try:
+    if v is None:
+      return 0
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s = str(v).strip()
+    if s == "":
+      return 0
+    return int(float(s))
+  except Exception:
+    return 0
+
 def find_marker_rule(cfg, marker, outbound_tag):
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for r in rules:
@@ -2354,13 +2405,13 @@ def ensure_user(rule, username, marker):
   users = rule.get("user") or []
   if not isinstance(users, list):
     users = []
-  # Pastikan marker tidak hilang
   if marker not in users:
     users.insert(0, marker)
   if username not in users:
     users.append(username)
     rule["user"] = users
     return True
+  rule["user"] = users
   return False
 
 def iter_quota_files():
@@ -2372,36 +2423,48 @@ def iter_quota_files():
       if name.endswith(".json"):
         yield proto, os.path.join(d, name)
 
-def parse_int(v):
+def fetch_all_user_traffic(api_server):
+  # Xray stats name format (bytes):
+  # - user>>>[email]>>>traffic>>>uplink
+  # - user>>>[email]>>>traffic>>>downlink
   try:
-    if v is None:
-      return 0
-    if isinstance(v, bool):
-      return int(v)
-    if isinstance(v, (int, float)):
-      return int(v)
-    s = str(v).strip()
-    if s == "":
-      return 0
-    return int(float(s))
+    out = subprocess.check_output(
+      ["xray", "api", "statsquery", f"--server={api_server}", "--pattern", "user>>>"],
+      text=True,
+      stderr=subprocess.DEVNULL,
+    )
+    data = json.loads(out)
   except Exception:
-    return 0
+    return {}
 
-def quota_reached(meta):
-  # Expect:
-  # - quota_limit (bytes)
-  # - quota_used (bytes)
-  q_limit = parse_int(meta.get("quota_limit"))
-  q_used = parse_int(meta.get("quota_used"))
-  if q_limit <= 0:
-    return False, q_limit, q_used
-  return q_used >= q_limit, q_limit, q_used
+  traffic = {}  # email -> {"uplink": int, "downlink": int}
+  for it in data.get("stat") or []:
+    name = it.get("name") if isinstance(it, dict) else None
+    if not isinstance(name, str):
+      continue
+    parts = name.split(">>>")
+    if len(parts) < 4:
+      continue
+    if parts[0] != "user" or parts[2] != "traffic":
+      continue
+    email = parts[1]
+    direction = parts[3]
+    val = parse_int(it.get("value") if isinstance(it, dict) else None)
+    d = traffic.setdefault(email, {"uplink": 0, "downlink": 0})
+    if direction == "uplink":
+      d["uplink"] = val
+    elif direction == "downlink":
+      d["downlink"] = val
+
+  totals = {}
+  for email, d in traffic.items():
+    totals[email] = parse_int(d.get("uplink")) + parse_int(d.get("downlink"))
+  return totals
 
 def ensure_quota_status(meta, exhausted, q_limit, q_used):
   st = meta.get("status") or {}
   changed = False
 
-  # Sinkronkan angka quota (top-level tetap jadi sumber utama)
   if meta.get("quota_limit") != q_limit:
     meta["quota_limit"] = q_limit
     changed = True
@@ -2420,10 +2483,11 @@ def ensure_quota_status(meta, exhausted, q_limit, q_used):
     if not st.get("locked_at"):
       st["locked_at"] = now_iso()
       changed = True
+
   meta["status"] = st
   return changed
 
-def run_once(config_path, marker, dry_run=False):
+def run_once(config_path, marker, api_server, dry_run=False):
   try:
     cfg = load_json(config_path)
   except Exception:
@@ -2431,8 +2495,9 @@ def run_once(config_path, marker, dry_run=False):
 
   rule = find_marker_rule(cfg, marker, "blocked")
   if rule is None:
-    # Tidak fatal: setup mungkin belum memasang marker rule
     return 0
+
+  totals = fetch_all_user_traffic(api_server)
 
   changed_cfg = False
   for _, path in iter_quota_files():
@@ -2441,34 +2506,36 @@ def run_once(config_path, marker, dry_run=False):
     except Exception:
       continue
 
-    username = meta.get("username") or os.path.splitext(os.path.basename(path))[0]
+    username = os.path.splitext(os.path.basename(path))[0]
+    if isinstance(meta, dict):
+      u2 = meta.get("username")
+      if isinstance(u2, str) and u2.strip():
+        username = u2.strip()
     if not username:
       continue
 
-    exhausted, q_limit, q_used = quota_reached(meta)
-    if not exhausted:
-      # Tidak auto-unblock di tahap setup (menu manajemen akan menyusul)
-      continue
+    q_limit = parse_int(meta.get("quota_limit") if isinstance(meta, dict) else 0)
+    q_used = parse_int(totals.get(username, 0))
 
-    # update metadata status
-    meta_changed = ensure_quota_status(meta, True, q_limit, q_used)
+    exhausted = (q_limit > 0 and q_used >= q_limit)
+    meta_changed = ensure_quota_status(meta, exhausted, q_limit, q_used) if isinstance(meta, dict) else False
+
     if meta_changed and not dry_run:
       try:
         save_json_atomic(path, meta)
       except Exception:
         pass
 
-    # route to blocked via marker
-    if ensure_user(rule, username, marker):
-      changed_cfg = True
+    if exhausted:
+      if ensure_user(rule, username, marker):
+        changed_cfg = True
 
-  if changed_cfg:
-    if not dry_run:
-      try:
-        save_json_atomic(config_path, cfg)
-      except Exception:
-        return 0
-      restart_xray()
+  if changed_cfg and not dry_run:
+    try:
+      save_json_atomic(config_path, cfg)
+    except Exception:
+      return 0
+    restart_xray()
 
   return 0
 
@@ -2479,42 +2546,46 @@ def main():
   p_once = sub.add_parser("once")
   p_once.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
   p_once.add_argument("--marker", default="dummy-quota-user")
+  p_once.add_argument("--api-server", default=API_SERVER_DEFAULT)
   p_once.add_argument("--dry-run", action="store_true")
 
   p_watch = sub.add_parser("watch")
   p_watch.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
   p_watch.add_argument("--marker", default="dummy-quota-user")
+  p_watch.add_argument("--api-server", default=API_SERVER_DEFAULT)
   p_watch.add_argument("--interval", type=int, default=10)
   p_watch.add_argument("--dry-run", action="store_true")
 
   args = ap.parse_args()
 
   if args.cmd == "once":
-    return run_once(args.config, args.marker, dry_run=args.dry_run)
+    return run_once(args.config, args.marker, args.api_server, dry_run=args.dry_run)
 
   interval = max(5, int(args.interval))
   while True:
     try:
-      run_once(args.config, args.marker, dry_run=args.dry_run)
+      run_once(args.config, args.marker, args.api_server, dry_run=args.dry_run)
     except Exception:
       pass
     time.sleep(interval)
 
 if __name__ == "__main__":
   raise SystemExit(main())
+
 EOF
   chmod +x /usr/local/bin/xray-quota
-  cat > /etc/systemd/system/xray-user-expired.service <<'EOF'
+  cat > /etc/systemd/system/xray-expired.service <<'EOF'
 [Unit]
-Description=Xray user expired cleaner (real-time)
+Description=Xray expired cleaner (real-time)
 After=network-online.target xray.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/user-expired --config /usr/local/etc/xray/config.json --interval 15
+ExecStart=/usr/local/bin/xray-expired --config /usr/local/etc/xray/config.json --interval 10
 Restart=always
-RestartSec=3
+RestartSec=2
+Nice=10
 
 [Install]
 WantedBy=multi-user.target
@@ -2553,15 +2624,15 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable xray-user-expired --now >/dev/null 2>&1 || true
+  systemctl enable xray-expired --now >/dev/null 2>&1 || true
   systemctl enable xray-limit-ip --now >/dev/null 2>&1 || true
   systemctl enable xray-quota --now >/dev/null 2>&1 || true
-  systemctl restart xray-user-expired >/dev/null 2>&1 || true
+  systemctl restart xray-expired >/dev/null 2>&1 || true
   systemctl restart xray-limit-ip >/dev/null 2>&1 || true
   systemctl restart xray-quota >/dev/null 2>&1 || true
 
   ok "Script manajemen siap:"
-  ok "  - /usr/local/bin/user-expired (service: xray-user-expired)"
+  ok "  - /usr/local/bin/user-expired (service: xray-expired)"
   ok "  - /usr/local/bin/limit-ip     (service: xray-limit-ip)"
   ok "  - /usr/local/bin/user-block   (CLI)"
   ok "  - /usr/local/bin/xray-quota    (service: xray-quota)"
@@ -2574,60 +2645,60 @@ sanity_check() {
   if systemctl is-active --quiet xray; then
     ok "sanity: xray active"
   else
-    warn "sanity: xray NOT active"
-    systemctl status xray --no-pager >&2 || true
-    journalctl -u xray -n 200 --no-pager >&2 || true
-    failed=1
-  fi
+  warn "sanity: xray NOT active"
+  systemctl status xray --no-pager >&2 || true
+  journalctl -u xray -n 200 --no-pager >&2 || true
+  failed=1
+fi
 
-  if systemctl is-active --quiet nginx; then
-    ok "sanity: nginx active"
+if systemctl is-active --quiet nginx; then
+  ok "sanity: nginx active"
+else
+warn "sanity: nginx NOT active"
+systemctl status nginx --no-pager >&2 || true
+journalctl -u nginx -n 200 --no-pager >&2 || true
+failed=1
+fi
+
+# Config sanity (non-fatal if tools missing)
+if command -v nginx >/dev/null 2>&1; then
+  if nginx -t >/dev/null 2>&1; then
+    ok "sanity: nginx -t OK"
   else
-    warn "sanity: nginx NOT active"
-    systemctl status nginx --no-pager >&2 || true
-    journalctl -u nginx -n 200 --no-pager >&2 || true
-    failed=1
-  fi
+  warn "sanity: nginx -t FAILED"
+  nginx -t >&2 || true
+  failed=1
+fi
+fi
 
-  # Config sanity (non-fatal if tools missing)
-  if command -v nginx >/dev/null 2>&1; then
-    if nginx -t >/dev/null 2>&1; then
-      ok "sanity: nginx -t OK"
-    else
-      warn "sanity: nginx -t FAILED"
-      nginx -t >&2 || true
-      failed=1
-    fi
-  fi
-
-  if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
-    if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
-      ok "sanity: xray config JSON OK"
-    else
-      warn "sanity: xray config JSON INVALID"
-      jq -e . "$XRAY_CONFIG" >&2 || true
-      failed=1
-    fi
-  fi
-
-  # Cert presence (TLS termination depends on these)
-  if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
-    ok "sanity: TLS cert files present"
+if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
+  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
+    ok "sanity: xray config JSON OK"
   else
-    warn "sanity: TLS cert files missing under /opt/cert"
-    failed=1
-  fi
+  warn "sanity: xray config JSON INVALID"
+  jq -e . "$XRAY_CONFIG" >&2 || true
+  failed=1
+fi
+fi
 
-  # Listener hints (informational only)
-  if ss -lntp 2>/dev/null | grep -q ':443'; then
-    ok "sanity: port 443 is listening"
-  else
-    warn "sanity: port 443 not detected as listening (check nginx)"
-  fi
+# Cert presence (TLS termination depends on these)
+if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
+  ok "sanity: TLS cert files present"
+else
+warn "sanity: TLS cert files missing under /opt/cert"
+failed=1
+fi
 
-  if [[ "$failed" -ne 0 ]]; then
-    die "Sanity check gagal. Lihat log di atas."
-  fi
+# Listener hints (informational only)
+if ss -lntp 2>/dev/null | grep -q ':443'; then
+  ok "sanity: port 443 is listening"
+else
+warn "sanity: port 443 not detected as listening (check nginx)"
+fi
+
+if [[ "$failed" -ne 0 ]]; then
+  die "Sanity check gagal. Lihat log di atas."
+fi
 }
 
 main() {
