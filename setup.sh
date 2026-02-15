@@ -576,7 +576,7 @@ install_acme_and_issue_cert() {
 
     export CF_Token="$CLOUDFLARE_API_TOKEN"
 
-    /root/.acme.sh/acme.sh --issue --dns dns_cf \
+    /root/.acme.sh/acme.sh --issue --force --dns dns_cf \
     -d "$DOMAIN" -d "*.$DOMAIN" \
     || die "Gagal issue sertifikat wildcard via dns_cf (pastikan token Cloudflare valid)."
 
@@ -586,7 +586,7 @@ install_acme_and_issue_cert() {
     --reloadcmd "systemctl restart nginx || true" >/dev/null
   else
   ok "Issue sertifikat untuk $DOMAIN via acme.sh (standalone port 80)..."
-  /root/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" --httpport 80 \
+  /root/.acme.sh/acme.sh --issue --force --standalone -d "$DOMAIN" --httpport 80 \
   || die "Gagal issue sertifikat (pastikan port 80 terbuka & DNS domain mengarah ke VPS)."
 
   /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
