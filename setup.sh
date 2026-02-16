@@ -17,8 +17,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-XRAY_CONFIG="/tmp/xray-build.json"
-XRAY_LEGACY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_CONFDIR="/usr/local/etc/xray/conf.d"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
@@ -1107,7 +1106,8 @@ EOF
     die "Xray config test gagal. Lihat: $test_log"
   fi
 
-  ok "Config Xray dibuat (build). Service akan dikonfigurasi memakai -confdir & direstart setelah conf.d siap."
+  # NOTE: Pada arsitektur modular, start/restart xray dilakukan setelah xray.service diset ke -confdir.
+  ok "Config Xray dibuat."
   declare -gx XR_UUID="$UUID"
   declare -gx XR_TROJAN_PASS="$TROJAN_PASS"
   declare -gx XR_API_PORT="$P_API"
@@ -1183,51 +1183,60 @@ PY
 
 configure_xray_service_confdir() {
   ok "Mengatur xray.service agar memakai -confdir ..."
-  local xray_bin unit_src unit_dst
+
+  # Pastikan tidak ada drop-in yang menimpa ExecStart/User (wajib untuk full modular).
+  if [[ -d /etc/systemd/system/xray.service.d ]]; then
+    rm -rf /etc/systemd/system/xray.service.d/* 2>/dev/null || true
+    rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
+  fi
+
+  local xray_bin unit_dst frag test_log
   xray_bin="$(command -v xray || true)"
   [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
 
-  unit_src="$(systemctl show -p FragmentPath --value xray 2>/dev/null || true)"
   unit_dst="/etc/systemd/system/xray.service"
-
-  if [[ -n "${unit_src}" && "${unit_src}" != "${unit_dst}" ]]; then
-    mkdir -p /etc/systemd/system
-    cp -a "${unit_src}" "${unit_dst}" >/dev/null 2>&1 || true
+  frag="$(systemctl show -p FragmentPath --value xray 2>/dev/null || true)"
+  if [[ -z "${frag:-}" || "${frag:-}" == "n/a" ]]; then
+    frag="/lib/systemd/system/xray.service"
   fi
 
-  [[ -f "${unit_dst}" ]] || die "Unit xray.service tidak ditemukan di ${unit_dst}."
+  # Jika unit asli berada di /lib/systemd/system, copy ke /etc agar bisa kita modifikasi.
+  if [[ ! -f "${unit_dst}" && -f "${frag}" ]]; then
+    cp -f "${frag}" "${unit_dst}"
+  fi
+  [[ -f "${unit_dst}" ]] || die "Tidak menemukan unit file xray.service untuk diubah."
 
-  cp -a "${unit_dst}" "${unit_dst}.bak.$(date +%Y%m%d-%H%M%S)" >/dev/null 2>&1 || true
-
-  if grep -qE '^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-confdir[[:space:]]+' "${unit_dst}"; then
-    : # sudah benar
-  elif grep -qE '^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-config[[:space:]]+' "${unit_dst}"; then
-    sed -i -E "s|^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-config[[:space:]]+.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}"
-  elif grep -qE '^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-c[[:space:]]+' "${unit_dst}"; then
-    sed -i -E "s|^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-c[[:space:]]+.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}"
+  # 1) Ubah ExecStart utama ke -confdir
+  if grep -qE '^[[:space:]]*ExecStart=' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStart=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
   else
-    # Fallback: ganti ExecStart pertama yang ditemukan.
-    sed -i -E "0,/^[[:space:]]*ExecStart=.*/s|^[[:space:]]*ExecStart=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}" || true
+    sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit_dst}"
   fi
 
-  # Bersihkan seluruh drop-in override agar unit utama menjadi sumber tunggal.
-  if [[ -d /etc/systemd/system/xray.service.d ]]; then
-    rm -rf /etc/systemd/system/xray.service.d/* >/dev/null 2>&1 || true
-    rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
+  # 2) Hapus User/Group spesial (nobody) agar service berjalan sebagai root (menghindari warning systemd).
+  sed -i -E '/^[[:space:]]*User=/d; /^[[:space:]]*Group=/d' "${unit_dst}"
+
+  # 3) Perbaiki ExecStartPre bila masih menguji -config (bisa gagal karena config.json dihapus).
+  if grep -qE '^[[:space:]]*ExecStartPre=.*-test.*-config[[:space:]]+/usr/local/etc/xray/config\.json' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStartPre=.*$|ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
   fi
 
   systemctl daemon-reload
 
-  if ! systemctl cat xray 2>/dev/null | grep -q -- "-confdir ${XRAY_CONFDIR}"; then
-    systemctl cat xray --no-pager >&2 || true
-    die "xray.service masih belum memakai -confdir ${XRAY_CONFDIR}."
+  # Permission conf.d: pastikan dapat dibaca oleh root (service berjalan sebagai root).
+  chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
+  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
+
+  # Test confdir sebelum start/restart.
+  test_log="/tmp/xray-confdir-test.log"
+  if ! "${xray_bin}" run -test -confdir "${XRAY_CONFDIR}" >"${test_log}" 2>&1; then
+    tail -n 200 "${test_log}" >&2 || true
+    die "Xray confdir test gagal. Lihat: ${test_log}"
   fi
 
-  systemctl enable xray --now || { systemctl status xray --no-pager >&2 || true; journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal enable/start xray (confdir)."; }
-  systemctl restart xray || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray (confdir)."; }
-
-  # Full modular (-confdir). Hapus config monolitik jika ada.
-  rm -f "$XRAY_LEGACY_CONFIG" >/dev/null 2>&1 || true
+  systemctl enable xray --now >/dev/null 2>&1 || true
+  systemctl restart xray >/dev/null 2>&1 || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
+  ok "xray.service sudah memakai -confdir dan berhasil direstart."
 }
 
 
@@ -1907,8 +1916,6 @@ import time
 from datetime import datetime, timezone
 
 XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
-XRAY_INBOUNDS_DEFAULT = "/usr/local/etc/xray/conf.d/10-inbounds.json"
-XRAY_ROUTING_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
 ACCOUNT_ROOT = "/opt/account"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -1950,22 +1957,27 @@ def restart_xray():
   )
 
 def remove_user_from_inbounds(cfg, username):
-  changed = False
+  changed_inb = False
+  changed_rt = False
   inbounds = cfg.get("inbounds") or []
   for inbound in inbounds:
     settings = inbound.get("settings") or {}
     clients = settings.get("clients")
     if not isinstance(clients, list):
       continue
-    new_clients = [c for c in clients if isinstance(c, dict) and c.get("email") != username]
-    if len(new_clients) != len(clients):
-      settings["clients"] = new_clients
-      inbound["settings"] = settings
-      changed = True
+    new_clients = []
+    for c in clients:
+      if c.get("email") == username:
+        changed = True
+        continue
+      new_clients.append(c)
+    settings["clients"] = new_clients
+    inbound["settings"] = settings
   return changed
 
 def remove_user_from_rules(cfg, username):
-  changed = False
+  changed_inb = False
+  changed_rt = False
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
@@ -2819,33 +2831,14 @@ if command -v nginx >/dev/null 2>&1; then
 fi
 fi
 
-# Xray modular config sanity (non-fatal if tools missing)
-if command -v jq >/dev/null 2>&1 && [[ -d "$XRAY_CONFDIR" ]]; then
-  local bad=0
-  shopt -s nullglob
-  for f in "$XRAY_CONFDIR"/*.json; do
-    if ! jq -e . "$f" >/dev/null 2>&1; then
-      warn "sanity: xray conf invalid: $f"
-      jq -e . "$f" >&2 || true
-      bad=1
-    fi
-  done
-  shopt -u nullglob
-  if [[ "$bad" -eq 0 ]]; then
-    ok "sanity: xray modular JSON OK"
+if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
+  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
+    ok "sanity: xray config JSON OK"
   else
-    failed=1
-  fi
+  warn "sanity: xray config JSON INVALID"
+  jq -e . "$XRAY_CONFIG" >&2 || true
+  failed=1
 fi
-
-if command -v xray >/dev/null 2>&1; then
-  if xray run -test -confdir "$XRAY_CONFDIR" >/dev/null 2>&1; then
-    ok "sanity: xray -confdir test OK"
-  else
-    warn "sanity: xray -confdir test FAILED"
-    xray run -test -confdir "$XRAY_CONFDIR" >&2 || true
-    failed=1
-  fi
 fi
 
 # Cert presence (TLS termination depends on these)
@@ -2872,7 +2865,7 @@ main() {
   need_root
   check_os
   install_base_deps
-  need_python3
+	need_python3
   install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
@@ -2893,7 +2886,6 @@ main() {
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
-  rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
   configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
