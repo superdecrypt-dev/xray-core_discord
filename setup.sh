@@ -1107,9 +1107,7 @@ EOF
     die "Xray config test gagal. Lihat: $test_log"
   fi
 
-  systemctl enable xray --now || { systemctl status xray --no-pager >&2 || true; die "Gagal enable/start xray"; }
-  systemctl restart xray || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
-  ok "Config Xray dibuat & service direstart."
+  ok "Config Xray dibuat (build). Service akan dikonfigurasi memakai -confdir & direstart setelah conf.d siap."
   declare -gx XR_UUID="$UUID"
   declare -gx XR_TROJAN_PASS="$TROJAN_PASS"
   declare -gx XR_API_PORT="$P_API"
@@ -1216,7 +1214,14 @@ configure_xray_service_confdir() {
   rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
 
   systemctl daemon-reload
-  systemctl restart xray >/dev/null 2>&1 || true
+
+  if ! systemctl cat xray 2>/dev/null | grep -q -- "-confdir ${XRAY_CONFDIR}"; then
+    systemctl cat xray --no-pager >&2 || true
+    die "xray.service masih belum memakai -confdir ${XRAY_CONFDIR}."
+  fi
+
+  systemctl enable xray --now || { systemctl status xray --no-pager >&2 || true; journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal enable/start xray (confdir)."; }
+  systemctl restart xray || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray (confdir)."; }
 
   # Full modular (-confdir). Hapus config monolitik jika ada.
   rm -f "$XRAY_LEGACY_CONFIG" >/dev/null 2>&1 || true
