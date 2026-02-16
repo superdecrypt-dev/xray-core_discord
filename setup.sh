@@ -17,7 +17,8 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_CONFIG="/tmp/xray-build.json"
+XRAY_LEGACY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_CONFDIR="/usr/local/etc/xray/conf.d"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
@@ -1197,7 +1198,11 @@ EOF
 
   systemctl daemon-reload
   systemctl restart xray >/dev/null 2>&1 || true
+
+  # Install ini full modular (-confdir). Hapus config monolitik jika ada.
+  rm -f "$XRAY_LEGACY_CONFIG" >/dev/null 2>&1 || true
 }
+
 
 
 detect_nginx_user() {
@@ -1875,6 +1880,8 @@ import time
 from datetime import datetime, timezone
 
 XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_INBOUNDS_DEFAULT = "/usr/local/etc/xray/conf.d/10-inbounds.json"
+XRAY_ROUTING_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
 ACCOUNT_ROOT = "/opt/account"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -1916,27 +1923,22 @@ def restart_xray():
   )
 
 def remove_user_from_inbounds(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   inbounds = cfg.get("inbounds") or []
   for inbound in inbounds:
     settings = inbound.get("settings") or {}
     clients = settings.get("clients")
     if not isinstance(clients, list):
       continue
-    new_clients = []
-    for c in clients:
-      if c.get("email") == username:
-        changed = True
-        continue
-      new_clients.append(c)
-    settings["clients"] = new_clients
-    inbound["settings"] = settings
+    new_clients = [c for c in clients if isinstance(c, dict) and c.get("email") != username]
+    if len(new_clients) != len(clients):
+      settings["clients"] = new_clients
+      inbound["settings"] = settings
+      changed = True
   return changed
 
 def remove_user_from_rules(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
@@ -2790,14 +2792,33 @@ if command -v nginx >/dev/null 2>&1; then
 fi
 fi
 
-if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
-  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
-    ok "sanity: xray config JSON OK"
+# Xray modular config sanity (non-fatal if tools missing)
+if command -v jq >/dev/null 2>&1 && [[ -d "$XRAY_CONFDIR" ]]; then
+  local bad=0
+  shopt -s nullglob
+  for f in "$XRAY_CONFDIR"/*.json; do
+    if ! jq -e . "$f" >/dev/null 2>&1; then
+      warn "sanity: xray conf invalid: $f"
+      jq -e . "$f" >&2 || true
+      bad=1
+    fi
+  done
+  shopt -u nullglob
+  if [[ "$bad" -eq 0 ]]; then
+    ok "sanity: xray modular JSON OK"
   else
-  warn "sanity: xray config JSON INVALID"
-  jq -e . "$XRAY_CONFIG" >&2 || true
-  failed=1
+    failed=1
+  fi
 fi
+
+if command -v xray >/dev/null 2>&1; then
+  if xray run -test -confdir "$XRAY_CONFDIR" >/dev/null 2>&1; then
+    ok "sanity: xray -confdir test OK"
+  else
+    warn "sanity: xray -confdir test FAILED"
+    xray run -test -confdir "$XRAY_CONFDIR" >&2 || true
+    failed=1
+  fi
 fi
 
 # Cert presence (TLS termination depends on these)
@@ -2824,7 +2845,7 @@ main() {
   need_root
   check_os
   install_base_deps
-	need_python3
+  need_python3
   install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
@@ -2845,6 +2866,7 @@ main() {
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
+  rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
   configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
