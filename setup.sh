@@ -1210,8 +1210,11 @@ configure_xray_service_confdir() {
     sed -i -E "0,/^[[:space:]]*ExecStart=.*/s|^[[:space:]]*ExecStart=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}" || true
   fi
 
-  rm -f /etc/systemd/system/xray.service.d/10-confdir.conf >/dev/null 2>&1 || true
-  rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
+  # Bersihkan seluruh drop-in override agar unit utama menjadi sumber tunggal.
+  if [[ -d /etc/systemd/system/xray.service.d ]]; then
+    rm -rf /etc/systemd/system/xray.service.d/* >/dev/null 2>&1 || true
+    rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
+  fi
 
   systemctl daemon-reload
 
