@@ -27,10 +27,10 @@ CLOUDFLARE_API_TOKEN="ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ"
 
 # Daftar domain induk yang disediakan (private)
 PROVIDED_ROOT_DOMAINS=(
-"vyxara1.web.id"
-"vyxara2.web.id"
-"vyxara1.qzz.io"
-"vyxara2.qzz.io"
+  "vyxara1.web.id"
+  "vyxara2.web.id"
+  "vyxara1.qzz.io"
+  "vyxara2.qzz.io"
 )
 
 # NOTE: Script ini dipakai pribadi. Isi token di atas jika tidak memakai env var.
@@ -1095,8 +1095,8 @@ EOF
   chown "$xr_user:$xr_group" /var/log/xray/access.log /var/log/xray/error.log >/dev/null 2>&1 || true
 
   chmod 640 "$XRAY_CONFIG"
-  chmod 750 /var/log/xray
-  chmod 640 /var/log/xray/access.log /var/log/xray/error.log
+  chmod 755 /var/log/xray
+  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
 
 
   # Validasi config sebelum restart service (hindari exit "diam-diam")
@@ -1169,7 +1169,8 @@ for name, obj in parts:
   os.replace(tmp, path)
 PY
 
-  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
+  chmod 755 \"${XRAY_CONFDIR}\" 2>/dev/null || true
+  chmod 644 \"${XRAY_CONFDIR}\"/*.json 2>/dev/null || true
   ok "Konfigurasi modular siap:"
   ok "  - ${XRAY_CONFDIR}/00-log.json"
   ok "  - ${XRAY_CONFDIR}/01-api.json"
@@ -1216,6 +1217,18 @@ configure_xray_service_confdir() {
   # 2) Hapus User/Group spesial (nobody) agar service berjalan sebagai root (menghindari warning systemd).
   sed -i -E '/^[[:space:]]*User=/d; /^[[:space:]]*Group=/d' "${unit_dst}"
 
+  # Hapus DynamicUser agar tidak membuat user ephemeral yang bisa memblok akses file.
+  sed -i -E '/^[[:space:]]*DynamicUser=/d' "${unit_dst}"
+
+  # Pastikan systemd mengizinkan write ke /var/log/xray (meskipun ProtectSystem=strict/full).
+  if grep -qE '^[[:space:]]*ReadWritePaths=' "${unit_dst}"; then
+    if ! grep -qE '^[[:space:]]*ReadWritePaths=.*\b/var/log/xray\b' "${unit_dst}"; then
+      sed -i -E 's|^[[:space:]]*ReadWritePaths=(.*)$|ReadWritePaths=\1 /var/log/xray|g' "${unit_dst}"
+    fi
+  else
+    sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit_dst}"
+  fi
+
   # 3) Perbaiki ExecStartPre bila masih menguji -config (bisa gagal karena config.json dihapus).
   if grep -qE '^[[:space:]]*ExecStartPre=.*-test.*-config[[:space:]]+/usr/local/etc/xray/config\.json' "${unit_dst}"; then
     sed -i -E "s|^[[:space:]]*ExecStartPre=.*$|ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
@@ -1223,9 +1236,15 @@ configure_xray_service_confdir() {
 
   systemctl daemon-reload
 
+  # Pastikan path log Xray dapat ditulis oleh service (root), termasuk saat unit memakai hardening.
+  mkdir -p /var/log/xray
+  touch /var/log/xray/access.log /var/log/xray/error.log
+  chmod 755 /var/log/xray
+  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
+
   # Permission conf.d: pastikan dapat dibaca oleh root (service berjalan sebagai root).
   chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
-  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
+  chmod 644 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
 
   # Test confdir sebelum start/restart.
   test_log="/tmp/xray-confdir-test.log"
@@ -1957,8 +1976,7 @@ def restart_xray():
   )
 
 def remove_user_from_inbounds(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   inbounds = cfg.get("inbounds") or []
   for inbound in inbounds:
     settings = inbound.get("settings") or {}
@@ -1967,17 +1985,17 @@ def remove_user_from_inbounds(cfg, username):
       continue
     new_clients = []
     for c in clients:
-      if c.get("email") == username:
+      if isinstance(c, dict) and c.get("email") == username:
         changed = True
         continue
       new_clients.append(c)
-    settings["clients"] = new_clients
-    inbound["settings"] = settings
+    if changed:
+      settings["clients"] = new_clients
+      inbound["settings"] = settings
   return changed
 
 def remove_user_from_rules(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
@@ -2886,6 +2904,7 @@ main() {
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
+	rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
   configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
