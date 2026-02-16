@@ -18,7 +18,6 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
-XRAY_CONFDIR="/usr/local/etc/xray/conf.d"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
@@ -97,6 +96,18 @@ install_base_deps() {
   apt-get install -y curl ca-certificates unzip openssl socat cron gpg lsb-release python3 iproute2 jq dnsutils
   ok "Dependency dasar terpasang."
 }
+
+need_python3() {
+  if command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  warn "python3 belum terpasang. Memasang python3..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y python3 || die "Gagal memasang python3."
+}
+
 
 domain_menu() {
   echo "============================================"
@@ -1122,72 +1133,6 @@ EOF
   declare -gx I_VMESS_GRPC="$I_VMESS_GRPC"
   declare -gx I_TROJAN_GRPC="$I_TROJAN_GRPC"
 }
-write_xray_modular_configs() {
-  ok "Membuat konfigurasi modular Xray-core (conf.d)..."
-  mkdir -p "${XRAY_CONFDIR}"
-  need_python3
-
-  python3 - <<'PY' "${XRAY_CONFIG}" "${XRAY_CONFDIR}"
-import json
-import os
-import sys
-
-src, outdir = sys.argv[1:3]
-
-with open(src, "r", encoding="utf-8") as f:
-  cfg = json.load(f)
-
-parts = [
-  ("00-log.json", {"log": cfg.get("log") or {}}),
-  ("01-api.json", {"api": cfg.get("api") or {}}),
-  ("02-dns.json", {"dns": cfg.get("dns") or {}}),
-  ("10-inbounds.json", {"inbounds": cfg.get("inbounds") or []}),
-  ("20-outbounds.json", {"outbounds": cfg.get("outbounds") or []}),
-  ("30-routing.json", {"routing": cfg.get("routing") or {}}),
-  ("40-policy.json", {"policy": cfg.get("policy") or {}}),
-  ("50-stats.json", {"stats": cfg.get("stats") or {}}),
-]
-
-os.makedirs(outdir, exist_ok=True)
-
-for name, obj in parts:
-  path = os.path.join(outdir, name)
-  tmp = f"{path}.tmp"
-  with open(tmp, "w", encoding="utf-8") as wf:
-    json.dump(obj, wf, ensure_ascii=False, indent=2)
-    wf.write("\n")
-  os.replace(tmp, path)
-PY
-
-  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
-  ok "Konfigurasi modular siap:"
-  ok "  - ${XRAY_CONFDIR}/00-log.json"
-  ok "  - ${XRAY_CONFDIR}/01-api.json"
-  ok "  - ${XRAY_CONFDIR}/02-dns.json"
-  ok "  - ${XRAY_CONFDIR}/10-inbounds.json"
-  ok "  - ${XRAY_CONFDIR}/20-outbounds.json"
-  ok "  - ${XRAY_CONFDIR}/30-routing.json"
-  ok "  - ${XRAY_CONFDIR}/40-policy.json"
-  ok "  - ${XRAY_CONFDIR}/50-stats.json"
-}
-
-configure_xray_service_confdir() {
-  ok "Mengatur xray.service agar memakai -confdir ..."
-  local xray_bin
-  xray_bin="$(command -v xray || true)"
-  [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
-
-  mkdir -p /etc/systemd/system/xray.service.d
-  cat > /etc/systemd/system/xray.service.d/10-confdir.conf <<EOF
-[Service]
-ExecStart=
-ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}
-EOF
-
-  systemctl daemon-reload
-  systemctl restart xray >/dev/null 2>&1 || true
-}
-
 
 detect_nginx_user() {
   if id -u nginx >/dev/null 2>&1; then
@@ -1863,7 +1808,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
-XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/config.json"
 ACCOUNT_ROOT = "/opt/account"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -1893,7 +1838,8 @@ def save_json_atomic(path, data):
   tmp = f"{path}.tmp"
   with open(tmp, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
-    f.write("\n")
+    f.write("
+")
   os.replace(tmp, path)
 
 def restart_xray():
@@ -1905,8 +1851,7 @@ def restart_xray():
   )
 
 def remove_user_from_inbounds(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   inbounds = cfg.get("inbounds") or []
   for inbound in inbounds:
     settings = inbound.get("settings") or {}
@@ -1924,8 +1869,7 @@ def remove_user_from_inbounds(cfg, username):
   return changed
 
 def remove_user_from_rules(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
@@ -1970,7 +1914,7 @@ def delete_user_artifacts(proto, user_key, quota_path):
   except Exception:
     pass
 
-def run_once(inbounds_path, routing_path, dry_run=False):
+def run_once(config_path, dry_run=False):
   ts = now_utc()
   expired = []  # list[(proto, user_key, quota_path)]
 
@@ -1994,17 +1938,17 @@ def run_once(inbounds_path, routing_path, dry_run=False):
   if not expired:
     return 0
 
+  cfg = None
   try:
-    inb_cfg = load_json(inbounds_path)
-    rt_cfg = load_json(routing_path)
+    cfg = load_json(config_path)
   except Exception:
-    return 0
+    cfg = None
 
-  changed_inb = False
-  changed_rt = False
-  for _, user_key, _ in expired:
-    changed_inb = remove_user_from_inbounds(inb_cfg, user_key) or changed_inb
-    changed_rt = remove_user_from_rules(rt_cfg, user_key) or changed_rt
+  changed = False
+  if cfg is not None:
+    for _, user_key, _ in expired:
+      changed = remove_user_from_inbounds(cfg, user_key) or changed
+      changed = remove_user_from_rules(cfg, user_key) or changed
 
   if dry_run:
     for _, user_key, _ in expired:
@@ -2014,30 +1958,27 @@ def run_once(inbounds_path, routing_path, dry_run=False):
   for proto, user_key, qpath in expired:
     delete_user_artifacts(proto, user_key, qpath)
 
-  changed_any = changed_inb or changed_rt
-  if changed_any and not dry_run:
-    save_json_atomic(inbounds_path, inb_cfg)
-    save_json_atomic(routing_path, rt_cfg)
+  if cfg is not None and changed:
+    save_json_atomic(config_path, cfg)
     restart_xray()
 
   return 0
 
 def main():
   ap = argparse.ArgumentParser(prog="xray-expired")
-  ap.add_argument("--inbounds", default=XRAY_INBOUNDS_DEFAULT)
-  ap.add_argument("--routing", default=XRAY_ROUTING_DEFAULT)
+  ap.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
   ap.add_argument("--interval", type=int, default=2)
   ap.add_argument("--once", action="store_true")
   ap.add_argument("--dry-run", action="store_true")
   args = ap.parse_args()
 
   if args.once:
-    return run_once(args.inbounds, args.routing, dry_run=args.dry_run)
+    return run_once(args.config, dry_run=args.dry_run)
 
   interval = max(1, int(args.interval))
   while True:
     try:
-      run_once(args.inbounds, args.routing, dry_run=args.dry_run)
+      run_once(args.config, dry_run=args.dry_run)
     except Exception:
       pass
     time.sleep(interval)
@@ -2066,7 +2007,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/config.json"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 XRAY_ACCESS_LOG = "/var/log/xray/access.log"
@@ -2307,7 +2248,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/config.json"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 
@@ -2423,7 +2364,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
-XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/config.json"
 API_SERVER_DEFAULT = "127.0.0.1:10080"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -2559,15 +2500,11 @@ def ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg):
   st = meta.get("status") or {}
   changed = False
 
-  prev_used = parse_int(meta.get("quota_used"))
-  q_used_eff = max(prev_used, parse_int(q_used))
-
   if meta.get("quota_limit") != q_limit:
     meta["quota_limit"] = q_limit
     changed = True
-
-  if meta.get("quota_used") != q_used_eff:
-    meta["quota_used"] = q_used_eff
+  if meta.get("quota_used") != q_used:
+    meta["quota_used"] = q_used
     changed = True
 
   if meta.get("quota_unit") != q_unit:
@@ -2690,7 +2627,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xray-expired --inbounds /usr/local/etc/xray/conf.d/10-inbounds.json --routing /usr/local/etc/xray/conf.d/30-routing.json --interval 2
+ExecStart=/usr/local/bin/xray-expired --config /usr/local/etc/xray/config.json --interval 2
 Restart=always
 RestartSec=2
 Nice=10
@@ -2707,7 +2644,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/limit-ip watch --config /usr/local/etc/xray/conf.d/30-routing.json --marker dummy-limit-user --window-seconds 600
+ExecStart=/usr/local/bin/limit-ip watch --config /usr/local/etc/xray/config.json --marker dummy-limit-user --window-seconds 600
 Restart=always
 RestartSec=3
 
@@ -2723,7 +2660,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xray-quota watch --config /usr/local/etc/xray/conf.d/30-routing.json --marker dummy-quota-user --interval 2
+ExecStart=/usr/local/bin/xray-quota watch --config /usr/local/etc/xray/config.json --marker dummy-quota-user --interval 2
 Restart=always
 RestartSec=3
 
@@ -2832,8 +2769,6 @@ main() {
   install_xray
   setup_xray_geodata_updater
   write_xray_config
-  write_xray_modular_configs
-  configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
   setup_logrotate
