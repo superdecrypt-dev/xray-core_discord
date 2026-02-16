@@ -1086,8 +1086,7 @@ cfg['routing'] = routing
 if changed:
   with open(dst, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
-    f.write("
-")
+    f.write("\n")
 
 print("changed=1" if changed else "changed=0")
 PY
