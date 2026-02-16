@@ -170,6 +170,26 @@ normalize_gb_input() {
   echo ""
 }
 
+validate_username() {
+  # Aman untuk dipakai sebagai nama file: mencegah path traversal
+  # Aturan:
+  # - tidak boleh kosong
+  # - tidak boleh mengandung '/', '\\', spasi, '@', atau '..'
+  # - hanya karakter: A-Z a-z 0-9 . _ -
+  local u="$1"
+
+  if [[ -z "${u}" ]]; then
+    return 1
+  fi
+  if [[ "${u}" == *"/"* || "${u}" == *"\\"* || "${u}" == *" "* || "${u}" == *"@"* || "${u}" == *".."* ]]; then
+    return 1
+  fi
+  if [[ ! "${u}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then
+    return 1
+  fi
+  return 0
+}
+
 is_yes() {
   # accept: y/yes/1/on/true
   local v="${1:-}"
@@ -212,9 +232,9 @@ detect_public_ip_ipapi() {
   # Ambil public IP dari ip-api.com (best-effort), fallback ke detect_public_ip
   local ip=""
   if have_cmd curl; then
-    ip="$(curl -fsSL --max-time 5 "http://ip-api.com/line/?fields=query" 2>/dev/null || true)"
+    ip="$(curl -fsSL --max-time 5 "https://ip-api.com/line/?fields=query" 2>/dev/null || true)"
   elif have_cmd wget; then
-    ip="$(wget -qO- --timeout=5 "http://ip-api.com/line/?fields=query" 2>/dev/null || true)"
+    ip="$(wget -qO- --timeout=5 "https://ip-api.com/line/?fields=query" 2>/dev/null || true)"
   fi
 
   if [[ -z "${ip}" || ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -299,6 +319,31 @@ svc_restart() {
   else
     warn "Restart dilakukan, tapi status masih tidak aktif: ${svc}"
   fi
+}
+
+svc_restart_if_exists() {
+  local svc="$1"
+  if systemctl cat "${svc}" >/dev/null 2>&1; then
+    systemctl restart "${svc}" >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
+}
+
+svc_restart_any() {
+  # args: list of service names (with or without .service)
+  local s
+  for s in "$@"; do
+    if svc_restart_if_exists "${s}"; then
+      return 0
+    fi
+    if [[ "${s}" != *.service ]]; then
+      if svc_restart_if_exists "${s}.service"; then
+        return 0
+      fi
+    fi
+  done
+  return 1
 }
 
 # -------------------------
@@ -602,7 +647,7 @@ account_search_flow() {
 # -------------------------
 check_files() {
   local ok=0
-  [[ -f "${XRAY_CONFDIR}" ]] || { warn "Tidak ada: ${XRAY_CONFDIR}"; ok=1; }
+  [[ -d "${XRAY_CONFDIR}" ]] || { warn "Tidak ada: ${XRAY_CONFDIR}"; ok=1; }
   [[ -f "${NGINX_CONF}" ]] || { warn "Tidak ada: ${NGINX_CONF}"; ok=1; }
   [[ -f "${CERT_FULLCHAIN}" ]] || { warn "Tidak ada: ${CERT_FULLCHAIN}"; ok=1; }
   [[ -f "${CERT_PRIVKEY}" ]] || { warn "Tidak ada: ${CERT_PRIVKEY}"; ok=1; }
@@ -624,7 +669,15 @@ check_xray_config_json() {
   fi
 
   local ok=1 f
-  for f in     "${XRAY_LOG_CONF}"     "${XRAY_API_CONF}"     "${XRAY_DNS_CONF}"     "${XRAY_INBOUNDS_CONF}"     "${XRAY_OUTBOUNDS_CONF}"     "${XRAY_ROUTING_CONF}"     "${XRAY_POLICY_CONF}"     "${XRAY_STATS_CONF}"; do
+  for f in \
+    "${XRAY_LOG_CONF}" \
+    "${XRAY_API_CONF}" \
+    "${XRAY_DNS_CONF}" \
+    "${XRAY_INBOUNDS_CONF}" \
+    "${XRAY_OUTBOUNDS_CONF}" \
+    "${XRAY_ROUTING_CONF}" \
+    "${XRAY_POLICY_CONF}" \
+    "${XRAY_STATS_CONF}"; do
     if [[ ! -f "${f}" ]]; then
       warn "Konfigurasi tidak ditemukan: ${f}"
       ok=0
@@ -966,6 +1019,108 @@ PY
   fi
 }
 
+xray_routing_set_user_in_marker() {
+  # args: marker email on|off
+  local marker="$1"
+  local email="$2"
+  local state="$3"
+
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+
+  local backup tmp
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  local out changed
+  out="$(python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${email}" "${state}"
+import json, sys
+src, dst, marker, email, state = sys.argv[1:6]
+
+with open(src, 'r', encoding='utf-8') as f:
+  cfg = json.load(f)
+
+routing = cfg.get('routing') or {}
+rules = routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing config: routing.rules is not a list")
+
+target = None
+for r in rules:
+  if not isinstance(r, dict):
+    continue
+  if r.get('type') != 'field':
+    continue
+  if r.get('outboundTag') != 'blocked':
+    continue
+  u = r.get('user')
+  if not isinstance(u, list):
+    continue
+  if marker in u:
+    target = r
+    break
+
+if target is None:
+  raise SystemExit(f"Tidak menemukan routing rule outboundTag=blocked dengan marker: {marker}")
+
+users = target.get('user') or []
+if not isinstance(users, list):
+  users = []
+
+# pastikan marker selalu ada dan di posisi awal
+if marker not in users:
+  users.insert(0, marker)
+else:
+  users = [marker] + [x for x in users if x != marker]
+
+changed = False
+if state == 'on':
+  if email not in users:
+    users.append(email)
+    changed = True
+elif state == 'off':
+  new_users = [x for x in users if x != email]
+  if new_users != users:
+    users = new_users
+    changed = True
+else:
+  raise SystemExit("state harus 'on' atau 'off'")
+
+target['user'] = users
+routing['rules'] = rules
+cfg['routing'] = routing
+
+if changed:
+  with open(dst, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+
+print("changed=1" if changed else "changed=0")
+PY
+)" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal memproses routing: ${XRAY_ROUTING_CONF}"
+  }
+
+  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+  if [[ "${changed}" != "1" ]]; then
+    return 0
+  fi
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal menulis routing (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+  if ! svc_is_active xray; then
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update routing. Routing di-rollback ke backup: ${backup}"
+  fi
+}
+
 
 xray_extract_endpoints() {
   # args: protocol -> prints lines: network|path_or_service
@@ -1269,6 +1424,12 @@ user_add_menu() {
     return 0
   fi
 
+  if ! validate_username "${username}"; then
+    warn "Username tidak valid. Gunakan: A-Z a-z 0-9 . _ - (tanpa spasi, tanpa '/', tanpa '..', tanpa '@')."
+    pause
+    return 0
+  fi
+
   read -r -p "Masa aktif (hari) (atau kembali): " days
   if is_back_choice "${days}"; then
     return 0
@@ -1412,6 +1573,12 @@ user_del_menu() {
   fi
   if [[ -z "${username}" ]]; then
     warn "Username kosong"
+    pause
+    return 0
+  fi
+
+  if ! validate_username "${username}"; then
+    warn "Username tidak valid. Gunakan: A-Z a-z 0-9 . _ - (tanpa spasi, tanpa '/', tanpa '..', tanpa '@')."
     pause
     return 0
   fi
@@ -1829,6 +1996,65 @@ print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{'ON' if ip_en else 'OFF'}|{ip_lim}|{
 PY
 }
 
+quota_get_status_bool() {
+  # args: json_file key
+  local qf="$1"
+  local key="$2"
+  need_python3
+  python3 - <<'PY' "${qf}" "${key}"
+import json, sys
+p, k = sys.argv[1:3]
+try:
+  d = json.load(open(p, 'r', encoding='utf-8'))
+except Exception:
+  print("false")
+  raise SystemExit(0)
+st = d.get("status") or {}
+v = st.get(k, False)
+print("true" if bool(v) else "false")
+PY
+}
+
+quota_get_status_int() {
+  # args: json_file key
+  local qf="$1"
+  local key="$2"
+  need_python3
+  python3 - <<'PY' "${qf}" "${key}"
+import json, sys
+p, k = sys.argv[1:3]
+try:
+  d = json.load(open(p, 'r', encoding='utf-8'))
+except Exception:
+  print("0")
+  raise SystemExit(0)
+st = d.get("status") or {}
+v = st.get(k, 0)
+try:
+  print(int(v))
+except Exception:
+  print("0")
+PY
+}
+
+quota_get_lock_reason() {
+  # args: json_file
+  local qf="$1"
+  need_python3
+  python3 - <<'PY' "${qf}"
+import json, sys
+p = sys.argv[1]
+try:
+  d = json.load(open(p, 'r', encoding='utf-8'))
+except Exception:
+  print("")
+  raise SystemExit(0)
+st = d.get("status") or {}
+v = st.get("lock_reason") or ""
+print(str(v))
+PY
+}
+
 
 
 quota_print_table_page() {
@@ -2051,29 +2277,43 @@ quota_edit_flow() {
         qb="$(bytes_from_gb "${gb_num}")"
         quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); d['quota_limit']=int(${qb}); d['quota_used']=0; st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
         xray_routing_set_user_in_marker "dummy-quota-user" "${username}" off
-        log "Quota limit diubah: ${gb_num} GB (quota_used di-reset)"
+        log "Quota limit diubah: ${gb_num} GB (quota_used di-reset: 0)"
         pause
         ;;
       3)
-        quota_atomic_update_file "${qf}" "d['quota_used']=0"
-        log "Quota used di-reset: 0"
+        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); d['quota_used']=0; st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
+        xray_routing_set_user_in_marker "dummy-quota-user" "${username}" off
+        log "Quota used di-reset: 0 (status quota dibersihkan)"
         pause
         ;;
       4)
         local st_mb
-        st_mb="$(quota_read_detail_fields "${qf}" | awk -F'=' '/^manual_block=/{print $2; exit}')"
+        st_mb="$(quota_get_status_bool "${qf}" "manual_block")"
         if [[ "${st_mb}" == "true" ]]; then
-          /usr/local/bin/user-block unblock "${username}" || true
+          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['manual_block']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
+          xray_routing_set_user_in_marker "dummy-block-user" "${username}" off
           log "Manual block: OFF"
         else
-          /usr/local/bin/user-block block "${username}" || true
+          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['manual_block']=True; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); st['lock_reason']='manual'; st['locked_at']=st.get('locked_at') or now"
+          xray_routing_set_user_in_marker "dummy-block-user" "${username}" on
           log "Manual block: ON"
         fi
         pause
         ;;
       5)
-        quota_atomic_update_file "${qf}" "d.setdefault('status',{}); d['status']['ip_limit_enabled']=not bool(d['status'].get('ip_limit_enabled'))"
-        log "IP limit toggle"
+        local ip_on
+        ip_on="$(quota_get_status_bool "${qf}" "ip_limit_enabled")"
+        if [[ "${ip_on}" == "true" ]]; then
+          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['ip_limit_enabled']=False; st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
+          xray_routing_set_user_in_marker "dummy-limit-user" "${username}" off
+          /usr/local/bin/limit-ip unlock "${username}" >/dev/null 2>&1 || true
+          svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
+          log "IP limit: OFF"
+        else
+          quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['ip_limit_enabled']=True"
+          svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
+          log "IP limit: ON"
+        fi
         pause
         ;;
       6)
@@ -2087,11 +2327,15 @@ quota_edit_flow() {
           continue
         fi
         quota_atomic_update_file "${qf}" "d.setdefault('status',{}); d['status']['ip_limit']=int(${lim})"
+        svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP limit diubah: ${lim}"
         pause
         ;;
       7)
-        /usr/local/bin/limit-ip unlock "${username}" || true
+        /usr/local/bin/limit-ip unlock "${username}" >/dev/null 2>&1 || true
+        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
+        xray_routing_set_user_in_marker "dummy-limit-user" "${username}" off
+        svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP lock di-unlock"
         pause
         ;;
