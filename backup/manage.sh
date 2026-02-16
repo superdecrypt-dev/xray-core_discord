@@ -10,15 +10,7 @@ set -euo pipefail
 # -------------------------
 # Konstanta (samakan dengan setup.sh)
 # -------------------------
-XRAY_CONFDIR="/usr/local/etc/xray/conf.d"
-XRAY_LOG_CONF="${XRAY_CONFDIR}/00-log.json"
-XRAY_API_CONF="${XRAY_CONFDIR}/01-api.json"
-XRAY_DNS_CONF="${XRAY_CONFDIR}/02-dns.json"
-XRAY_INBOUNDS_CONF="${XRAY_CONFDIR}/10-inbounds.json"
-XRAY_OUTBOUNDS_CONF="${XRAY_CONFDIR}/20-outbounds.json"
-XRAY_ROUTING_CONF="${XRAY_CONFDIR}/30-routing.json"
-XRAY_POLICY_CONF="${XRAY_CONFDIR}/40-policy.json"
-XRAY_STATS_CONF="${XRAY_CONFDIR}/50-stats.json"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
@@ -602,7 +594,7 @@ account_search_flow() {
 # -------------------------
 check_files() {
   local ok=0
-  [[ -f "${XRAY_CONFDIR}" ]] || { warn "Tidak ada: ${XRAY_CONFDIR}"; ok=1; }
+  [[ -f "${XRAY_CONFIG}" ]] || { warn "Tidak ada: ${XRAY_CONFIG}"; ok=1; }
   [[ -f "${NGINX_CONF}" ]] || { warn "Tidak ada: ${NGINX_CONF}"; ok=1; }
   [[ -f "${CERT_FULLCHAIN}" ]] || { warn "Tidak ada: ${CERT_FULLCHAIN}"; ok=1; }
   [[ -f "${CERT_PRIVKEY}" ]] || { warn "Tidak ada: ${CERT_PRIVKEY}"; ok=1; }
@@ -618,28 +610,13 @@ check_nginx_config() {
 }
 
 check_xray_config_json() {
-  if ! have_cmd jq; then
+  if have_cmd jq; then
+    jq -e . "${XRAY_CONFIG}" >/dev/null
+    log "Xray config JSON: OK"
+  else
     warn "jq tidak tersedia, lewati validasi JSON"
-    return 0
   fi
-
-  local ok=1 f
-  for f in     "${XRAY_LOG_CONF}"     "${XRAY_API_CONF}"     "${XRAY_DNS_CONF}"     "${XRAY_INBOUNDS_CONF}"     "${XRAY_OUTBOUNDS_CONF}"     "${XRAY_ROUTING_CONF}"     "${XRAY_POLICY_CONF}"     "${XRAY_STATS_CONF}"; do
-    if [[ ! -f "${f}" ]]; then
-      warn "Konfigurasi tidak ditemukan: ${f}"
-      ok=0
-      continue
-    fi
-    if ! jq -e . "${f}" >/dev/null; then
-      warn "JSON tidak valid: ${f}"
-      ok=0
-    fi
-  done
-
-  (( ok == 1 )) || die "Konfigurasi Xray (conf.d) tidak lengkap / invalid."
-  log "Xray conf.d JSON: OK"
 }
-
 
 check_tls_expiry() {
   if have_cmd openssl && [[ -f "${CERT_FULLCHAIN}" ]]; then
@@ -736,51 +713,39 @@ sanity_check_now() {
 
 
 xray_backup_config() {
-  # Rolling backup to avoid long-term pile-up.
-  # args: file_path (optional)
-  local src b
-  src="${1:-${XRAY_INBOUNDS_CONF}}"
-
-  b="${WORK_DIR}/$(basename "${src}").prev"
-  cp -a "${src}" "${b}"
+  # Single rolling backup to avoid long-term pile-up.
+  local b
+  b="${WORK_DIR}/config.json.prev"
+  cp -a "${XRAY_CONFIG}" "${b}"
   echo "${b}"
 }
 
 
 
-
-xray_write_file_atomic() {
-  # args: dest_path tmp_json_path
-  local dest="$1"
-  local src_tmp="$2"
+xray_write_config_atomic() {
+  # args: tmp_json_path
+  local src_tmp="$1"
   local dir base tmp_target mode uid gid
 
-  dir="$(dirname "${dest}")"
-  base="$(basename "${dest}")"
+  dir="$(dirname "${XRAY_CONFIG}")"
+  base="$(basename "${XRAY_CONFIG}")"
   tmp_target="${dir}/.${base}.new.$$"
 
-  ensure_path_writable "${dest}"
+  ensure_path_writable "${XRAY_CONFIG}"
 
-  mode="$(stat -c '%a' "${dest}" 2>/dev/null || echo '600')"
-  uid="$(stat -c '%u' "${dest}" 2>/dev/null || echo '0')"
-  gid="$(stat -c '%g' "${dest}" 2>/dev/null || echo '0')"
+  mode="$(stat -c '%a' "${XRAY_CONFIG}" 2>/dev/null || echo '600')"
+  uid="$(stat -c '%u' "${XRAY_CONFIG}" 2>/dev/null || echo '0')"
+  gid="$(stat -c '%g' "${XRAY_CONFIG}" 2>/dev/null || echo '0')"
 
   cp -f "${src_tmp}" "${tmp_target}"
   chmod "${mode}" "${tmp_target}" 2>/dev/null || chmod 600 "${tmp_target}" || true
   chown "${uid}:${gid}" "${tmp_target}" 2>/dev/null || chown 0:0 "${tmp_target}" || true
 
-  mv -f "${tmp_target}" "${dest}" || {
+  mv -f "${tmp_target}" "${XRAY_CONFIG}" || {
     rm -f "${tmp_target}" 2>/dev/null || true
-    die "Gagal replace ${dest} (permission denied / filesystem read-only / immutable)."
+    die "Gagal replace ${XRAY_CONFIG} (permission denied / filesystem read-only / immutable)."
   }
 }
-
-xray_write_config_atomic() {
-  # Backward-compat wrapper (writes inbounds conf).
-  # args: tmp_json_path
-  xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "$1"
-}
-
 
 
 xray_add_client() {
@@ -792,14 +757,14 @@ xray_add_client() {
   local email="${username}@${proto}"
   need_python3
 
-  [[ -f "${XRAY_INBOUNDS_CONF}" ]] || die "Xray inbounds conf tidak ditemukan: ${XRAY_INBOUNDS_CONF}"
-  ensure_path_writable "${XRAY_INBOUNDS_CONF}"
+  [[ -f "${XRAY_CONFIG}" ]] || die "XRAY_CONFIG tidak ditemukan: ${XRAY_CONFIG}"
+  ensure_path_writable "${XRAY_CONFIG}"
 
   local backup tmp
-  backup="$(xray_backup_config "${XRAY_INBOUNDS_CONF}")"
-  tmp="${WORK_DIR}/10-inbounds.json.tmp"
+  backup="$(xray_backup_config)"
+  tmp="${WORK_DIR}/config.json.tmp"
 
-  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${tmp}" "${proto}" "${email}" "${cred}"
+  python3 - <<'PY' "${XRAY_CONFIG}" "${tmp}" "${proto}" "${email}" "${cred}"
 import json, sys, uuid
 src, dst, proto, email, cred = sys.argv[1:6]
 
@@ -856,15 +821,15 @@ with open(dst, 'w', encoding='utf-8') as f:
   f.write("\n")
 PY
 
-  xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
+  xray_write_config_atomic "${tmp}" || {
+    cp -a "${backup}" "${XRAY_CONFIG}"
     die "Gagal menulis config (rollback ke backup: ${backup})"
   }
 
   # restart xray to apply
   svc_restart xray || true
   if ! svc_is_active xray; then
-    cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
+    cp -a "${backup}" "${XRAY_CONFIG}"
     systemctl restart xray || true
     die "xray tidak aktif setelah add user. Config di-rollback ke backup: ${backup}"
   fi
@@ -878,31 +843,25 @@ xray_delete_client() {
   local email="${username}@${proto}"
   need_python3
 
-  [[ -f "${XRAY_INBOUNDS_CONF}" ]] || die "Xray inbounds conf tidak ditemukan: ${XRAY_INBOUNDS_CONF}"
-  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
-  ensure_path_writable "${XRAY_INBOUNDS_CONF}"
-  ensure_path_writable "${XRAY_ROUTING_CONF}"
+  [[ -f "${XRAY_CONFIG}" ]] || die "XRAY_CONFIG tidak ditemukan: ${XRAY_CONFIG}"
+  ensure_path_writable "${XRAY_CONFIG}"
 
-  local backup_inb backup_rt tmp_inb tmp_rt
-  backup_inb="$(xray_backup_config "${XRAY_INBOUNDS_CONF}")"
-  backup_rt="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
-  tmp_inb="${WORK_DIR}/10-inbounds.json.tmp"
-  tmp_rt="${WORK_DIR}/30-routing.json.tmp"
+  local backup tmp
+  backup="$(xray_backup_config)"
+  tmp="${WORK_DIR}/config.json.tmp"
 
-  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${XRAY_ROUTING_CONF}" "${tmp_inb}" "${tmp_rt}" "${proto}" "${email}"
-import json, os, sys
-inb_src, rt_src, inb_dst, rt_dst, proto, email = sys.argv[1:7]
+  python3 - <<'PY' "${XRAY_CONFIG}" "${tmp}" "${proto}" "${email}"
+import json, sys
+src, dst, proto, email = sys.argv[1:5]
 
-with open(inb_src, 'r', encoding='utf-8') as f:
-  inb_cfg = json.load(f)
-with open(rt_src, 'r', encoding='utf-8') as f:
-  rt_cfg = json.load(f)
+with open(src, 'r', encoding='utf-8') as f:
+  cfg=json.load(f)
 
-inbounds = inb_cfg.get('inbounds', [])
+inbounds = cfg.get('inbounds', [])
 if not isinstance(inbounds, list):
-  raise SystemExit("Invalid inbounds config: inbounds is not a list")
+  raise SystemExit("Invalid config: inbounds is not a list")
 
-removed = 0
+removed=0
 for ib in inbounds:
   if ib.get('protocol') != proto:
     continue
@@ -910,16 +869,17 @@ for ib in inbounds:
   clients = st.get('clients')
   if not isinstance(clients, list):
     continue
-  before = len(clients)
+  before=len(clients)
   clients[:] = [c for c in clients if c.get('email') != email]
   removed += (before - len(clients))
-  st['clients'] = clients
-  ib['settings'] = st
+  ib['settings']=st
 
 if removed == 0:
   raise SystemExit(f"Tidak menemukan user untuk dihapus: {email} ({proto})")
 
-routing = (rt_cfg.get('routing') or {})
+
+# Also remove from blocked routing rules (dummy markers)
+routing = cfg.get('routing') or {}
 rules = routing.get('rules')
 if isinstance(rules, list):
   markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user"}
@@ -934,44 +894,32 @@ if isinstance(rules, list):
     if not any(m in u for m in markers):
       continue
     r['user'] = [x for x in u if x != email]
-  routing['rules'] = rules
-  rt_cfg['routing'] = routing
+  routing['rules']=rules
+  cfg['routing']=routing
 
-with open(inb_dst, 'w', encoding='utf-8') as f:
-  json.dump(inb_cfg, f, ensure_ascii=False, indent=2)
-  f.write("\n")
-with open(rt_dst, 'w', encoding='utf-8') as f:
-  json.dump(rt_cfg, f, ensure_ascii=False, indent=2)
+with open(dst, 'w', encoding='utf-8') as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
   f.write("\n")
 PY
 
-  xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp_inb}" || {
-    cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-    cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    die "Gagal menulis inbounds conf (rollback ke backup)."
-  }
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}" || {
-    cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-    cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    die "Gagal menulis routing conf (rollback ke backup)."
+  xray_write_config_atomic "${tmp}" || {
+    cp -a "${backup}" "${XRAY_CONFIG}"
+    die "Gagal menulis config (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
   if ! svc_is_active xray; then
-    cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-    cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
+    cp -a "${backup}" "${XRAY_CONFIG}"
     systemctl restart xray || true
-    die "xray tidak aktif setelah delete user. Config di-rollback ke backup."
+    die "xray tidak aktif setelah delete user. Config di-rollback ke backup: ${backup}"
   fi
 }
-
 
 xray_extract_endpoints() {
   # args: protocol -> prints lines: network|path_or_service
   local proto="$1"
   need_python3
-  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${proto}"
+  python3 - <<'PY' "${XRAY_CONFIG}" "${proto}"
 import json, sys
 src, proto = sys.argv[1:3]
 with open(src,'r',encoding='utf-8') as f:
@@ -2059,15 +2007,8 @@ quota_edit_flow() {
         pause
         ;;
       4)
-        local st_mb
-        st_mb="$(quota_read_detail_fields "${qf}" | awk -F'=' '/^manual_block=/{print $2; exit}')"
-        if [[ "${st_mb}" == "true" ]]; then
-          /usr/local/bin/user-block unblock "${username}" || true
-          log "Manual block: OFF"
-        else
-          /usr/local/bin/user-block block "${username}" || true
-          log "Manual block: ON"
-        fi
+        quota_atomic_update_file "${qf}" "d.setdefault('status',{}); d['status']['manual_block']=not bool(d['status'].get('manual_block'))"
+        log "Manual block toggled"
         pause
         ;;
       5)
@@ -2090,7 +2031,7 @@ quota_edit_flow() {
         pause
         ;;
       7)
-        /usr/local/bin/limit-ip unlock "${username}" || true
+        quota_atomic_update_file "${qf}" "d.setdefault('status',{}); d['status']['ip_limit_locked']=False; d['status']['lock_reason']=''; d['status']['locked_at']=''"
         log "IP lock di-unlock"
         pause
         ;;
