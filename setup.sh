@@ -1185,21 +1185,40 @@ PY
 
 configure_xray_service_confdir() {
   ok "Mengatur xray.service agar memakai -confdir ..."
-  local xray_bin
+  local xray_bin unit_src unit_dst
   xray_bin="$(command -v xray || true)"
   [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
 
-  mkdir -p /etc/systemd/system/xray.service.d
-  cat > /etc/systemd/system/xray.service.d/10-confdir.conf <<EOF
-[Service]
-ExecStart=
-ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}
-EOF
+  unit_src="$(systemctl show -p FragmentPath --value xray 2>/dev/null || true)"
+  unit_dst="/etc/systemd/system/xray.service"
+
+  if [[ -n "${unit_src}" && "${unit_src}" != "${unit_dst}" ]]; then
+    mkdir -p /etc/systemd/system
+    cp -a "${unit_src}" "${unit_dst}" >/dev/null 2>&1 || true
+  fi
+
+  [[ -f "${unit_dst}" ]] || die "Unit xray.service tidak ditemukan di ${unit_dst}."
+
+  cp -a "${unit_dst}" "${unit_dst}.bak.$(date +%Y%m%d-%H%M%S)" >/dev/null 2>&1 || true
+
+  if grep -qE '^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-confdir[[:space:]]+' "${unit_dst}"; then
+    : # sudah benar
+  elif grep -qE '^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-config[[:space:]]+' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-config[[:space:]]+.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}"
+  elif grep -qE '^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-c[[:space:]]+' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStart=.*[[:space:]]run[[:space:]]+-c[[:space:]]+.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}"
+  else
+    # Fallback: ganti ExecStart pertama yang ditemukan.
+    sed -i -E "0,/^[[:space:]]*ExecStart=.*/s|^[[:space:]]*ExecStart=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|" "${unit_dst}" || true
+  fi
+
+  rm -f /etc/systemd/system/xray.service.d/10-confdir.conf >/dev/null 2>&1 || true
+  rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
 
   systemctl daemon-reload
   systemctl restart xray >/dev/null 2>&1 || true
 
-  # Install ini full modular (-confdir). Hapus config monolitik jika ada.
+  # Full modular (-confdir). Hapus config monolitik jika ada.
   rm -f "$XRAY_LEGACY_CONFIG" >/dev/null 2>&1 || true
 }
 
