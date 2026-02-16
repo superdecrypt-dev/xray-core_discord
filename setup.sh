@@ -682,6 +682,15 @@ write_xray_config() {
     ]
   },
   "stats": {},
+  "observatory": {
+    "subjectSelector": [
+      "direct",
+      "warp"
+    ],
+    "probeURL": "https://www.google.com/generate_204",
+    "probeInterval": "30s",
+    "enableConcurrency": true
+  },
   "policy": {
     "levels": {
       "0": {
@@ -696,6 +705,18 @@ write_xray_config() {
   },
   "routing": {
     "domainStrategy": "IPIfNonMatch",
+    "balancers": [
+      {
+        "tag": "egress-balance",
+        "selector": [
+          "direct",
+          "warp"
+        ],
+        "strategy": {
+          "type": "random"
+        }
+      }
+    ],
     "rules": [
       {
         "type": "field",
@@ -1156,6 +1177,7 @@ parts = [
   ("30-routing.json", {"routing": cfg.get("routing") or {}}),
   ("40-policy.json", {"policy": cfg.get("policy") or {}}),
   ("50-stats.json", {"stats": cfg.get("stats") or {}}),
+  ("60-observatory.json", {"observatory": cfg.get("observatory") or {}}),
 ]
 
 os.makedirs(outdir, exist_ok=True)
@@ -1180,6 +1202,7 @@ PY
   ok "  - ${XRAY_CONFDIR}/30-routing.json"
   ok "  - ${XRAY_CONFDIR}/40-policy.json"
   ok "  - ${XRAY_CONFDIR}/50-stats.json"
+  ok "  - ${XRAY_CONFDIR}/60-observatory.json"
 }
 
 configure_xray_service_confdir() {
@@ -2883,8 +2906,7 @@ main() {
   need_root
   check_os
   install_base_deps
-	need_python3
-  install_extra_deps
+  need_python3  install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
   install_fail2ban_aggressive
@@ -2904,8 +2926,7 @@ main() {
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
-	rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
-  configure_xray_service_confdir
+  rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true  configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
   setup_logrotate

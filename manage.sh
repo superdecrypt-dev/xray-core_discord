@@ -19,6 +19,7 @@ XRAY_OUTBOUNDS_CONF="${XRAY_CONFDIR}/20-outbounds.json"
 XRAY_ROUTING_CONF="${XRAY_CONFDIR}/30-routing.json"
 XRAY_POLICY_CONF="${XRAY_CONFDIR}/40-policy.json"
 XRAY_STATS_CONF="${XRAY_CONFDIR}/50-stats.json"
+XRAY_OBSERVATORY_CONF="${XRAY_CONFDIR}/60-observatory.json"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
@@ -229,16 +230,16 @@ detect_public_ip() {
 }
 
 detect_public_ip_ipapi() {
-  # Ambil public IP dari ip-api.com (best-effort), fallback ke detect_public_ip
+  # Ambil public IP dari api.ipify.org (best-effort), fallback ke detect_public_ip
   local ip=""
   if have_cmd curl; then
-    ip="$(curl -fsSL --max-time 5 "https://ip-api.com/line/?fields=query" 2>/dev/null || true)"
+    ip="$(curl -fsSL --max-time 5 "https://api.ipify.org" 2>/dev/null || true)"
   elif have_cmd wget; then
-    ip="$(wget -qO- --timeout=5 "https://ip-api.com/line/?fields=query" 2>/dev/null || true)"
+    ip="$(wget -qO- --timeout=5 "https://api.ipify.org" 2>/dev/null || true)"
   fi
 
   if [[ -z "${ip}" || ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    warn "Gagal fetch IP dari ip-api.com, fallback ke deteksi lokal"
+    warn "Gagal fetch IP dari api.ipify.org, fallback ke deteksi lokal"
     ip="$(detect_public_ip)"
   fi
   echo "${ip}"
@@ -677,7 +678,8 @@ check_xray_config_json() {
     "${XRAY_OUTBOUNDS_CONF}" \
     "${XRAY_ROUTING_CONF}" \
     "${XRAY_POLICY_CONF}" \
-    "${XRAY_STATS_CONF}"; do
+    "${XRAY_STATS_CONF}" \
+    "${XRAY_OBSERVATORY_CONF}"; do
     if [[ ! -f "${f}" ]]; then
       warn "Konfigurasi tidak ditemukan: ${f}"
       ok=0
@@ -2415,7 +2417,12 @@ quota_menu() {
 }
 
 # -------------------------
-# Network add-ons (WARP, routing) (read-only/opsional)
+# Network / Proxy Add-ons
+# - Egress mode: direct / warp / balancer
+# - Balancer: tag "egress-balance"
+# - Observatory: conf.d/60-observatory.json (untuk leastPing/leastLoad)
+# - WARP: global / per-user / per-protocol (inbound)
+# - Domain/Geosite: direct exceptions (editable list, template tetap readonly)
 # -------------------------
 warp_status() {
   title
@@ -2430,15 +2437,800 @@ warp_status() {
   pause
 }
 
-network_menu() {
+network_state_file() {
+  echo "${WORK_DIR}/network_state.json"
+}
+
+network_state_get() {
+  # args: key
+  local key="$1"
+  local f
+  f="$(network_state_file)"
+  if [[ ! -f "${f}" ]]; then
+    return 0
+  fi
+  python3 - <<'PY' "${f}" "${key}" 2>/dev/null || true
+import json, sys
+path, key = sys.argv[1:3]
+try:
+  with open(path,'r',encoding='utf-8') as f:
+    d=json.load(f)
+except Exception:
+  d={}
+v=d.get(key)
+if v is None:
+  raise SystemExit(0)
+print(v)
+PY
+}
+
+network_state_set() {
+  # args: key value
+  local key="$1"
+  local val="$2"
+  local f tmp
+  f="$(network_state_file)"
+  tmp="${WORK_DIR}/network_state.json.tmp"
+  need_python3
+  python3 - <<'PY' "${f}" "${tmp}" "${key}" "${val}"
+import json, os, sys
+path, tmp, key, val = sys.argv[1:5]
+d={}
+try:
+  if os.path.exists(path):
+    with open(path,'r',encoding='utf-8') as f:
+      d=json.load(f) or {}
+except Exception:
+  d={}
+d[key]=val
+with open(tmp,'w',encoding='utf-8') as f:
+  json.dump(d,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+os.replace(tmp, path)
+PY
+  chmod 600 "${f}" 2>/dev/null || true
+}
+
+validate_email_user() {
+  # args: email (username@protocol)
+  local email="${1:-}"
+  [[ "${email}" =~ ^[A-Za-z0-9._-]+@(vless|vmess|trojan)$ ]]
+}
+
+xray_routing_default_rule_get() {
+  # prints: mode=<direct|warp|balancer|unknown> tag=<tag-or-empty> balancer=<balancerTag-or-empty>
+  need_python3
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}"
+import json, sys
+src=sys.argv[1]
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules') or []
+mode='unknown'
+tag=''
+bal=''
+def is_default_rule(r):
+  if not isinstance(r, dict):
+    return False
+  if r.get('type') != 'field':
+    return False
+  port=str(r.get('port','')).strip()
+  if port not in ('1-65535','0-65535'):
+    return False
+  # Heuristic: default catch-all has only port + outboundTag/balancerTag
+  return True
+
+target=None
+for r in rules:
+  if is_default_rule(r):
+    target=r
+# pick last matching
+if isinstance(target, dict):
+  if 'balancerTag' in target and isinstance(target.get('balancerTag'), str) and target.get('balancerTag'):
+    mode='balancer'
+    bal=target.get('balancerTag','')
+  else:
+    ot=target.get('outboundTag')
+    if isinstance(ot, str) and ot:
+      tag=ot
+      if ot == 'warp':
+        mode='warp'
+      elif ot == 'direct':
+        mode='direct'
+      else:
+        mode='unknown'
+print(f"mode={mode}")
+print(f"tag={tag}")
+print(f"balancer={bal}")
+PY
+}
+
+xray_routing_default_rule_set() {
+  # args: mode direct|warp|balancer
+  local mode="$1"
+  local tmp backup
+  need_python3
+
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}"
+import json, sys
+src, dst, mode = sys.argv[1:4]
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing config: routing.rules bukan list")
+
+def is_default_rule(r):
+  if not isinstance(r, dict):
+    return False
+  if r.get('type') != 'field':
+    return False
+  port=str(r.get('port','')).strip()
+  return port in ('1-65535','0-65535')
+
+idx=None
+for i,r in enumerate(rules):
+  if is_default_rule(r):
+    idx=i
+
+if idx is None:
+  raise SystemExit("Default rule (port 1-65535) tidak ditemukan")
+
+r=rules[idx]
+if mode == 'direct':
+  r.pop('balancerTag', None)
+  r['outboundTag']='direct'
+elif mode == 'warp':
+  r.pop('balancerTag', None)
+  r['outboundTag']='warp'
+elif mode == 'balancer':
+  r.pop('outboundTag', None)
+  r['balancerTag']='egress-balance'
+else:
+  raise SystemExit("Mode tidak dikenal: " + mode)
+
+rules[idx]=r
+routing['rules']=rules
+cfg['routing']=routing
+
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal update routing (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_routing_balancer_get() {
+  # prints: strategy=<type> selector=<comma-separated>
+  need_python3
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}"
+import json, sys
+src=sys.argv[1]
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+balancers=routing.get('balancers') or []
+b=None
+for it in balancers:
+  if isinstance(it, dict) and it.get('tag') == 'egress-balance':
+    b=it
+    break
+if not isinstance(b, dict):
+  print("strategy=")
+  print("selector=")
+  raise SystemExit(0)
+st=(b.get('strategy') or {})
+stype=st.get('type') if isinstance(st, dict) else ''
+sel=b.get('selector') or []
+if not isinstance(sel, list):
+  sel=[]
+sel=[str(x) for x in sel if str(x).strip()]
+print("strategy=" + (str(stype) if stype is not None else ""))
+print("selector=" + ",".join(sel))
+PY
+}
+
+xray_routing_balancer_set_strategy() {
+  # args: strategy type
+  local stype="$1"
+  local tmp backup
+  need_python3
+
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${stype}"
+import json, sys
+src, dst, stype = sys.argv[1:4]
+allowed={"random","roundRobin","leastPing","leastLoad"}
+if stype not in allowed:
+  raise SystemExit("Strategy invalid. Pilihan: " + ", ".join(sorted(allowed)))
+
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+balancers=routing.get('balancers')
+if not isinstance(balancers, list):
+  balancers=[]
+
+b=None
+for it in balancers:
+  if isinstance(it, dict) and it.get('tag') == 'egress-balance':
+    b=it
+    break
+if b is None:
+  b={"tag":"egress-balance","selector":["direct","warp"],"strategy":{"type":"random"}}
+  balancers.insert(0,b)
+
+b.setdefault('strategy', {})
+if not isinstance(b['strategy'], dict):
+  b['strategy']={}
+b['strategy']['type']=stype
+
+routing['balancers']=balancers
+cfg['routing']=routing
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal update balancer (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_routing_balancer_set_selector_from_outbounds() {
+  # args: comma-separated or "auto"
+  local mode="${1:-auto}"
+  local tmp backup
+  need_python3
+
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  [[ -f "${XRAY_OUTBOUNDS_CONF}" ]] || die "Xray outbounds conf tidak ditemukan: ${XRAY_OUTBOUNDS_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}"
+import json, sys
+rt_src, ob_src, dst, mode = sys.argv[1:5]
+with open(rt_src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+with open(ob_src,'r',encoding='utf-8') as f:
+  ob=json.load(f)
+
+def list_outbound_tags():
+  out=[]
+  for o in (ob.get('outbounds') or []):
+    if not isinstance(o, dict):
+      continue
+    tag=o.get('tag')
+    if isinstance(tag, str) and tag.strip():
+      out.append(tag.strip())
+  return out
+
+routing=(cfg.get('routing') or {})
+balancers=routing.get('balancers')
+if not isinstance(balancers, list):
+  balancers=[]
+b=None
+for it in balancers:
+  if isinstance(it, dict) and it.get('tag') == 'egress-balance':
+    b=it
+    break
+if b is None:
+  b={"tag":"egress-balance","selector":["direct","warp"],"strategy":{"type":"random"}}
+  balancers.insert(0,b)
+
+sel=[]
+if mode == 'auto':
+  tags=list_outbound_tags()
+  # Exclude internal/system tags
+  deny={"api","blocked"}
+  for t in tags:
+    if t in deny:
+      continue
+    sel.append(t)
+else:
+  sel=[x.strip() for x in mode.split(",") if x.strip()]
+
+if not sel:
+  raise SystemExit("Selector kosong. Gunakan auto atau isi tag dipisah koma.")
+
+b['selector']=sel
+routing['balancers']=balancers
+cfg['routing']=routing
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal update selector balancer (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_observatory_get() {
+  # prints: probeURL=... interval=... concurrency=true|false subjectSelector=comma-separated
+  if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
+    echo "probeURL="
+    echo "interval="
+    echo "concurrency="
+    echo "subjectSelector="
+    return 0
+  fi
+  need_python3
+  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}"
+import json, sys
+src=sys.argv[1]
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+obs=cfg.get('observatory') or {}
+if not isinstance(obs, dict):
+  obs={}
+probe=obs.get('probeURL') or obs.get('probeUrl') or ''
+interval=obs.get('probeInterval') or ''
+con=obs.get('enableConcurrency')
+sub=obs.get('subjectSelector') or []
+if not isinstance(sub, list):
+  sub=[]
+sub=[str(x) for x in sub if str(x).strip()]
+print("probeURL=" + str(probe))
+print("interval=" + str(interval))
+print("concurrency=" + ("true" if bool(con) else "false"))
+print("subjectSelector=" + ",".join(sub))
+PY
+}
+
+xray_observatory_set_basic() {
+  # args: probeURL interval enableConcurrency(true/false)
+  local probe="$1"
+  local interval="$2"
+  local conc="$3"
+  local tmp backup
+
+  need_python3
+
+  if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
+    # Create empty file with safe perms
+    install -m 600 -o root -g root /dev/null "${XRAY_OBSERVATORY_CONF}"
+    echo '{}' > "${XRAY_OBSERVATORY_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
+  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  tmp="${WORK_DIR}/60-observatory.json.tmp"
+
+  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${probe}" "${interval}" "${conc}"
+import json, sys
+src, dst, probe, interval, conc = sys.argv[1:6]
+conc = str(conc).lower() in ("1","true","yes","y","on")
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f) if f.readable() else {}
+if not isinstance(cfg, dict):
+  cfg={}
+obs=cfg.get('observatory')
+if not isinstance(obs, dict):
+  obs={}
+if probe.strip():
+  obs['probeURL']=probe.strip()
+if interval.strip():
+  obs['probeInterval']=interval.strip()
+obs['enableConcurrency']=bool(conc)
+if 'subjectSelector' not in obs:
+  obs['subjectSelector']=[]
+cfg['observatory']=obs
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
+    die "Gagal update observatory (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_observatory_sync_subject_selector_from_balancer() {
+  local tmp backup
+  need_python3
+
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_OBSERVATORY_CONF}"
+    echo '{}' > "${XRAY_OBSERVATORY_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
+  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  tmp="${WORK_DIR}/60-observatory.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OBSERVATORY_CONF}" "${tmp}"
+import json, sys
+rt, obs_src, dst = sys.argv[1:4]
+with open(rt,'r',encoding='utf-8') as f:
+  rt_cfg=json.load(f)
+routing=(rt_cfg.get('routing') or {})
+balancers=routing.get('balancers') or []
+sel=[]
+for b in balancers:
+  if isinstance(b, dict) and b.get('tag') == 'egress-balance':
+    s=b.get('selector') or []
+    if isinstance(s, list):
+      sel=[str(x) for x in s if str(x).strip()]
+    break
+
+with open(obs_src,'r',encoding='utf-8') as f:
+  cfg=json.load(f) if f.readable() else {}
+if not isinstance(cfg, dict):
+  cfg={}
+obs=cfg.get('observatory')
+if not isinstance(obs, dict):
+  obs={}
+obs['subjectSelector']=sel
+cfg['observatory']=obs
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
+    die "Gagal sync subjectSelector (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_routing_rule_toggle_user_outbound() {
+  # args: marker outboundTag email on|off
+  local marker="$1"
+  local outbound="$2"
+  local email="$3"
+  local onoff="$4"
+  local tmp backup
+
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${email}" "${onoff}"
+import json, sys
+src, dst, marker, outbound, email, onoff = sys.argv[1:7]
+enable = (onoff.lower() == 'on')
+
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing config: routing.rules bukan list")
+
+def is_default_rule(r):
+  if not isinstance(r, dict): return False
+  if r.get('type') != 'field': return False
+  port=str(r.get('port','')).strip()
+  return port in ('1-65535','0-65535')
+
+default_idx=None
+for i,r in enumerate(rules):
+  if is_default_rule(r):
+    default_idx=i
+
+if default_idx is None:
+  raise SystemExit("Default rule tidak ditemukan, tidak bisa insert rule baru")
+
+rule_idx=None
+for i,r in enumerate(rules):
+  if not isinstance(r, dict): continue
+  if r.get('type') != 'field': continue
+  if r.get('outboundTag') != outbound: continue
+  u=r.get('user') or []
+  if isinstance(u, list) and marker in u:
+    rule_idx=i
+    break
+
+if rule_idx is None:
+  # Insert before default rule
+  newr={"type":"field","user":[marker],"outboundTag":outbound}
+  rules.insert(default_idx, newr)
+  rule_idx=default_idx
+
+r=rules[rule_idx]
+u=r.get('user') or []
+if not isinstance(u, list):
+  u=[]
+# Ensure marker is first
+u=[x for x in u if x != marker]
+u.insert(0, marker)
+
+if enable:
+  if email not in u:
+    u.append(email)
+else:
+  u=[x for x in u if x != email]
+  # Keep marker only
+
+r['user']=u
+rules[rule_idx]=r
+routing['rules']=rules
+cfg['routing']=routing
+
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal update routing (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_routing_rule_toggle_inbounds_outbound() {
+  # args: marker outboundTag comma_inboundTags on|off
+  local marker="$1"
+  local outbound="$2"
+  local tags_csv="$3"
+  local onoff="$4"
+  local tmp backup
+
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${tags_csv}" "${onoff}"
+import json, sys
+src, dst, marker, outbound, tags_csv, onoff = sys.argv[1:7]
+enable = (onoff.lower() == 'on')
+tags=[t.strip() for t in tags_csv.split(",") if t.strip()]
+
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing config: routing.rules bukan list")
+
+def is_default_rule(r):
+  if not isinstance(r, dict): return False
+  if r.get('type') != 'field': return False
+  port=str(r.get('port','')).strip()
+  return port in ('1-65535','0-65535')
+
+default_idx=None
+for i,r in enumerate(rules):
+  if is_default_rule(r):
+    default_idx=i
+if default_idx is None:
+  raise SystemExit("Default rule tidak ditemukan, tidak bisa insert rule baru")
+
+rule_idx=None
+for i,r in enumerate(rules):
+  if not isinstance(r, dict): continue
+  if r.get('type') != 'field': continue
+  if r.get('outboundTag') != outbound: continue
+  ib=r.get('inboundTag') or []
+  if isinstance(ib, list) and marker in ib:
+    rule_idx=i
+    break
+
+if rule_idx is None:
+  newr={"type":"field","inboundTag":[marker],"outboundTag":outbound}
+  rules.insert(default_idx, newr)
+  rule_idx=default_idx
+
+r=rules[rule_idx]
+ib=r.get('inboundTag') or []
+if not isinstance(ib, list):
+  ib=[]
+# Ensure marker first
+ib=[x for x in ib if x != marker]
+ib.insert(0, marker)
+
+if enable:
+  for t in tags:
+    if t not in ib:
+      ib.append(t)
+else:
+  ib=[x for x in ib if x not in tags]
+  # Keep marker only
+
+r['inboundTag']=ib
+rules[rule_idx]=r
+routing['rules']=rules
+cfg['routing']=routing
+
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal update routing (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_list_inbounds_tags_by_protocol() {
+  # args: proto
+  local proto="$1"
+  need_python3
+  [[ -f "${XRAY_INBOUNDS_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${proto}"
+import json, sys
+src, proto = sys.argv[1:3]
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+tags=[]
+for ib in cfg.get('inbounds', []) or []:
+  if not isinstance(ib, dict):
+    continue
+  if ib.get('protocol') != proto:
+    continue
+  tag=ib.get('tag')
+  if isinstance(tag, str) and tag.strip():
+    tags.append(tag.strip())
+print(",".join(tags))
+PY
+}
+
+network_show_summary() {
+  title
+  echo "Network / Proxy Summary"
+  hr
+
+  if [[ -f "${XRAY_ROUTING_CONF}" ]]; then
+    xray_routing_default_rule_get
+    hr
+    echo "Balancer (egress-balance):"
+    xray_routing_balancer_get
+    hr
+  else
+    warn "Routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  fi
+
+  echo "Observatory:"
+  xray_observatory_get
+  hr
+
+  if systemctl list-unit-files | grep -q '^wireproxy\.service'; then
+    echo "$(svc_status_line wireproxy)"
+  else
+    echo "wireproxy: (tidak terpasang)"
+  fi
+  hr
+  pause
+}
+
+egress_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons"
+    echo "4) Network / Proxy Add-ons > Egress Mode & Balancer"
     hr
-    echo "  1. WARP status"
-    echo "  2. Restart WARP (wireproxy) (opsional)"
-    echo "  3. Show sysctl BBR (read-only)"
-    echo "  0. Back (kembali)"
+    xray_routing_default_rule_get || true
+    echo ""
+    echo "Balancer (egress-balance):"
+    xray_routing_balancer_get || true
+    echo ""
+    echo "Observatory:"
+    xray_observatory_get || true
+    hr
+
+    echo "  1) Set default egress: DIRECT"
+    echo "  2) Set default egress: WARP"
+    echo "  3) Set default egress: BALANCER (egress-balance)"
+    echo "  4) Set balancer strategy (random/roundRobin/leastPing/leastLoad)"
+    echo "  5) Set balancer selector (auto dari outbounds)"
+    echo "  6) Set balancer selector (manual: tag1,tag2,...)"
+    echo "  7) Observatory: set probeURL/interval/concurrency"
+    echo "  8) Observatory: sync subjectSelector dari balancer selector"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) xray_routing_default_rule_set direct ; log "Default egress: DIRECT" ; pause ;;
+      2) xray_routing_default_rule_set warp ; log "Default egress: WARP" ; pause ;;
+      3) xray_routing_default_rule_set balancer ; log "Default egress: BALANCER" ; pause ;;
+      4)
+        read -r -p "Strategy (random/roundRobin/leastPing/leastLoad) (atau kembali): " st
+        if is_back_choice "${st}"; then
+          continue
+        fi
+        xray_routing_balancer_set_strategy "${st}"
+        log "Balancer strategy updated: ${st}"
+        pause
+        ;;
+      5)
+        xray_routing_balancer_set_selector_from_outbounds auto
+        log "Balancer selector di-set: auto"
+        pause
+        ;;
+      6)
+        read -r -p "Selector tags (tag1,tag2,...) (atau kembali): " sel
+        if is_back_choice "${sel}"; then
+          continue
+        fi
+        xray_routing_balancer_set_selector_from_outbounds "${sel}"
+        log "Balancer selector updated"
+        pause
+        ;;
+      7)
+        read -r -p "probeURL (contoh https://www.google.com/generate_204) (atau kembali): " purl
+        if is_back_choice "${purl}"; then
+          continue
+        fi
+        read -r -p "probeInterval (contoh 30s) (atau kembali): " pint
+        if is_back_choice "${pint}"; then
+          continue
+        fi
+        read -r -p "enableConcurrency (true/false) (atau kembali): " pcon
+        if is_back_choice "${pcon}"; then
+          continue
+        fi
+        xray_observatory_set_basic "${purl}" "${pint}" "${pcon}"
+        log "Observatory updated"
+        pause
+        ;;
+      8)
+        xray_observatory_sync_subject_selector_from_balancer
+        log "Observatory subjectSelector disinkronkan"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+warp_controls_menu() {
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > WARP Controls"
+    hr
+    xray_routing_default_rule_get || true
+    hr
+    echo "  1) WARP (wireproxy) status"
+    echo "  2) Restart WARP (wireproxy)"
+    echo "  3) Toggle WARP Global (default egress)"
+    echo "  4) WARP per-user (toggle)"
+    echo "  5) WARP per-protocol inbounds (toggle)"
+    echo "  0) Back"
     hr
     read -r -p "Pilih: " c
     case "${c}" in
@@ -2456,16 +3248,432 @@ network_menu() {
         pause
         ;;
       3)
+  local mode_line prev
+  mode_line="$(xray_routing_default_rule_get | awk -F'=' '/^mode=/{print $2; exit}' || true)"
+  if [[ "${mode_line}" != "direct" && "${mode_line}" != "warp" && "${mode_line}" != "balancer" ]]; then
+    mode_line="direct"
+  fi
+
+  if [[ "${mode_line}" != "warp" ]]; then
+    network_state_set "prev_egress_mode" "${mode_line}"
+    xray_routing_default_rule_set warp
+    log "WARP Global: ON (prev: ${mode_line})"
+  else
+    prev="$(network_state_get prev_egress_mode || true)"
+    if [[ "${prev}" != "direct" && "${prev}" != "balancer" ]]; then
+      prev="direct"
+    fi
+    xray_routing_default_rule_set "${prev}"
+    log "WARP Global: OFF (restore: ${prev})"
+  fi
+  pause
+  ;;
+      4)
+        read -r -p "Email user (username@protocol) (atau kembali): " email
+        if is_back_choice "${email}"; then
+          continue
+        fi
+        if ! validate_email_user "${email}"; then
+          warn "Format user tidak valid. Contoh: alice@vless"
+          pause
+          continue
+        fi
+        read -r -p "Mode (on/off) (atau kembali): " onoff
+        if is_back_choice "${onoff}"; then
+          continue
+        fi
+        onoff="$(echo "${onoff}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "${onoff}" != "on" && "${onoff}" != "off" ]]; then
+          warn "Mode harus on/off"
+          pause
+          continue
+        fi
+        xray_routing_rule_toggle_user_outbound "dummy-warp-user" "warp" "${email}" "${onoff}"
+        log "WARP per-user updated: ${email} => ${onoff}"
+        pause
+        ;;
+      5)
+        echo "Pilih protocol:"
+        echo "  1) vless"
+        echo "  2) vmess"
+        echo "  3) trojan"
+        read -r -p "Protocol (1/2/3) (atau kembali): " p
+        if is_back_choice "${p}"; then
+          continue
+        fi
+        local proto
+        case "${p}" in
+          1) proto="vless" ;;
+          2) proto="vmess" ;;
+          3) proto="trojan" ;;
+          *) warn "Pilihan tidak valid" ; pause ; continue ;;
+        esac
+
+        local tags_csv
+        tags_csv="$(xray_list_inbounds_tags_by_protocol "${proto}" || true)"
+        if [[ -z "${tags_csv}" ]]; then
+          warn "Tidak menemukan inbound tag untuk protocol ${proto}"
+          pause
+          continue
+        fi
+        read -r -p "Mode (on/off) untuk semua inbound ${proto} (atau kembali): " onoff2
+        if is_back_choice "${onoff2}"; then
+          continue
+        fi
+        onoff2="$(echo "${onoff2}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "${onoff2}" != "on" && "${onoff2}" != "off" ]]; then
+          warn "Mode harus on/off"
+          pause
+          continue
+        fi
+        xray_routing_rule_toggle_inbounds_outbound "dummy-warp-inbounds" "warp" "${tags_csv}" "${onoff2}"
+        log "WARP per-protocol updated: ${proto} => ${onoff2}"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+domain_geosite_menu() {
+  need_python3
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > Domain/Geosite Routing (Direct List)"
+    hr
+    echo "Template (readonly):"
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" 2>/dev/null || true
+import json, sys
+src=sys.argv[1]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+rules=((cfg.get('routing') or {}).get('rules') or [])
+tpl=None
+for r in rules:
+  if not isinstance(r, dict):
+    continue
+  if r.get('type') != 'field':
+    continue
+  if r.get('outboundTag') != 'direct':
+    continue
+  dom=r.get('domain') or []
+  if isinstance(dom, list) and ('geosite:apple' in dom or 'geosite:google' in dom):
+    tpl=dom
+    break
+if not isinstance(tpl, list):
+  tpl=[]
+for i,d in enumerate([x for x in tpl if isinstance(x,str)] , start=1):
+  print(f"  {i:>2}. {d}")
+PY
+    hr
+
+    echo "Editable (custom direct list):"
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" 2>/dev/null || true
+import json, sys
+src=sys.argv[1]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+rules=((cfg.get('routing') or {}).get('rules') or [])
+custom=None
+for r in rules:
+  if not isinstance(r, dict): 
+    continue
+  if r.get('type')!='field':
+    continue
+  if r.get('outboundTag')!='direct':
+    continue
+  dom=r.get('domain') or []
+  if isinstance(dom, list) and 'regexp:^$' in dom:
+    custom=[x for x in dom if isinstance(x,str) and x!='regexp:^$']
+    break
+if not isinstance(custom, list):
+  custom=[]
+if not custom:
+  print("  (kosong)")
+else:
+  for i,d in enumerate(custom, start=1):
+    print(f"  {i:>2}. {d}")
+PY
+    hr
+
+    echo "  1) Add domain/geosite ke custom list"
+    echo "  2) Remove domain/geosite dari custom list"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        read -r -p "Masukkan entry (contoh: geosite:twitter / example.com) (atau kembali): " ent
+        if is_back_choice "${ent}"; then
+          continue
+        fi
+        ent="$(echo "${ent}" | tr -d '[:space:]')"
+        if [[ -z "${ent}" ]]; then
+          warn "Entry kosong"
+          pause
+          continue
+        fi
+        if [[ "${ent}" == "regexp:^$" ]]; then
+          warn "Entry reserved"
+          pause
+          continue
+        fi
+        need_python3
+        ensure_path_writable "${XRAY_ROUTING_CONF}"
+        local backup tmp
+        backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+        tmp="${WORK_DIR}/30-routing.json.tmp"
+        python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${ent}"
+import json, sys
+src, dst, ent = sys.argv[1:4]
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing.rules")
+
+# Find template direct rule
+tpl_idx=None
+for i,r in enumerate(rules):
+  if not isinstance(r, dict): continue
+  if r.get('type')!='field': continue
+  if r.get('outboundTag')!='direct': continue
+  dom=r.get('domain') or []
+  if isinstance(dom, list) and ('geosite:apple' in dom or 'geosite:google' in dom):
+    tpl_idx=i
+    break
+
+# Find/create custom rule
+custom_idx=None
+for i,r in enumerate(rules):
+  if not isinstance(r, dict): continue
+  if r.get('type')!='field': continue
+  if r.get('outboundTag')!='direct': continue
+  dom=r.get('domain') or []
+  if isinstance(dom, list) and 'regexp:^$' in dom:
+    custom_idx=i
+    break
+
+if custom_idx is None:
+  newr={"type":"field","domain":["regexp:^$"],"outboundTag":"direct"}
+  insert_at = (tpl_idx + 1) if tpl_idx is not None else len(rules)
+  rules.insert(insert_at, newr)
+  custom_idx=insert_at
+
+r=rules[custom_idx]
+dom=r.get('domain') or []
+if not isinstance(dom, list):
+  dom=[]
+if 'regexp:^$' not in dom:
+  dom.insert(0,'regexp:^$')
+if ent not in dom:
+  dom.append(ent)
+r['domain']=dom
+rules[custom_idx]=r
+
+routing['rules']=rules
+cfg['routing']=routing
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+        xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+          cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          die "Gagal update routing (rollback ke backup: ${backup})"
+        }
+        svc_restart xray || true
+        log "Entry ditambahkan: ${ent}"
+        pause
+        ;;
+      2)
+        read -r -p "Hapus nomor entry (lihat daftar) (atau kembali): " no
+        if is_back_choice "${no}"; then
+          continue
+        fi
+        if [[ -z "${no}" || ! "${no}" =~ ^[0-9]+$ || "${no}" -le 0 ]]; then
+          warn "Nomor tidak valid"
+          pause
+          continue
+        fi
+        need_python3
+        ensure_path_writable "${XRAY_ROUTING_CONF}"
+        local backup tmp
+        backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+        tmp="${WORK_DIR}/30-routing.json.tmp"
+        python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${no}"
+import json, sys
+src, dst, no = sys.argv[1:4]
+no=int(no)
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing.rules")
+
+custom_idx=None
+for i,r in enumerate(rules):
+  if not isinstance(r, dict): 
+    continue
+  if r.get('type')!='field':
+    continue
+  if r.get('outboundTag')!='direct':
+    continue
+  dom=r.get('domain') or []
+  if isinstance(dom, list) and 'regexp:^$' in dom:
+    custom_idx=i
+    break
+if custom_idx is None:
+  raise SystemExit("Custom list belum ada")
+
+r=rules[custom_idx]
+dom=[x for x in (r.get('domain') or []) if isinstance(x,str)]
+entries=[x for x in dom if x!='regexp:^$']
+if no > len(entries):
+  raise SystemExit("Nomor di luar range")
+target=entries[no-1]
+dom=[x for x in dom if x!=target]
+# Ensure marker exists
+if 'regexp:^$' not in dom:
+  dom.insert(0,'regexp:^$')
+r['domain']=dom
+rules[custom_idx]=r
+
+routing['rules']=rules
+cfg['routing']=routing
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+        xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+          cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          die "Gagal update routing (rollback ke backup: ${backup})"
+        }
+        svc_restart xray || true
+        log "Entry dihapus"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+dns_addons_menu() {
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > DNS Add-ons"
+    hr
+    if [[ -f "${XRAY_DNS_CONF}" ]]; then
+      echo "DNS conf: ${XRAY_DNS_CONF}"
+      echo "Tip: gunakan editor untuk perubahan advanced (nano)."
+      hr
+      sed -n '1,200p' "${XRAY_DNS_CONF}" || true
+      hr
+    else
+      warn "DNS conf tidak ditemukan: ${XRAY_DNS_CONF}"
+      hr
+    fi
+    echo "  1) Open DNS config with nano"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        if have_cmd nano; then
+          nano "${XRAY_DNS_CONF}"
+          svc_restart xray || true
+          pause
+        else
+          warn "nano tidak tersedia"
+          pause
+        fi
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+network_diagnostics_menu() {
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > Diagnostics"
+    hr
+    echo "  1) Show summary (routing/balancer/observatory)"
+    echo "  2) Validate conf.d JSON (jq)"
+    echo "  3) xray run -test -confdir (syntax check)"
+    echo "  4) Show wireproxy + xray status"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) network_show_summary ;;
+      2)
         title
-        echo "sysctl TCP/BBR info"
+        echo "Validate JSON"
         hr
-        sysctl net.ipv4.tcp_congestion_control 2>/dev/null || true
-        sysctl net.core.default_qdisc 2>/dev/null || true
+        check_xray_config_json || true
+        hr
+        pause
+        ;;
+      3)
+        title
+        echo "xray config test (confdir)"
+        hr
+        if have_cmd xray; then
+          xray run -test -confdir "${XRAY_CONFDIR}" 2>&1 || true
+        else
+          warn "xray binary tidak ditemukan"
+        fi
+        hr
+        pause
+        ;;
+      4)
+        title
+        echo "$(svc_status_line xray)"
+        echo "$(svc_status_line nginx)"
+        if systemctl list-unit-files | grep -q '^wireproxy\.service'; then
+          echo "$(svc_status_line wireproxy)"
+        fi
         hr
         pause
         ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ; return 0 ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+network_menu() {
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons"
+    hr
+    echo "  1) Egress Mode & Balancer"
+    echo "  2) WARP Controls"
+    echo "  3) Domain/Geosite Routing (Direct List)"
+    echo "  4) DNS Add-ons"
+    echo "  5) Diagnostics"
+    echo "  0) Back (kembali)"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) egress_menu ;;
+      2) warp_controls_menu ;;
+      3) domain_geosite_menu ;;
+      4) dns_addons_menu ;;
+      5) network_diagnostics_menu ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
   done
 }
