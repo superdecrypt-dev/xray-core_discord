@@ -1163,7 +1163,7 @@ routing["balancers"] = balancers
 
 observatory = {
   "subjectSelector": ["direct", "warp"],
-  "probeUrl": "https://www.google.com/generate_204",
+  "probeURl": "https://www.google.com/generate_204",
   "probeInterval": "10m",
   "enableConcurrency": True
 }
