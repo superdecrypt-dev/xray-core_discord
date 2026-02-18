@@ -191,6 +191,68 @@ validate_username() {
   return 0
 }
 
+account_username_find_protos() {
+  # args: username
+  local username="$1"
+  local protos=()
+  local p
+  for p in vless vmess trojan; do
+    if [[ -f "${ACCOUNT_ROOT}/${p}/${username}@${p}.txt" ]]; then
+      protos+=("${p}")
+    fi
+  done
+  echo "${protos[*]:-}"
+}
+
+quota_username_find_protos() {
+  # args: username
+  local username="$1"
+  local protos=()
+  local p
+  for p in vless vmess trojan; do
+    if [[ -f "${QUOTA_ROOT}/${p}/${username}@${p}.json" ]]; then
+      protos+=("${p}")
+    fi
+  done
+  echo "${protos[*]:-}"
+}
+
+xray_username_find_protos() {
+  # args: username
+  local username="$1"
+  need_python3
+  [[ -f "${XRAY_INBOUNDS_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${username}" 2>/dev/null || true
+import json, sys
+src, username = sys.argv[1:3]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+
+protos=set()
+for ib in (cfg.get('inbounds') or []):
+  if not isinstance(ib, dict):
+    continue
+  proto=ib.get('protocol')
+  st=(ib.get('settings') or {})
+  clients=st.get('clients') or []
+  if not isinstance(clients, list):
+    continue
+  for c in clients:
+    if not isinstance(c, dict):
+      continue
+    em=c.get('email')
+    if not isinstance(em, str) or '@' not in em:
+      continue
+    u,p = em.split('@', 1)
+    if u == username and isinstance(p, str) and p:
+      protos.add(p.strip())
+print(" ".join(sorted([x for x in protos if x])))
+PY
+}
+
 is_yes() {
   # accept: y/yes/1/on/true
   local v="${1:-}"
@@ -301,6 +363,13 @@ title() {
 svc_is_active() {
   local svc="$1"
   systemctl is-active --quiet "${svc}"
+}
+
+svc_exists() {
+  local svc="$1"
+  local load
+  load="$(systemctl show -p LoadState --value "${svc}" 2>/dev/null || true)"
+  [[ -n "${load}" && "${load}" != "not-found" ]]
 }
 
 svc_status_line() {
@@ -1432,6 +1501,20 @@ user_add_menu() {
     return 0
   fi
 
+
+  local found_xray found_account found_quota
+  found_xray="$(xray_username_find_protos "${username}" || true)"
+  found_account="$(account_username_find_protos "${username}" || true)"
+  found_quota="$(quota_username_find_protos "${username}" || true)"
+  if [[ -n "${found_xray}" || -n "${found_account}" || -n "${found_quota}" ]]; then
+    warn "Username sudah ada, batal membuat akun: ${username}"
+    [[ -n "${found_xray}" ]] && echo "  - Xray inbounds: ${found_xray}"
+    [[ -n "${found_account}" ]] && echo "  - Account file : ${found_account}"
+    [[ -n "${found_quota}" ]] && echo "  - Quota meta   : ${found_quota}"
+    pause
+    return 0
+  fi
+
   read -r -p "Masa aktif (hari) (atau kembali): " days
   if is_back_choice "${days}"; then
     return 0
@@ -2428,7 +2511,7 @@ warp_status() {
   title
   echo "WARP (wireproxy) status"
   hr
-  if systemctl list-unit-files | grep -q '^wireproxy\.service'; then
+  if svc_exists wireproxy; then
     systemctl status wireproxy --no-pager || true
   else
     warn "wireproxy.service tidak terdeteksi"
@@ -3129,7 +3212,7 @@ network_show_summary() {
   xray_observatory_get
   hr
 
-  if systemctl list-unit-files | grep -q '^wireproxy\.service'; then
+  if svc_exists wireproxy; then
     echo "$(svc_status_line wireproxy)"
   else
     echo "wireproxy: (tidak terpasang)"
@@ -3218,6 +3301,633 @@ egress_menu() {
   done
 }
 
+warp_global_mode_get() {
+  xray_routing_default_rule_get | awk -F'=' '/^mode=/{print $2; exit}' 2>/dev/null || true
+}
+
+warp_global_mode_pretty_get() {
+  local mode bal
+  mode="$(warp_global_mode_get)"
+  bal="$(xray_routing_default_rule_get | awk -F'=' '/^balancer=/{print $2; exit}' 2>/dev/null || true)"
+  case "${mode}" in
+    warp) echo "warp" ;;
+    direct) echo "direct" ;;
+    balancer)
+      if [[ -n "${bal}" ]]; then
+        echo "balancer (${bal})"
+      else
+        echo "balancer"
+      fi
+      ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+xray_routing_rule_user_list_get() {
+  # args: marker outboundTag
+  local marker="$1"
+  local outbound="$2"
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${marker}" "${outbound}" 2>/dev/null || true
+import json, sys
+src, marker, outbound = sys.argv[1:4]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+rules=((cfg.get('routing') or {}).get('rules') or [])
+out=[]
+for r in rules:
+  if not isinstance(r, dict): 
+    continue
+  if r.get('type') != 'field':
+    continue
+  if r.get('outboundTag') != outbound:
+    continue
+  u=r.get('user') or []
+  if not isinstance(u, list):
+    continue
+  if marker in u:
+    for x in u:
+      if isinstance(x, str) and x and x != marker:
+        out.append(x)
+    break
+for x in out:
+  print(x)
+PY
+}
+
+xray_routing_rule_inbound_list_get() {
+  # args: marker outboundTag
+  local marker="$1"
+  local outbound="$2"
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${marker}" "${outbound}" 2>/dev/null || true
+import json, sys
+src, marker, outbound = sys.argv[1:4]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+rules=((cfg.get('routing') or {}).get('rules') or [])
+out=[]
+for r in rules:
+  if not isinstance(r, dict): 
+    continue
+  if r.get('type') != 'field':
+    continue
+  if r.get('outboundTag') != outbound:
+    continue
+  ib=r.get('inboundTag') or []
+  if not isinstance(ib, list):
+    continue
+  if marker in ib:
+    for x in ib:
+      if isinstance(x, str) and x and x != marker:
+        out.append(x)
+    break
+for x in out:
+  print(x)
+PY
+}
+
+xray_routing_custom_domain_list_get() {
+  # args: marker outboundTag
+  local marker="$1"
+  local outbound="$2"
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${marker}" "${outbound}" 2>/dev/null || true
+import json, sys
+src, marker, outbound = sys.argv[1:4]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+rules=((cfg.get('routing') or {}).get('rules') or [])
+custom=None
+for r in rules:
+  if not isinstance(r, dict):
+    continue
+  if r.get('type') != 'field':
+    continue
+  if r.get('outboundTag') != outbound:
+    continue
+  dom=r.get('domain') or []
+  if isinstance(dom, list) and marker in dom:
+    custom=[x for x in dom if isinstance(x, str) and x and x != marker]
+    break
+if not isinstance(custom, list):
+  custom=[]
+for x in custom:
+  print(x)
+PY
+}
+
+xray_inbounds_all_client_emails_get() {
+  need_python3
+  [[ -f "${XRAY_INBOUNDS_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" 2>/dev/null || true
+import json, sys
+src=sys.argv[1]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+emails=set()
+for ib in (cfg.get('inbounds') or []):
+  if not isinstance(ib, dict):
+    continue
+  st=(ib.get('settings') or {})
+  clients=st.get('clients') or []
+  if not isinstance(clients, list):
+    continue
+  for c in clients:
+    if not isinstance(c, dict):
+      continue
+    em=c.get('email')
+    if isinstance(em, str) and em.strip():
+      emails.add(em.strip())
+for em in sorted(emails):
+  print(em)
+PY
+}
+
+warp_controls_summary() {
+  local global wire_state
+  global="$(warp_global_mode_pretty_get)"
+  if svc_exists wireproxy; then
+    if svc_is_active wireproxy; then
+      wire_state="active"
+    else
+      wire_state="inactive"
+    fi
+  else
+    wire_state="not-installed"
+  fi
+
+  local wu du wi di dd wd
+  wu="$(xray_routing_rule_user_list_get "dummy-warp-user" "warp" | wc -l | tr -d ' ')"
+  du="$(xray_routing_rule_user_list_get "dummy-direct-user" "direct" | wc -l | tr -d ' ')"
+  wi="$(xray_routing_rule_inbound_list_get "dummy-warp-inbounds" "warp" | wc -l | tr -d ' ')"
+  di="$(xray_routing_rule_inbound_list_get "dummy-direct-inbounds" "direct" | wc -l | tr -d ' ')"
+  dd="$(xray_routing_custom_domain_list_get "regexp:^$" "direct" | wc -l | tr -d ' ')"
+  wd="$(xray_routing_custom_domain_list_get "regexp:^$WARP" "warp" | wc -l | tr -d ' ')"
+
+  echo "WARP Global : ${global}"
+  echo "wireproxy   : ${wire_state}"
+  echo "Override    : user warp=${wu}, user direct=${du} | inbound warp=${wi}, inbound direct=${di}"
+  echo "Domain list : direct=${dd}, warp=${wd}"
+}
+
+warp_controls_report() {
+  title
+  echo "WARP status report (detail)"
+  hr
+  warp_controls_summary || true
+  hr
+
+  need_python3
+  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${XRAY_ROUTING_CONF}" 2>/dev/null || true
+import json, sys
+inb_path, routing_path = sys.argv[1:3]
+
+def load_json(path):
+  try:
+    with open(path,'r',encoding='utf-8') as f:
+      return json.load(f)
+  except Exception:
+    return {}
+
+inb=load_json(inb_path)
+rt=load_json(routing_path)
+
+rules=((rt.get('routing') or {}).get('rules') or [])
+
+def is_default_rule(r):
+  if not isinstance(r, dict): return False
+  if r.get('type') != 'field': return False
+  port=str(r.get('port','')).strip()
+  return port in ('1-65535','0-65535')
+
+def get_default_mode():
+  target=None
+  for r in rules:
+    if is_default_rule(r):
+      target=r
+  mode='unknown'
+  bal=''
+  if isinstance(target, dict):
+    bt=target.get('balancerTag')
+    if isinstance(bt, str) and bt:
+      mode='balancer'
+      bal=bt
+    else:
+      ot=target.get('outboundTag')
+      if ot == 'warp':
+        mode='warp'
+      elif ot == 'direct':
+        mode='direct'
+      elif isinstance(ot, str) and ot:
+        mode='unknown'
+      else:
+        mode='unknown'
+  return mode, bal
+
+def rule_list_user(marker, outbound):
+  for r in rules:
+    if not isinstance(r, dict): 
+      continue
+    if r.get('type') != 'field':
+      continue
+    if r.get('outboundTag') != outbound:
+      continue
+    u=r.get('user') or []
+    if isinstance(u, list) and marker in u:
+      return [x for x in u if isinstance(x,str) and x and x != marker]
+  return []
+
+def rule_list_inbound(marker, outbound):
+  for r in rules:
+    if not isinstance(r, dict): 
+      continue
+    if r.get('type') != 'field':
+      continue
+    if r.get('outboundTag') != outbound:
+      continue
+    ib=r.get('inboundTag') or []
+    if isinstance(ib, list) and marker in ib:
+      return [x for x in ib if isinstance(x,str) and x and x != marker]
+  return []
+
+def rule_list_domain(marker, outbound):
+  for r in rules:
+    if not isinstance(r, dict): 
+      continue
+    if r.get('type') != 'field':
+      continue
+    if r.get('outboundTag') != outbound:
+      continue
+    dom=r.get('domain') or []
+    if isinstance(dom, list) and marker in dom:
+      return [x for x in dom if isinstance(x,str) and x and x != marker]
+  return []
+
+mode, bal = get_default_mode()
+default_label = mode
+if mode == 'balancer' and bal:
+  default_label = f'balancer({bal})'
+
+warp_users=set(rule_list_user('dummy-warp-user','warp'))
+direct_users=set(rule_list_user('dummy-direct-user','direct'))
+warp_inb=set(rule_list_inbound('dummy-warp-inbounds','warp'))
+direct_inb=set(rule_list_inbound('dummy-direct-inbounds','direct'))
+direct_dom=rule_list_domain('regexp:^$','direct')
+warp_dom=rule_list_domain('regexp:^$WARP','warp')
+
+# Collect client emails (and protocol)
+clients=[]
+for ib in (inb.get('inbounds') or []):
+  if not isinstance(ib, dict):
+    continue
+  proto=ib.get('protocol')
+  st=(ib.get('settings') or {})
+  cls=st.get('clients') or []
+  if not isinstance(cls, list):
+    continue
+  for c in cls:
+    if not isinstance(c, dict):
+      continue
+    em=c.get('email')
+    if isinstance(em, str) and em.strip():
+      clients.append((em.strip(), proto if isinstance(proto,str) else ''))
+
+# unique keep stable sorted
+clients_sorted=sorted(set(clients), key=lambda x: (x[0], x[1]))
+
+def eff_mode_for_email(email):
+  if email in direct_users:
+    return 'direct'
+  if email in warp_users:
+    return 'warp'
+  if mode in ('warp','direct'):
+    return mode
+  return default_label
+
+print("Per-user effective mode:")
+print(f"{'Email':<28} {'Proto':<8} {'Effective':<12} {'Override':<10}")
+print("-"*62)
+for em, proto in clients_sorted:
+  override=''
+  if em in direct_users:
+    override='direct'
+  elif em in warp_users:
+    override='warp'
+  eff=eff_mode_for_email(em)
+  print(f"{em:<28} {proto:<8} {eff:<12} {override:<10}")
+if not clients_sorted:
+  print("(tidak ada client ditemukan dari 10-inbounds.json)")
+
+print()
+print("Per-inboundTag effective mode:")
+print(f"{'InboundTag':<28} {'Proto':<8} {'Effective':<12} {'Override':<10}")
+print("-"*62)
+
+def inbounds_tags_by_proto():
+  out=[]
+  for ib in (inb.get('inbounds') or []):
+    if not isinstance(ib, dict):
+      continue
+    tag=ib.get('tag')
+    proto=ib.get('protocol')
+    if isinstance(tag,str) and tag.strip():
+      out.append((tag.strip(), proto if isinstance(proto,str) else ''))
+  return sorted(set(out), key=lambda x: (x[1], x[0]))
+
+def eff_mode_for_inbound(tag):
+  if tag in direct_inb:
+    return 'direct'
+  if tag in warp_inb:
+    return 'warp'
+  if mode in ('warp','direct'):
+    return mode
+  return default_label
+
+tags=inbounds_tags_by_proto()
+for tag, proto in tags:
+  override=''
+  if tag in direct_inb:
+    override='direct'
+  elif tag in warp_inb:
+    override='warp'
+  eff=eff_mode_for_inbound(tag)
+  print(f"{tag:<28} {proto:<8} {eff:<12} {override:<10}")
+if not tags:
+  print("(tidak ada inbound tag ditemukan dari 10-inbounds.json)")
+
+print()
+print("Custom Domain/Geosite Lists:")
+print("  Direct (custom):")
+if direct_dom:
+  for x in direct_dom:
+    print(f"    - {x}")
+else:
+  print("    (kosong)")
+print("  WARP (custom):")
+if warp_dom:
+  for x in warp_dom:
+    print(f"    - {x}")
+else:
+  print("    (kosong)")
+PY
+  hr
+  pause
+}
+
+xray_routing_custom_domain_entry_set_mode() {
+  # args: mode direct|warp|off entry
+  local mode="$1"
+  local ent="$2"
+  local tmp backup
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.json.tmp"
+
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}" "${ent}"
+import json, sys
+src, dst, mode, ent = sys.argv[1:5]
+mode=mode.lower().strip()
+ent=ent.strip()
+
+with open(src,'r',encoding='utf-8') as f:
+  cfg=json.load(f)
+
+routing=(cfg.get('routing') or {})
+rules=routing.get('rules')
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing.rules")
+
+def is_default_rule(r):
+  if not isinstance(r, dict): return False
+  if r.get('type') != 'field': return False
+  port=str(r.get('port','')).strip()
+  return port in ('1-65535','0-65535')
+
+def find_default_idx():
+  idx=None
+  for i,r in enumerate(rules):
+    if is_default_rule(r):
+      idx=i
+  return idx
+
+def find_template_direct_idx():
+  for i,r in enumerate(rules):
+    if not isinstance(r, dict): 
+      continue
+    if r.get('type') != 'field':
+      continue
+    if r.get('outboundTag') != 'direct':
+      continue
+    dom=r.get('domain') or []
+    if isinstance(dom, list) and ('geosite:apple' in dom or 'geosite:google' in dom):
+      return i
+  return None
+
+def find_domain_rule_idx(outbound, marker):
+  for i,r in enumerate(rules):
+    if not isinstance(r, dict):
+      continue
+    if r.get('type') != 'field':
+      continue
+    if r.get('outboundTag') != outbound:
+      continue
+    dom=r.get('domain') or []
+    if isinstance(dom, list) and marker in dom:
+      return i
+  return None
+
+def ensure_domain_rule(outbound, marker, insert_at):
+  idx=find_domain_rule_idx(outbound, marker)
+  if idx is not None:
+    return idx
+  newr={"type":"field","domain":[marker],"outboundTag":outbound}
+  rules.insert(insert_at, newr)
+  return insert_at
+
+def normalize_rule(idx, marker, desired_present):
+  r=rules[idx]
+  dom=r.get('domain') or []
+  if not isinstance(dom, list):
+    dom=[]
+  # keep marker first
+  dom=[x for x in dom if x != marker]
+  dom.insert(0, marker)
+  # remove ent
+  dom=[x for x in dom if x != ent]
+  if desired_present:
+    dom.append(ent)
+  r['domain']=dom
+  rules[idx]=r
+
+default_idx=find_default_idx()
+if default_idx is None:
+  raise SystemExit("Default rule tidak ditemukan")
+
+tpl_idx=find_template_direct_idx()
+# Base insertion point: after template direct if exists, else before default
+base=(tpl_idx + 1) if tpl_idx is not None else default_idx
+
+direct_marker='regexp:^$'
+warp_marker='regexp:^$WARP'
+
+direct_idx=find_domain_rule_idx('direct', direct_marker)
+warp_idx=find_domain_rule_idx('warp', warp_marker)
+
+# Insert order: template direct -> custom direct -> custom warp -> default
+# Ensure direct rule position
+if mode == 'direct':
+  if direct_idx is None:
+    direct_idx=ensure_domain_rule('direct', direct_marker, base)
+    if direct_idx <= default_idx:
+      default_idx += 1
+    if warp_idx is not None and warp_idx >= direct_idx:
+      pass
+  # Ensure warp rule exists only if already exists; don't create unless needed
+  if warp_idx is not None:
+    normalize_rule(warp_idx, warp_marker, False)
+  normalize_rule(direct_idx, direct_marker, True)
+
+elif mode == 'warp':
+  # ensure warp rule after direct rule if direct exists, else after template
+  if direct_idx is not None:
+    # ensure warp inserted after direct rule
+    base_warp = direct_idx + 1
+  else:
+    base_warp = base
+  if warp_idx is None:
+    warp_idx=ensure_domain_rule('warp', warp_marker, base_warp)
+    if warp_idx <= default_idx:
+      default_idx += 1
+  if direct_idx is not None:
+    normalize_rule(direct_idx, direct_marker, False)
+  normalize_rule(warp_idx, warp_marker, True)
+
+elif mode == 'off':
+  if direct_idx is not None:
+    normalize_rule(direct_idx, direct_marker, False)
+  if warp_idx is not None:
+    normalize_rule(warp_idx, warp_marker, False)
+else:
+  raise SystemExit("Mode harus direct|warp|off")
+
+routing['rules']=rules
+cfg['routing']=routing
+
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    die "Gagal update routing (rollback ke backup: ${backup})"
+  }
+  svc_restart xray || true
+}
+
+warp_domain_geosite_menu() {
+  need_python3
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > WARP per-Geosite/Domain"
+    hr
+
+    echo "Custom DIRECT list:"
+    local dl
+    dl="$(xray_routing_custom_domain_list_get "regexp:^$" "direct" || true)"
+    if [[ -z "${dl}" ]]; then
+      echo "  (kosong)"
+    else
+      echo "${dl}" | nl -w2 -s'. ' | sed 's/^/  /'
+    fi
+    hr
+
+    echo "Custom WARP list:"
+    local wl
+    wl="$(xray_routing_custom_domain_list_get "regexp:^$WARP" "warp" || true)"
+    if [[ -z "${wl}" ]]; then
+      echo "  (kosong)"
+    else
+      echo "${wl}" | nl -w2 -s'. ' | sed 's/^/  /'
+    fi
+    hr
+
+    echo "  1) Set entry => DIRECT"
+    echo "  2) Set entry => WARP"
+    echo "  3) Remove entry (OFF)"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        read -r -p "Entry (contoh: geosite:twitter / example.com) (atau kembali): " ent
+        if is_back_choice "${ent}"; then
+          continue
+        fi
+        ent="$(echo "${ent}" | tr -d '[:space:]')"
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^$WARP" ]]; then
+          warn "Entry tidak valid / reserved"
+          pause
+          continue
+        fi
+        xray_routing_custom_domain_entry_set_mode direct "${ent}"
+        log "Entry di-set DIRECT: ${ent}"
+        pause
+        ;;
+      2)
+        read -r -p "Entry (contoh: geosite:twitter / example.com) (atau kembali): " ent
+        if is_back_choice "${ent}"; then
+          continue
+        fi
+        ent="$(echo "${ent}" | tr -d '[:space:]')"
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^$WARP" ]]; then
+          warn "Entry tidak valid / reserved"
+          pause
+          continue
+        fi
+        xray_routing_custom_domain_entry_set_mode warp "${ent}"
+        log "Entry di-set WARP: ${ent}"
+        pause
+        ;;
+      3)
+        read -r -p "Entry yang dihapus (OFF) (atau kembali): " ent
+        if is_back_choice "${ent}"; then
+          continue
+        fi
+        ent="$(echo "${ent}" | tr -d '[:space:]')"
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^$WARP" ]]; then
+          warn "Entry tidak valid / reserved"
+          pause
+          continue
+        fi
+        xray_routing_custom_domain_entry_set_mode off "${ent}"
+        log "Entry dihapus (OFF): ${ent}"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
 warp_controls_menu() {
   while true; do
     title
@@ -3239,7 +3949,7 @@ warp_controls_menu() {
         title
         echo "Restart wireproxy"
         hr
-        if systemctl list-unit-files | grep -q '^wireproxy\.service'; then
+        if svc_exists wireproxy; then
           svc_restart wireproxy || true
         else
           warn "wireproxy.service tidak terdeteksi"
@@ -3611,7 +4321,7 @@ network_diagnostics_menu() {
     echo "  1) Show summary (routing/balancer/observatory)"
     echo "  2) Validate conf.d JSON (jq)"
     echo "  3) xray run -test -confdir (syntax check)"
-    echo "  4) Show wireproxy + xray status"
+    echo "  4) Show wireproxy + xray + nginx status"
     echo "  0) Back"
     hr
     read -r -p "Pilih: " c
@@ -3636,14 +4346,19 @@ network_diagnostics_menu() {
         fi
         hr
         pause
-        ;;
-      4)
+        ;;      4)
         title
-        echo "$(svc_status_line xray)"
-        echo "$(svc_status_line nginx)"
-        if systemctl list-unit-files | grep -q '^wireproxy\.service'; then
-          echo "$(svc_status_line wireproxy)"
+        echo "Service status (wireproxy, xray, nginx)"
+        hr
+        if svc_exists wireproxy; then
+          systemctl status wireproxy --no-pager || true
+        else
+          warn "wireproxy.service tidak terdeteksi"
         fi
+        hr
+        systemctl status xray --no-pager || true
+        hr
+        systemctl status nginx --no-pager || true
         hr
         pause
         ;;
