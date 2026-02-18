@@ -17,8 +17,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-XRAY_CONFIG="/tmp/xray-build.json"
-XRAY_LEGACY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_CONFDIR="/usr/local/etc/xray/conf.d"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
@@ -1186,75 +1185,79 @@ PY
 configure_xray_service_confdir() {
   ok "Mengatur xray.service agar memakai -confdir ..."
 
-  # Pastikan tidak ada drop-in yang menimpa ExecStart/User (wajib untuk full modular).
-  for d in /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d; do
-    if [[ -d "$d" ]]; then
-      rm -rf "$d"/* 2>/dev/null || true
-      rmdir "$d" 2>/dev/null || true
-    fi
-  done
+  # Bersihkan semua drop-in yang bisa menimpa ExecStart/User (wajib untuk full modular).
+  if [[ -d /etc/systemd/system/xray.service.d ]]; then
+    rm -rf /etc/systemd/system/xray.service.d/* 2>/dev/null || true
+    rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
+  fi
+  if [[ -d /etc/systemd/system/xray@.service.d ]]; then
+    rm -rf /etc/systemd/system/xray@.service.d/* 2>/dev/null || true
+    rmdir /etc/systemd/system/xray@.service.d 2>/dev/null || true
+  fi
 
-  local xray_bin frag test_log
+  local xray_bin unit_dst frag test_log
   xray_bin="$(command -v xray || true)"
   [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
 
+  unit_dst="/etc/systemd/system/xray.service"
   frag="$(systemctl show -p FragmentPath --value xray 2>/dev/null || true)"
-
-  # Pastikan unit /etc ada (kalau fragment berada di /lib).
-  if [[ -n "${frag:-}" && "${frag:-}" != "n/a" ]]; then
-    if [[ -f "${frag}" && "${frag}" == /lib/systemd/system/* ]]; then
-      local base
-      base="$(basename "${frag}")"
-      if [[ ! -f "/etc/systemd/system/${base}" ]]; then
-        cp -f "${frag}" "/etc/systemd/system/${base}"
-      fi
-    fi
+  if [[ -z "${frag:-}" || "${frag:-}" == "n/a" ]]; then
+    frag="/lib/systemd/system/xray.service"
   fi
 
-  # Pastikan direktori conf.d & log ada.
-  mkdir -p "${XRAY_CONFDIR}" /var/log/xray
-  touch /var/log/xray/access.log /var/log/xray/error.log
+  # Jika unit asli berada di /lib/systemd/system, copy ke /etc agar bisa dimodifikasi.
+  if [[ ! -f "${unit_dst}" && -f "${frag}" ]]; then
+    cp -f "${frag}" "${unit_dst}"
+  fi
+  [[ -f "${unit_dst}" ]] || die "Tidak menemukan unit file xray.service untuk diubah."
 
-  # Permission conf.d (aman untuk service root maupun non-root).
-  chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
-  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
+  # Pastikan ExecStart memakai -confdir.
+  if grep -qE '^[[:space:]]*ExecStart[[:space:]]*=' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStart[[:space:]]*=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
+  else
+    sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit_dst}"
+  fi
 
-  # Permission log (file dimiliki root; akses tulis tetap diatur oleh unit via ReadWritePaths).
-  chmod 750 /var/log/xray 2>/dev/null || true
-  chmod 640 /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
+  # Perbaiki ExecStartPre bila masih menguji -config (bisa gagal bila config.json tidak dipakai).
+  if grep -qE '^[[:space:]]*ExecStartPre[[:space:]]*=.*-test.*-config[[:space:]]+/usr/local/etc/xray/config\.json' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStartPre[[:space:]]*=.*$|ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
+  fi
 
-  # Patch unit yang mungkin dipakai: xray.service dan/atau xray@.service (tergantung paket/installer).
-  local units=("/etc/systemd/system/xray.service" "/etc/systemd/system/xray@.service" "/lib/systemd/system/xray.service" "/lib/systemd/system/xray@.service")
-  local unit
-  for unit in "${units[@]}"; do
-    [[ -f "${unit}" ]] || continue
+  # Hindari user spesial (nobody) / dynamic user yang sering memicu permission log.
+  sed -i -E '/^[[:space:]]*User[[:space:]]*=/d; /^[[:space:]]*Group[[:space:]]*=/d; /^[[:space:]]*DynamicUser[[:space:]]*=/d' "${unit_dst}"
 
-    # Bersihkan konfigurasi yang konflik: ExecStart/ExecStartPre lama, User/Group, DynamicUser.
-    sed -i -E '
-      /^[[:space:]]*ExecStart=/d
-      /^[[:space:]]*ExecStartPre=/d
-      /^[[:space:]]*User=/d
-      /^[[:space:]]*Group=/d
-      /^[[:space:]]*DynamicUser=/d
-    ' "${unit}"
-
-    # Tambahkan ExecStartPre + ExecStart berbasis confdir tepat setelah [Service].
-    sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit}"
-    sed -i -E "/^\[Service\]/a ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}" "${unit}"
-
-    # Jika unit menggunakan ProtectSystem=strict, whitelist /var/log/xray agar logger tidak permission denied.
-    if grep -qE '^[[:space:]]*ProtectSystem=strict' "${unit}"; then
-      if ! grep -qE '^[[:space:]]*ReadWritePaths=.*\b/var/log/xray\b' "${unit}"; then
-        if grep -qE '^[[:space:]]*ReadWritePaths=' "${unit}"; then
-          sed -i -E 's|^[[:space:]]*ReadWritePaths=(.*)$|ReadWritePaths=\1 /var/log/xray|' "${unit}"
-        else
-          sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit}"
-        fi
-      fi
+  # Pastikan systemd mengizinkan write ke /var/log/xray (meskipun ProtectSystem=strict/full).
+  if grep -qE '^[[:space:]]*ReadWritePaths[[:space:]]*=' "${unit_dst}"; then
+    if ! grep -qE '^[[:space:]]*ReadWritePaths[[:space:]]*=.*\b/var/log/xray\b' "${unit_dst}"; then
+      sed -i -E 's|^[[:space:]]*ReadWritePaths[[:space:]]*=(.*)$|ReadWritePaths=\1 /var/log/xray|g' "${unit_dst}"
     fi
-  done
+  else
+    sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit_dst}"
+  fi
+
+  # Biarkan systemd membuat /var/log/xray bila hardening aktif.
+  if ! grep -qE '^[[:space:]]*LogsDirectory[[:space:]]*=' "${unit_dst}"; then
+    sed -i -E "/^\[Service\]/a LogsDirectory=xray" "${unit_dst}"
+  fi
 
   systemctl daemon-reload
+
+  # Buat & set permission log sesuai user efektif service.
+  local svc_user svc_group
+  svc_user="$(systemctl show -p User --value xray 2>/dev/null || true)"
+  svc_group="$(systemctl show -p Group --value xray 2>/dev/null || true)"
+  [[ -n "${svc_user}" ]] || svc_user="root"
+  [[ -n "${svc_group}" ]] || svc_group="${svc_user}"
+
+  mkdir -p /var/log/xray
+  touch /var/log/xray/access.log /var/log/xray/error.log
+  chown "${svc_user}:${svc_group}" /var/log/xray /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
+  chmod 755 /var/log/xray
+  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
+
+  # Pastikan conf.d dapat dibaca service.
+  chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
+  chmod 644 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
 
   # Test confdir sebelum start/restart.
   test_log="/tmp/xray-confdir-test.log"
@@ -1267,7 +1270,6 @@ configure_xray_service_confdir() {
   systemctl restart xray >/dev/null 2>&1 || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
   ok "xray.service sudah memakai -confdir dan berhasil direstart."
 }
-
 
 
 
@@ -1946,8 +1948,6 @@ import time
 from datetime import datetime, timezone
 
 XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
-XRAY_INBOUNDS_DEFAULT = "/usr/local/etc/xray/conf.d/10-inbounds.json"
-XRAY_ROUTING_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
 ACCOUNT_ROOT = "/opt/account"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -1989,22 +1989,27 @@ def restart_xray():
   )
 
 def remove_user_from_inbounds(cfg, username):
-  changed = False
+  changed_inb = False
+  changed_rt = False
   inbounds = cfg.get("inbounds") or []
   for inbound in inbounds:
     settings = inbound.get("settings") or {}
     clients = settings.get("clients")
     if not isinstance(clients, list):
       continue
-    new_clients = [c for c in clients if isinstance(c, dict) and c.get("email") != username]
-    if len(new_clients) != len(clients):
-      settings["clients"] = new_clients
-      inbound["settings"] = settings
-      changed = True
+    new_clients = []
+    for c in clients:
+      if c.get("email") == username:
+        changed = True
+        continue
+      new_clients.append(c)
+    settings["clients"] = new_clients
+    inbound["settings"] = settings
   return changed
 
 def remove_user_from_rules(cfg, username):
-  changed = False
+  changed_inb = False
+  changed_rt = False
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
@@ -2858,33 +2863,14 @@ if command -v nginx >/dev/null 2>&1; then
 fi
 fi
 
-# Xray modular config sanity (non-fatal if tools missing)
-if command -v jq >/dev/null 2>&1 && [[ -d "$XRAY_CONFDIR" ]]; then
-  local bad=0
-  shopt -s nullglob
-  for f in "$XRAY_CONFDIR"/*.json; do
-    if ! jq -e . "$f" >/dev/null 2>&1; then
-      warn "sanity: xray conf invalid: $f"
-      jq -e . "$f" >&2 || true
-      bad=1
-    fi
-  done
-  shopt -u nullglob
-  if [[ "$bad" -eq 0 ]]; then
-    ok "sanity: xray modular JSON OK"
+if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
+  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
+    ok "sanity: xray config JSON OK"
   else
-    failed=1
-  fi
+  warn "sanity: xray config JSON INVALID"
+  jq -e . "$XRAY_CONFIG" >&2 || true
+  failed=1
 fi
-
-if command -v xray >/dev/null 2>&1; then
-  if xray run -test -confdir "$XRAY_CONFDIR" >/dev/null 2>&1; then
-    ok "sanity: xray -confdir test OK"
-  else
-    warn "sanity: xray -confdir test FAILED"
-    xray run -test -confdir "$XRAY_CONFDIR" >&2 || true
-    failed=1
-  fi
 fi
 
 # Cert presence (TLS termination depends on these)
@@ -2911,7 +2897,7 @@ main() {
   need_root
   check_os
   install_base_deps
-  need_python3
+	need_python3
   install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
@@ -2929,11 +2915,10 @@ main() {
   write_nginx_main_conf
   install_acme_and_issue_cert
   install_xray
-  configure_xray_service_confdir
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
-  rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
+  configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
   setup_logrotate
