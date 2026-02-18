@@ -1201,6 +1201,7 @@ PY
   ok "  - ${XRAY_CONFDIR}/30-routing.json"
   ok "  - ${XRAY_CONFDIR}/40-policy.json"
   ok "  - ${XRAY_CONFDIR}/50-stats.json"
+  ok "  - ${XRAY_CONFDIR}/60-observatory.json"
 }
 
 configure_xray_service_confdir() {
