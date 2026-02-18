@@ -17,7 +17,8 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_CONFIG="/tmp/xray-build.json"
+XRAY_LEGACY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_CONFDIR="/usr/local/etc/xray/conf.d"
 NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
@@ -27,10 +28,10 @@ CLOUDFLARE_API_TOKEN="ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ"
 
 # Daftar domain induk yang disediakan (private)
 PROVIDED_ROOT_DOMAINS=(
-  "vyxara1.web.id"
-  "vyxara2.web.id"
-  "vyxara1.qzz.io"
-  "vyxara2.qzz.io"
+"vyxara1.web.id"
+"vyxara2.web.id"
+"vyxara1.qzz.io"
+"vyxara2.qzz.io"
 )
 
 # NOTE: Script ini dipakai pribadi. Isi token di atas jika tidak memakai env var.
@@ -682,15 +683,6 @@ write_xray_config() {
     ]
   },
   "stats": {},
-  "observatory": {
-    "subjectSelector": [
-      "direct",
-      "warp"
-    ],
-    "probeURL": "https://www.google.com/generate_204",
-    "probeInterval": "30s",
-    "enableConcurrency": true
-  },
   "policy": {
     "levels": {
       "0": {
@@ -705,18 +697,6 @@ write_xray_config() {
   },
   "routing": {
     "domainStrategy": "IPIfNonMatch",
-    "balancers": [
-      {
-        "tag": "egress-balance",
-        "selector": [
-          "direct",
-          "warp"
-        ],
-        "strategy": {
-          "type": "random"
-        }
-      }
-    ],
     "rules": [
       {
         "type": "field",
@@ -1116,8 +1096,8 @@ EOF
   chown "$xr_user:$xr_group" /var/log/xray/access.log /var/log/xray/error.log >/dev/null 2>&1 || true
 
   chmod 640 "$XRAY_CONFIG"
-  chmod 755 /var/log/xray
-  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
+  chmod 750 /var/log/xray
+  chmod 640 /var/log/xray/access.log /var/log/xray/error.log
 
 
   # Validasi config sebelum restart service (hindari exit "diam-diam")
@@ -1127,8 +1107,9 @@ EOF
     die "Xray config test gagal. Lihat: $test_log"
   fi
 
-  # NOTE: Pada arsitektur modular, start/restart xray dilakukan setelah xray.service diset ke -confdir.
-  ok "Config Xray dibuat."
+  systemctl enable xray --now || { systemctl status xray --no-pager >&2 || true; die "Gagal enable/start xray"; }
+  systemctl restart xray || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
+  ok "Config Xray dibuat & service direstart."
   declare -gx XR_UUID="$UUID"
   declare -gx XR_TROJAN_PASS="$TROJAN_PASS"
   declare -gx XR_API_PORT="$P_API"
@@ -1177,7 +1158,6 @@ parts = [
   ("30-routing.json", {"routing": cfg.get("routing") or {}}),
   ("40-policy.json", {"policy": cfg.get("policy") or {}}),
   ("50-stats.json", {"stats": cfg.get("stats") or {}}),
-  ("60-observatory.json", {"observatory": cfg.get("observatory") or {}}),
 ]
 
 os.makedirs(outdir, exist_ok=True)
@@ -1191,8 +1171,7 @@ for name, obj in parts:
   os.replace(tmp, path)
 PY
 
-  chmod 755 \"${XRAY_CONFDIR}\" 2>/dev/null || true
-  chmod 644 \"${XRAY_CONFDIR}\"/*.json 2>/dev/null || true
+  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
   ok "Konfigurasi modular siap:"
   ok "  - ${XRAY_CONFDIR}/00-log.json"
   ok "  - ${XRAY_CONFDIR}/01-api.json"
@@ -1202,72 +1181,80 @@ PY
   ok "  - ${XRAY_CONFDIR}/30-routing.json"
   ok "  - ${XRAY_CONFDIR}/40-policy.json"
   ok "  - ${XRAY_CONFDIR}/50-stats.json"
-  ok "  - ${XRAY_CONFDIR}/60-observatory.json"
 }
 
 configure_xray_service_confdir() {
   ok "Mengatur xray.service agar memakai -confdir ..."
 
   # Pastikan tidak ada drop-in yang menimpa ExecStart/User (wajib untuk full modular).
-  if [[ -d /etc/systemd/system/xray.service.d ]]; then
-    rm -rf /etc/systemd/system/xray.service.d/* 2>/dev/null || true
-    rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
-  fi
+  for d in /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d; do
+    if [[ -d "$d" ]]; then
+      rm -rf "$d"/* 2>/dev/null || true
+      rmdir "$d" 2>/dev/null || true
+    fi
+  done
 
-  local xray_bin unit_dst frag test_log
+  local xray_bin frag test_log
   xray_bin="$(command -v xray || true)"
   [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
 
-  unit_dst="/etc/systemd/system/xray.service"
   frag="$(systemctl show -p FragmentPath --value xray 2>/dev/null || true)"
-  if [[ -z "${frag:-}" || "${frag:-}" == "n/a" ]]; then
-    frag="/lib/systemd/system/xray.service"
-  fi
 
-  # Jika unit asli berada di /lib/systemd/system, copy ke /etc agar bisa kita modifikasi.
-  if [[ ! -f "${unit_dst}" && -f "${frag}" ]]; then
-    cp -f "${frag}" "${unit_dst}"
-  fi
-  [[ -f "${unit_dst}" ]] || die "Tidak menemukan unit file xray.service untuk diubah."
-
-  # 1) Ubah ExecStart utama ke -confdir
-  if grep -qE '^[[:space:]]*ExecStart=' "${unit_dst}"; then
-    sed -i -E "s|^[[:space:]]*ExecStart=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
-  else
-    sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit_dst}"
-  fi
-
-  # 2) Hapus User/Group spesial (nobody) agar service berjalan sebagai root (menghindari warning systemd).
-  sed -i -E '/^[[:space:]]*User=/d; /^[[:space:]]*Group=/d' "${unit_dst}"
-
-  # Hapus DynamicUser agar tidak membuat user ephemeral yang bisa memblok akses file.
-  sed -i -E '/^[[:space:]]*DynamicUser=/d' "${unit_dst}"
-
-  # Pastikan systemd mengizinkan write ke /var/log/xray (meskipun ProtectSystem=strict/full).
-  if grep -qE '^[[:space:]]*ReadWritePaths=' "${unit_dst}"; then
-    if ! grep -qE '^[[:space:]]*ReadWritePaths=.*\b/var/log/xray\b' "${unit_dst}"; then
-      sed -i -E 's|^[[:space:]]*ReadWritePaths=(.*)$|ReadWritePaths=\1 /var/log/xray|g' "${unit_dst}"
+  # Pastikan unit /etc ada (kalau fragment berada di /lib).
+  if [[ -n "${frag:-}" && "${frag:-}" != "n/a" ]]; then
+    if [[ -f "${frag}" && "${frag}" == /lib/systemd/system/* ]]; then
+      local base
+      base="$(basename "${frag}")"
+      if [[ ! -f "/etc/systemd/system/${base}" ]]; then
+        cp -f "${frag}" "/etc/systemd/system/${base}"
+      fi
     fi
-  else
-    sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit_dst}"
   fi
 
-  # 3) Perbaiki ExecStartPre bila masih menguji -config (bisa gagal karena config.json dihapus).
-  if grep -qE '^[[:space:]]*ExecStartPre=.*-test.*-config[[:space:]]+/usr/local/etc/xray/config\.json' "${unit_dst}"; then
-    sed -i -E "s|^[[:space:]]*ExecStartPre=.*$|ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
-  fi
+  # Pastikan direktori conf.d & log ada.
+  mkdir -p "${XRAY_CONFDIR}" /var/log/xray
+  touch /var/log/xray/access.log /var/log/xray/error.log
+
+  # Permission conf.d (aman untuk service root maupun non-root).
+  chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
+  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
+
+  # Permission log (file dimiliki root; akses tulis tetap diatur oleh unit via ReadWritePaths).
+  chmod 750 /var/log/xray 2>/dev/null || true
+  chmod 640 /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
+
+  # Patch unit yang mungkin dipakai: xray.service dan/atau xray@.service (tergantung paket/installer).
+  local units=("/etc/systemd/system/xray.service" "/etc/systemd/system/xray@.service" "/lib/systemd/system/xray.service" "/lib/systemd/system/xray@.service")
+  local unit
+  for unit in "${units[@]}"; do
+    [[ -f "${unit}" ]] || continue
+
+    # Bersihkan konfigurasi yang konflik: ExecStart/ExecStartPre lama, User/Group, DynamicUser.
+    sed -i -E '
+      /^[[:space:]]*ExecStart=/d
+      /^[[:space:]]*ExecStartPre=/d
+      /^[[:space:]]*User=/d
+      /^[[:space:]]*Group=/d
+      /^[[:space:]]*DynamicUser=/d
+    ' "${unit}"
+
+    # Tambahkan ExecStartPre + ExecStart berbasis confdir tepat setelah [Service].
+    sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit}"
+    sed -i -E "/^\[Service\]/a ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}" "${unit}"
+
+    # Jika unit menggunakan ProtectSystem=strict, whitelist /var/log/xray agar logger tidak permission denied.
+    if grep -qE '^[[:space:]]*ProtectSystem=strict' "${unit}"; then
+      if ! grep -qE '^[[:space:]]*ReadWritePaths=.*\b/var/log/xray\b' "${unit}"; then
+        if grep -qE '^[[:space:]]*ReadWritePaths=' "${unit}"; then
+          sed -i -E 's|^[[:space:]]*ReadWritePaths=(.*)$|ReadWritePaths=\1 /var/log/xray|' "${unit}"
+        else
+          sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit}"
+        fi
+      fi
+    fi
+  done
 
   systemctl daemon-reload
-
-  # Pastikan path log Xray dapat ditulis oleh service (root), termasuk saat unit memakai hardening.
-  mkdir -p /var/log/xray
-  touch /var/log/xray/access.log /var/log/xray/error.log
-  chmod 755 /var/log/xray
-  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
-
-  # Permission conf.d: pastikan dapat dibaca oleh root (service berjalan sebagai root).
-  chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
-  chmod 644 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
 
   # Test confdir sebelum start/restart.
   test_log="/tmp/xray-confdir-test.log"
@@ -1280,6 +1267,7 @@ configure_xray_service_confdir() {
   systemctl restart xray >/dev/null 2>&1 || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
   ok "xray.service sudah memakai -confdir dan berhasil direstart."
 }
+
 
 
 
@@ -1958,6 +1946,8 @@ import time
 from datetime import datetime, timezone
 
 XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_INBOUNDS_DEFAULT = "/usr/local/etc/xray/conf.d/10-inbounds.json"
+XRAY_ROUTING_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
 ACCOUNT_ROOT = "/opt/account"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -2006,15 +1996,11 @@ def remove_user_from_inbounds(cfg, username):
     clients = settings.get("clients")
     if not isinstance(clients, list):
       continue
-    new_clients = []
-    for c in clients:
-      if isinstance(c, dict) and c.get("email") == username:
-        changed = True
-        continue
-      new_clients.append(c)
-    if changed:
+    new_clients = [c for c in clients if isinstance(c, dict) and c.get("email") != username]
+    if len(new_clients) != len(clients):
       settings["clients"] = new_clients
       inbound["settings"] = settings
+      changed = True
   return changed
 
 def remove_user_from_rules(cfg, username):
@@ -2872,14 +2858,33 @@ if command -v nginx >/dev/null 2>&1; then
 fi
 fi
 
-if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
-  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
-    ok "sanity: xray config JSON OK"
+# Xray modular config sanity (non-fatal if tools missing)
+if command -v jq >/dev/null 2>&1 && [[ -d "$XRAY_CONFDIR" ]]; then
+  local bad=0
+  shopt -s nullglob
+  for f in "$XRAY_CONFDIR"/*.json; do
+    if ! jq -e . "$f" >/dev/null 2>&1; then
+      warn "sanity: xray conf invalid: $f"
+      jq -e . "$f" >&2 || true
+      bad=1
+    fi
+  done
+  shopt -u nullglob
+  if [[ "$bad" -eq 0 ]]; then
+    ok "sanity: xray modular JSON OK"
   else
-  warn "sanity: xray config JSON INVALID"
-  jq -e . "$XRAY_CONFIG" >&2 || true
-  failed=1
+    failed=1
+  fi
 fi
+
+if command -v xray >/dev/null 2>&1; then
+  if xray run -test -confdir "$XRAY_CONFDIR" >/dev/null 2>&1; then
+    ok "sanity: xray -confdir test OK"
+  else
+    warn "sanity: xray -confdir test FAILED"
+    xray run -test -confdir "$XRAY_CONFDIR" >&2 || true
+    failed=1
+  fi
 fi
 
 # Cert presence (TLS termination depends on these)
@@ -2906,7 +2911,8 @@ main() {
   need_root
   check_os
   install_base_deps
-  need_python3  install_extra_deps
+  need_python3
+  install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
   install_fail2ban_aggressive
@@ -2926,8 +2932,8 @@ main() {
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
-  rm -f "$XRAY_CONFIG" >/dev/null 2>&1
-	configure_xray_service_confdir
+  rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
+  configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
   setup_logrotate
