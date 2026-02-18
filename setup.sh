@@ -1148,15 +1148,36 @@ src, outdir = sys.argv[1:3]
 with open(src, "r", encoding="utf-8") as f:
   cfg = json.load(f)
 
+routing = cfg.get("routing") or {}
+balancers = routing.get("balancers")
+if not isinstance(balancers, list):
+  balancers = []
+# Add default balancer if missing (do not overwrite existing)
+if not any(isinstance(b, dict) and b.get("tag") == "egress-balance" for b in balancers):
+  balancers.append({
+    "tag": "egress-balance",
+    "selector": ["direct", "warp"],
+    "strategy": {"type": "random"}
+  })
+routing["balancers"] = balancers
+
+observatory = {
+  "subjectSelector": ["direct", "warp"],
+  "probeUrl": "https://www.google.com/generate_204",
+  "probeInterval": "10m",
+  "enableConcurrency": True
+}
+
 parts = [
   ("00-log.json", {"log": cfg.get("log") or {}}),
   ("01-api.json", {"api": cfg.get("api") or {}}),
   ("02-dns.json", {"dns": cfg.get("dns") or {}}),
   ("10-inbounds.json", {"inbounds": cfg.get("inbounds") or []}),
   ("20-outbounds.json", {"outbounds": cfg.get("outbounds") or []}),
-  ("30-routing.json", {"routing": cfg.get("routing") or {}}),
+  ("30-routing.json", {"routing": routing}),
   ("40-policy.json", {"policy": cfg.get("policy") or {}}),
   ("50-stats.json", {"stats": cfg.get("stats") or {}}),
+  ("60-observatory.json", {"observatory": observatory}),
 ]
 
 os.makedirs(outdir, exist_ok=True)
@@ -2911,7 +2932,7 @@ main() {
   need_root
   check_os
   install_base_deps
-	need_python3
+  need_python3
   install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
