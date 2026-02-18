@@ -3846,7 +3846,7 @@ PY
 warp_global_menu() {
   while true; do
     title
-    echo "WARP Controls > Toggle WARP Global"
+    echo "WARP Controls > WARP Global"
     hr
     printf "Status WARP Global: %s\n" "$(warp_global_mode_pretty_get)"
     hr
@@ -4377,7 +4377,7 @@ warp_controls_menu() {
     hr
     echo "  1) WARP (wireproxy) status"
     echo "  2) Restart WARP (wireproxy)"
-    echo "  3) Toggle WARP Global"
+    echo "  3) WARP Global"
     echo "  4) WARP per-user"
     echo "  5) WARP per-protocol inbounds"
     echo "  6) WARP per-Geosite/Domain"
