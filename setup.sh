@@ -2929,11 +2929,11 @@ main() {
   write_nginx_main_conf
   install_acme_and_issue_cert
   install_xray
+  configure_xray_service_confdir
   setup_xray_geodata_updater
   write_xray_config
   write_xray_modular_configs
   rm -f "$XRAY_CONFIG" >/dev/null 2>&1 || true
-  configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
   setup_logrotate
