@@ -734,16 +734,16 @@ write_xray_config() {
       {
         "type": "field",
         "inboundTag": [
-          "dummy-inbounds"
+          "dummy-warp-inbounds"
         ],
-        "outboundTag": "direct"
+        "outboundTag": "warp"
       },
       {
         "type": "field",
         "user": [
-          "dummy-user"
+          "dummy-warp-user"
         ],
-        "outboundTag": "direct"
+        "outboundTag": "warp"
       },
       {
         "type": "field",
