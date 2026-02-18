@@ -1148,15 +1148,52 @@ src, outdir = sys.argv[1:3]
 with open(src, "r", encoding="utf-8") as f:
   cfg = json.load(f)
 
+def ensure_default_balancer(routing: dict):
+  if not isinstance(routing, dict):
+    return
+  balancers = routing.get("balancers")
+  if not isinstance(balancers, list):
+    balancers = []
+  if any(isinstance(b, dict) and b.get("tag") == "egress-balance" for b in balancers):
+    routing["balancers"] = balancers
+    return
+  balancers.append({
+    "tag": "egress-balance",
+    "selector": ["direct", "warp"],
+    "strategy": {"type": "random"}
+  })
+  routing["balancers"] = balancers
+
+def ensure_default_observatory(cfg: dict):
+  if not isinstance(cfg, dict):
+    return {}
+  obs = cfg.get("observatory")
+  if isinstance(obs, dict) and obs:
+    return obs
+  # Default observatory (untuk balancer type: leastPing / leastLoad).
+  return {
+    "subjectSelector": ["direct", "warp"],
+    "probeUrl": "https://www.cloudflare.com/cdn-cgi/trace",
+    "probeInterval": "30s",
+    "enableConcurrency": True
+  }
+
+routing = cfg.get("routing") or {}
+if isinstance(routing, dict):
+  ensure_default_balancer(routing)
+else:
+  routing = {}
+
 parts = [
   ("00-log.json", {"log": cfg.get("log") or {}}),
   ("01-api.json", {"api": cfg.get("api") or {}}),
   ("02-dns.json", {"dns": cfg.get("dns") or {}}),
   ("10-inbounds.json", {"inbounds": cfg.get("inbounds") or []}),
   ("20-outbounds.json", {"outbounds": cfg.get("outbounds") or []}),
-  ("30-routing.json", {"routing": cfg.get("routing") or {}}),
+  ("30-routing.json", {"routing": routing}),
   ("40-policy.json", {"policy": cfg.get("policy") or {}}),
   ("50-stats.json", {"stats": cfg.get("stats") or {}}),
+  ("60-observatory.json", {"observatory": ensure_default_observatory(cfg)}),
 ]
 
 os.makedirs(outdir, exist_ok=True)
@@ -1180,12 +1217,13 @@ PY
   ok "  - ${XRAY_CONFDIR}/30-routing.json"
   ok "  - ${XRAY_CONFDIR}/40-policy.json"
   ok "  - ${XRAY_CONFDIR}/50-stats.json"
+  ok "  - ${XRAY_CONFDIR}/60-observatory.json"
 }
 
 configure_xray_service_confdir() {
   ok "Mengatur xray.service agar memakai -confdir ..."
 
-  # Bersihkan semua drop-in yang bisa menimpa ExecStart/User (wajib untuk full modular).
+  # Wajib bersih dari drop-in agar tidak ada ExecStart/User yang menimpa.
   if [[ -d /etc/systemd/system/xray.service.d ]]; then
     rm -rf /etc/systemd/system/xray.service.d/* 2>/dev/null || true
     rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
@@ -1195,7 +1233,7 @@ configure_xray_service_confdir() {
     rmdir /etc/systemd/system/xray@.service.d 2>/dev/null || true
   fi
 
-  local xray_bin unit_dst frag test_log
+  local xray_bin unit_dst frag
   xray_bin="$(command -v xray || true)"
   [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
 
@@ -1205,72 +1243,55 @@ configure_xray_service_confdir() {
     frag="/lib/systemd/system/xray.service"
   fi
 
-  # Jika unit asli berada di /lib/systemd/system, copy ke /etc agar bisa dimodifikasi.
+  # Jika unit asli berada di /lib, copy ke /etc agar bisa kita modifikasi.
   if [[ ! -f "${unit_dst}" && -f "${frag}" ]]; then
     cp -f "${frag}" "${unit_dst}"
   fi
   [[ -f "${unit_dst}" ]] || die "Tidak menemukan unit file xray.service untuk diubah."
 
-  # Pastikan ExecStart memakai -confdir.
-  if grep -qE '^[[:space:]]*ExecStart[[:space:]]*=' "${unit_dst}"; then
-    sed -i -E "s|^[[:space:]]*ExecStart[[:space:]]*=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
+  # 1) Ubah ExecStart utama ke -confdir
+  if grep -qE '^[[:space:]]*ExecStart=' "${unit_dst}"; then
+    sed -i -E "s|^[[:space:]]*ExecStart=.*$|ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
   else
     sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit_dst}"
   fi
 
-  # Perbaiki ExecStartPre bila masih menguji -config (bisa gagal bila config.json tidak dipakai).
-  if grep -qE '^[[:space:]]*ExecStartPre[[:space:]]*=.*-test.*-config[[:space:]]+/usr/local/etc/xray/config\.json' "${unit_dst}"; then
-    sed -i -E "s|^[[:space:]]*ExecStartPre[[:space:]]*=.*$|ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}|g" "${unit_dst}"
-  fi
+  # 2) Hapus User/Group spesial (mis. nobody) agar tidak memblok akses file log.
+  sed -i -E '/^[[:space:]]*User=/d; /^[[:space:]]*Group=/d' "${unit_dst}"
+  sed -i -E '/^[[:space:]]*DynamicUser=/d' "${unit_dst}"
 
-  # Hindari user spesial (nobody) / dynamic user yang sering memicu permission log.
-  sed -i -E '/^[[:space:]]*User[[:space:]]*=/d; /^[[:space:]]*Group[[:space:]]*=/d; /^[[:space:]]*DynamicUser[[:space:]]*=/d' "${unit_dst}"
-
-  # Pastikan systemd mengizinkan write ke /var/log/xray (meskipun ProtectSystem=strict/full).
-  if grep -qE '^[[:space:]]*ReadWritePaths[[:space:]]*=' "${unit_dst}"; then
-    if ! grep -qE '^[[:space:]]*ReadWritePaths[[:space:]]*=.*\b/var/log/xray\b' "${unit_dst}"; then
-      sed -i -E 's|^[[:space:]]*ReadWritePaths[[:space:]]*=(.*)$|ReadWritePaths=\1 /var/log/xray|g' "${unit_dst}"
+  # 3) Pastikan systemd mengizinkan write ke /var/log/xray.
+  if grep -qE '^[[:space:]]*ReadWritePaths=' "${unit_dst}"; then
+    if ! grep -qE '^[[:space:]]*ReadWritePaths=.*\b/var/log/xray\b' "${unit_dst}"; then
+      sed -i -E 's|^[[:space:]]*ReadWritePaths=(.*)$|ReadWritePaths=\1 /var/log/xray|g' "${unit_dst}"
     fi
   else
     sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit_dst}"
   fi
 
-  # Biarkan systemd membuat /var/log/xray bila hardening aktif.
-  if ! grep -qE '^[[:space:]]*LogsDirectory[[:space:]]*=' "${unit_dst}"; then
-    sed -i -E "/^\[Service\]/a LogsDirectory=xray" "${unit_dst}"
-  fi
+  # 4) Pastikan direktori & file log dapat dibuat/ditulis.
+  mkdir -p /var/log/xray
+  chmod 755 /var/log/xray
+  touch /var/log/xray/access.log /var/log/xray/error.log
+  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
 
   systemctl daemon-reload
 
-  # Buat & set permission log sesuai user efektif service.
-  local svc_user svc_group
-  svc_user="$(systemctl show -p User --value xray 2>/dev/null || true)"
-  svc_group="$(systemctl show -p Group --value xray 2>/dev/null || true)"
-  [[ -n "${svc_user}" ]] || svc_user="root"
-  [[ -n "${svc_group}" ]] || svc_group="${svc_user}"
-
-  mkdir -p /var/log/xray
-  touch /var/log/xray/access.log /var/log/xray/error.log
-  chown "${svc_user}:${svc_group}" /var/log/xray /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
-  chmod 755 /var/log/xray
-  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
-
-  # Pastikan conf.d dapat dibaca service.
-  chmod 755 "${XRAY_CONFDIR}" 2>/dev/null || true
-  chmod 644 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
-
-  # Test confdir sebelum start/restart.
-  test_log="/tmp/xray-confdir-test.log"
-  if ! "${xray_bin}" run -test -confdir "${XRAY_CONFDIR}" >"${test_log}" 2>&1; then
-    tail -n 200 "${test_log}" >&2 || true
-    die "Xray confdir test gagal. Lihat: ${test_log}"
+  # Test konfigurasi confdir sebelum restart
+  if ! "${xray_bin}" run -test -confdir "${XRAY_CONFDIR}" >/dev/null 2>&1; then
+    "${xray_bin}" run -test -confdir "${XRAY_CONFDIR}" || true
+    die "Konfigurasi confdir Xray invalid."
   fi
 
-  systemctl enable xray --now >/dev/null 2>&1 || true
   systemctl restart xray >/dev/null 2>&1 || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
   ok "xray.service sudah memakai -confdir dan berhasil direstart."
-}
 
+  # Setelah Xray berjalan menggunakan conf.d, config.json tidak diperlukan lagi.
+  if [[ -f "${XRAY_CONFIG}" ]]; then
+    rm -f "${XRAY_CONFIG}" 2>/dev/null || true
+    ok "Konfigurasi bawaan dihapus: ${XRAY_CONFIG}"
+  fi
+}
 
 
 detect_nginx_user() {
@@ -2837,67 +2858,67 @@ sanity_check() {
   if systemctl is-active --quiet xray; then
     ok "sanity: xray active"
   else
-  warn "sanity: xray NOT active"
-  systemctl status xray --no-pager >&2 || true
-  journalctl -u xray -n 200 --no-pager >&2 || true
-  failed=1
-fi
+    warn "sanity: xray NOT active"
+    systemctl status xray --no-pager >&2 || true
+    journalctl -u xray -n 200 --no-pager >&2 || true
+    failed=1
+  fi
 
-if systemctl is-active --quiet nginx; then
-  ok "sanity: nginx active"
-else
-warn "sanity: nginx NOT active"
-systemctl status nginx --no-pager >&2 || true
-journalctl -u nginx -n 200 --no-pager >&2 || true
-failed=1
-fi
-
-# Config sanity (non-fatal if tools missing)
-if command -v nginx >/dev/null 2>&1; then
-  if nginx -t >/dev/null 2>&1; then
-    ok "sanity: nginx -t OK"
+  if systemctl is-active --quiet nginx; then
+    ok "sanity: nginx active"
   else
-  warn "sanity: nginx -t FAILED"
-  nginx -t >&2 || true
-  failed=1
-fi
-fi
+    warn "sanity: nginx NOT active"
+    systemctl status nginx --no-pager >&2 || true
+    journalctl -u nginx -n 200 --no-pager >&2 || true
+    failed=1
+  fi
 
-if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
-  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
-    ok "sanity: xray config JSON OK"
+  # Config sanity (non-fatal if tools missing)
+  if command -v nginx >/dev/null 2>&1; then
+    if nginx -t >/dev/null 2>&1; then
+      ok "sanity: nginx -t OK"
+    else
+      warn "sanity: nginx -t FAILED"
+      nginx -t >&2 || true
+      failed=1
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
+    if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
+      ok "sanity: xray config JSON OK"
+    else
+      warn "sanity: xray config JSON INVALID"
+      jq -e . "$XRAY_CONFIG" >&2 || true
+      failed=1
+    fi
+  fi
+
+  # Cert presence (TLS termination depends on these)
+  if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
+    ok "sanity: TLS cert files present"
   else
-  warn "sanity: xray config JSON INVALID"
-  jq -e . "$XRAY_CONFIG" >&2 || true
-  failed=1
-fi
-fi
+    warn "sanity: TLS cert files missing under /opt/cert"
+    failed=1
+  fi
 
-# Cert presence (TLS termination depends on these)
-if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
-  ok "sanity: TLS cert files present"
-else
-warn "sanity: TLS cert files missing under /opt/cert"
-failed=1
-fi
+  # Listener hints (informational only)
+  if ss -lntp 2>/dev/null | grep -q ':443'; then
+    ok "sanity: port 443 is listening"
+  else
+    warn "sanity: port 443 not detected as listening (check nginx)"
+  fi
 
-# Listener hints (informational only)
-if ss -lntp 2>/dev/null | grep -q ':443'; then
-  ok "sanity: port 443 is listening"
-else
-warn "sanity: port 443 not detected as listening (check nginx)"
-fi
-
-if [[ "$failed" -ne 0 ]]; then
-  die "Sanity check gagal. Lihat log di atas."
-fi
+  if [[ "$failed" -ne 0 ]]; then
+    die "Sanity check gagal. Lihat log di atas."
+  fi
 }
 
 main() {
   need_root
   check_os
   install_base_deps
-	need_python3
+  need_python3
   install_extra_deps
   enable_cron_service
   setup_time_sync_chrony
