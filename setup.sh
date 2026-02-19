@@ -94,7 +94,7 @@ fi
 install_base_deps() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates unzip openssl socat cron gpg lsb-release python3 iproute2 jq dnsutils
+  apt-get install -y curl ca-certificates unzip openssl socat cron gpg lsb-release python3 iproute2 nftables kmod conntrack jq dnsutils
   ok "Dependency dasar terpasang."
 }
 
@@ -2877,10 +2877,530 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+  # =========================
+  # Speed Limit Enforcer (tc/nft/ifb)
+  # - xray-speed-sync: metadata -> routing/outbounds + tc/nft/ifb
+  # - systemd path+timer: auto sync
+  # =========================
+
+  mkdir -p /var/lib/xray-speed-sync
+
+  cat > /usr/local/bin/xray-speed-sync <<'EOF'
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+DEFAULT_CONFDIR = "/usr/local/etc/xray/conf.d"
+DEFAULT_QUOTA_ROOT = "/opt/quota"
+DEFAULT_STATE_DIR = "/var/lib/xray-speed-sync"
+
+SPEED_MARKER = "dummy-speed-sync"
+
+MARK_MIN = 10000
+MARK_MAX = 60000
+
+PROTO_DIRS = ("vless", "vmess", "trojan")
+
+def sh(cmd, check=False):
+  return subprocess.run(cmd, check=check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def sh_out(cmd):
+  return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+
+def load_json(path):
+  with open(path, "r", encoding="utf-8") as f:
+    return json.load(f)
+
+def save_json_atomic(path, data):
+  tmp = f"{path}.tmp"
+  with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+  os.replace(tmp, path)
+
+def parse_num(v):
+  try:
+    if v is None:
+      return 0.0
+    if isinstance(v, bool):
+      return float(int(v))
+    if isinstance(v, (int, float)):
+      return float(v)
+    s = str(v).strip()
+    if s == "":
+      return 0.0
+    return float(s)
+  except Exception:
+    return 0.0
+
+def read_speed_users(quota_root):
+  users = {}  # username -> {"dl": float, "ul": float}
+  for proto in PROTO_DIRS:
+    d = Path(quota_root) / proto
+    if not d.is_dir():
+      continue
+    for p in d.glob("*.json"):
+      try:
+        meta = load_json(str(p))
+      except Exception:
+        continue
+      username = ""
+      if isinstance(meta, dict):
+        username = str(meta.get("username") or "").strip()
+      if not username:
+        username = p.stem
+
+      st = (meta.get("status") if isinstance(meta, dict) else {}) or {}
+      enabled = bool(st.get("speed_limit_enabled", False))
+      dl = parse_num(st.get("speed_download_mbps", 0))
+      ul = parse_num(st.get("speed_upload_mbps", 0))
+      if not enabled:
+        continue
+      if dl <= 0 and ul <= 0:
+        continue
+
+      cur = users.get(username)
+      if cur is None:
+        users[username] = {"dl": dl, "ul": ul}
+      else:
+        users[username] = {
+          "dl": max(cur.get("dl", 0), dl),
+          "ul": max(cur.get("ul", 0), ul),
+        }
+  return users
+
+def load_marks(state_dir):
+  p = Path(state_dir) / "marks.json"
+  if not p.exists():
+    return {}
+  try:
+    data = load_json(str(p))
+    if isinstance(data, dict):
+      out = {}
+      for k, v in data.items():
+        try:
+          out[str(k)] = int(v)
+        except Exception:
+          continue
+      return out
+  except Exception:
+    return {}
+  return {}
+
+def save_marks(state_dir, marks):
+  Path(state_dir).mkdir(parents=True, exist_ok=True)
+  save_json_atomic(str(Path(state_dir) / "marks.json"), marks)
+
+def alloc_marks(users, marks):
+  used = set()
+  for v in marks.values():
+    try:
+      used.add(int(v))
+    except Exception:
+      continue
+
+  for u in sorted(users.keys()):
+    if u in marks:
+      try:
+        mk = int(marks[u])
+        if MARK_MIN <= mk <= MARK_MAX and mk not in (used - {mk}):
+          continue
+      except Exception:
+        pass
+
+    mk = None
+    for cand in range(MARK_MIN, MARK_MAX + 1):
+      if cand not in used:
+        mk = cand
+        break
+    if mk is None:
+      raise RuntimeError("No free marks available")
+    marks[u] = mk
+    used.add(mk)
+
+  keep = set(users.keys())
+  for u in list(marks.keys()):
+    if u not in keep:
+      marks.pop(u, None)
+
+  return marks
+
+def find_rule_index(rules, predicate):
+  for i, r in enumerate(rules):
+    try:
+      if predicate(r):
+        return i
+    except Exception:
+      continue
+  return -1
+
+def is_warp_inbounds_rule(r):
+  inb = r.get("inboundTag")
+  return r.get("type") == "field" and r.get("outboundTag") == "warp" and isinstance(inb, list) and "dummy-warp-inbounds" in inb
+
+def is_warp_user_rule(r):
+  u = r.get("user")
+  return r.get("type") == "field" and r.get("outboundTag") == "warp" and isinstance(u, list) and "dummy-warp-user" in u
+
+def is_block_marker_rule(r, marker):
+  u = r.get("user")
+  return r.get("type") == "field" and r.get("outboundTag") == "blocked" and isinstance(u, list) and marker in u
+
+def get_global_mode(rules):
+  idx = find_rule_index(rules, lambda r: r.get("type") == "field" and str(r.get("port", "")) == "1-65535")
+  if idx < 0:
+    return "direct"
+  r = rules[idx]
+  if str(r.get("balancerTag") or "").strip():
+    return "balancer"
+  ot = str(r.get("outboundTag") or "").strip()
+  if ot == "warp":
+    return "warp"
+  return "direct"
+
+def get_balancer_strategy(routing):
+  bals = routing.get("balancers") or []
+  if not isinstance(bals, list):
+    return {"type": "random"}
+  for b in bals:
+    if isinstance(b, dict) and b.get("tag") == "egress-balance":
+      st = b.get("strategy")
+      if isinstance(st, dict) and st.get("type"):
+        return st
+  return {"type": "random"}
+
+def ensure_speed_outbounds(outbounds_path, users, marks):
+  cfg = load_json(outbounds_path)
+  outbounds = cfg.get("outbounds") or []
+  if not isinstance(outbounds, list):
+    outbounds = []
+
+  new_out = []
+  for o in outbounds:
+    tag = ""
+    if isinstance(o, dict):
+      tag = str(o.get("tag") or "")
+    if tag.startswith("speed-direct@") or tag.startswith("speed-warp@"):
+      continue
+    new_out.append(o)
+
+  for u in sorted(users.keys()):
+    mk = int(marks[u])
+    new_out.append({
+      "protocol": "freedom",
+      "tag": f"speed-direct@{u}",
+      "settings": {"domainStrategy": "UseIP"},
+      "streamSettings": {"sockopt": {"mark": mk}}
+    })
+    new_out.append({
+      "protocol": "socks",
+      "tag": f"speed-warp@{u}",
+      "settings": {"servers": [{"address": "127.0.0.1", "port": 40000}]},
+      "streamSettings": {"sockopt": {"mark": mk}}
+    })
+
+  if new_out != outbounds:
+    cfg["outbounds"] = new_out
+    save_json_atomic(outbounds_path, cfg)
+    return True
+  return False
+
+def ensure_speed_routing(routing_path, users, marks):
+  cfg = load_json(routing_path)
+  routing = cfg.get("routing") or {}
+  rules = routing.get("rules") or []
+  if not isinstance(rules, list):
+    rules = []
+
+  # Remove old speed rules
+  cleaned = []
+  for r in rules:
+    if not isinstance(r, dict):
+      cleaned.append(r)
+      continue
+    u = r.get("user")
+    if isinstance(u, list) and SPEED_MARKER in u:
+      continue
+    cleaned.append(r)
+  rules = cleaned
+
+  warp_inb_tags = []
+  warp_users = set()
+  for r in rules:
+    if not isinstance(r, dict):
+      continue
+    if is_warp_inbounds_rule(r):
+      warp_inb_tags = [x for x in (r.get("inboundTag") or []) if x != "dummy-warp-inbounds"]
+    if is_warp_user_rule(r):
+      warp_users = set([x for x in (r.get("user") or []) if x != "dummy-warp-user"])
+
+  blocked = set()
+  for marker in ("dummy-block-user", "dummy-quota-user", "dummy-limit-user"):
+    idx = find_rule_index(rules, lambda r: isinstance(r, dict) and is_block_marker_rule(r, marker))
+    if idx >= 0:
+      ulist = rules[idx].get("user") or []
+      for x in ulist:
+        if x and x != marker:
+          blocked.add(x)
+
+  global_mode = get_global_mode(rules)
+  strategy = get_balancer_strategy(routing)
+
+  bals = routing.get("balancers") or []
+  if not isinstance(bals, list):
+    bals = []
+  bals = [b for b in bals if not (isinstance(b, dict) and str(b.get("tag") or "").startswith("speed-balance@"))]
+
+  speed_rules = []
+  for u in sorted(users.keys()):
+    if u in blocked:
+      continue
+
+    base = "warp" if u in warp_users else global_mode
+
+    for itag in warp_inb_tags:
+      speed_rules.append({
+        "type": "field",
+        "inboundTag": [itag],
+        "user": [SPEED_MARKER, u],
+        "outboundTag": f"speed-warp@{u}"
+      })
+
+    if base == "warp":
+      speed_rules.append({
+        "type": "field",
+        "user": [SPEED_MARKER, u],
+        "outboundTag": f"speed-warp@{u}"
+      })
+    elif base == "balancer":
+      bal_tag = f"speed-balance@{u}"
+      bals.append({
+        "tag": bal_tag,
+        "selector": [f"speed-direct@{u}", f"speed-warp@{u}"],
+        "strategy": strategy
+      })
+      speed_rules.append({
+        "type": "field",
+        "user": [SPEED_MARKER, u],
+        "balancerTag": bal_tag
+      })
+    else:
+      speed_rules.append({
+        "type": "field",
+        "user": [SPEED_MARKER, u],
+        "outboundTag": f"speed-direct@{u}"
+      })
+
+  insert_idx = len(rules)
+  w1 = find_rule_index(rules, lambda r: isinstance(r, dict) and is_warp_inbounds_rule(r))
+  w2 = find_rule_index(rules, lambda r: isinstance(r, dict) and is_warp_user_rule(r))
+  cand = [x for x in (w1, w2) if x >= 0]
+  if cand:
+    insert_idx = min(cand)
+
+  rules = rules[:insert_idx] + speed_rules + rules[insert_idx:]
+  routing["rules"] = rules
+  routing["balancers"] = bals
+  cfg["routing"] = routing
+  save_json_atomic(routing_path, cfg)
+  return True
+
+def detect_wan_dev():
+  try:
+    out = sh_out(["ip", "-4", "route", "get", "1.1.1.1"])
+    m = re.search(r"\bdev\s+(\S+)", out)
+    if m:
+      return m.group(1)
+  except Exception:
+    pass
+  return "eth0"
+
+def ensure_ifb(num=2):
+  sh(["modprobe", "ifb", f"numifbs={num}"], check=False)
+  for i in range(num):
+    name = f"ifb{i}"
+    sh(["ip", "link", "add", name, "type", "ifb"], check=False)
+    sh(["ip", "link", "set", name, "up"], check=False)
+
+def tc_reset_root(dev):
+  sh(["tc", "qdisc", "del", "dev", dev, "root"], check=False)
+
+def tc_reset_ingress(dev):
+  sh(["tc", "qdisc", "del", "dev", dev, "handle", "ffff:", "ingress"], check=False)
+
+def tc_setup_ingress_redirect(dev, ifb):
+  tc_reset_ingress(dev)
+  sh(["tc", "qdisc", "add", "dev", dev, "handle", "ffff:", "ingress"], check=False)
+  sh(["tc", "filter", "add", "dev", dev, "parent", "ffff:", "protocol", "ip", "u32", "match", "u32", "0", "0",
+      "action", "mirred", "egress", "redirect", "dev", ifb], check=False)
+  sh(["tc", "filter", "add", "dev", dev, "parent", "ffff:", "protocol", "ipv6", "u32", "match", "u32", "0", "0",
+      "action", "mirred", "egress", "redirect", "dev", ifb], check=False)
+
+def tc_setup_htb(dev, handle_major, rate_rules):
+  tc_reset_root(dev)
+  sh(["tc", "qdisc", "add", "dev", dev, "root", "handle", f"{handle_major}:", "htb", "default", "1"], check=False)
+  sh(["tc", "class", "add", "dev", dev, "parent", f"{handle_major}:", "classid", f"{handle_major}:1", "htb",
+      "rate", "1000gbit", "ceil", "1000gbit"], check=False)
+
+  for mk, rate in rate_rules.items():
+    if rate <= 0:
+      continue
+    cls = f"{handle_major}:{mk}"
+    sh(["tc", "class", "add", "dev", dev, "parent", f"{handle_major}:1", "classid", cls, "htb",
+        "rate", f"{rate}mbit", "ceil", f"{rate}mbit"], check=False)
+    for proto in ("ip", "ipv6"):
+      sh(["tc", "filter", "add", "dev", dev, "parent", f"{handle_major}:", "protocol", proto, "prio", "1",
+          "handle", str(mk), "fw", "flowid", cls], check=False)
+
+def apply_nft():
+  if not shutil.which("nft"):
+    return
+  sh(["nft", "delete", "table", "inet", "xray_speed_sync"], check=False)
+  script = '''
+table inet xray_speed_sync {
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    meta mark == 0 meta mark set ct mark
+  }
+  chain output {
+    type route hook output priority mangle; policy accept;
+    meta mark != 0 ct mark set meta mark
+    meta mark == 0 meta mark set ct mark
+  }
+}
+'''
+  subprocess.run(["nft", "-f", "-"], input=script, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def apply_tc(users, marks):
+  if not shutil.which("tc"):
+    return
+
+  wan = detect_wan_dev()
+  ensure_ifb(2)
+
+  tc_setup_ingress_redirect(wan, "ifb0")
+  tc_setup_ingress_redirect("lo", "ifb1")
+
+  dl_map = {}
+  ul_map = {}
+  for u, sp in users.items():
+    mk = int(marks[u])
+    dl_map[mk] = float(sp.get("dl", 0) or 0)
+    ul_map[mk] = float(sp.get("ul", 0) or 0)
+
+  # Upload limit: egress shaping (WAN + lo)
+  tc_setup_htb(wan, 10, ul_map)
+  tc_setup_htb("lo", 20, ul_map)
+
+  # Download limit: ingress -> IFB shaping (ifb0 for WAN, ifb1 for lo)
+  tc_setup_htb("ifb0", 30, dl_map)
+  tc_setup_htb("ifb1", 40, dl_map)
+
+def restart_xray():
+  sh(["systemctl", "restart", "xray"], check=False)
+
+def main():
+  ap = argparse.ArgumentParser(prog="xray-speed-sync")
+  ap.add_argument("--confdir", default=DEFAULT_CONFDIR)
+  ap.add_argument("--quota-root", default=DEFAULT_QUOTA_ROOT)
+  ap.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
+  ap.add_argument("--no-restart", action="store_true")
+  args = ap.parse_args()
+
+  confdir = Path(args.confdir)
+  outbounds_path = str(confdir / "20-outbounds.json")
+  routing_path = str(confdir / "30-routing.json")
+
+  users = read_speed_users(args.quota_root)
+  Path(args.state_dir).mkdir(parents=True, exist_ok=True)
+  marks = load_marks(args.state_dir)
+  marks = alloc_marks(users, marks)
+  save_marks(args.state_dir, marks)
+
+  changed = False
+  if Path(outbounds_path).exists():
+    changed = ensure_speed_outbounds(outbounds_path, users, marks) or changed
+  if Path(routing_path).exists():
+    changed = ensure_speed_routing(routing_path, users, marks) or changed
+
+  # Enforce tc/nft/ifb (best-effort)
+  try:
+    apply_nft()
+  except Exception:
+    pass
+  try:
+    apply_tc(users, marks)
+  except Exception:
+    pass
+
+  if changed and not args.no_restart:
+    restart_xray()
+
+if __name__ == "__main__":
+  raise SystemExit(main())
+
+EOF
+  chmod +x /usr/local/bin/xray-speed-sync
+
+  cat > /etc/systemd/system/xray-speed-sync.service <<'EOF'
+[Unit]
+Description=Xray speed sync (metadata -> routing/outbounds + tc/nft/ifb)
+After=network-online.target xray.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xray-speed-sync --confdir /usr/local/etc/xray/conf.d --quota-root /opt/quota --state-dir /var/lib/xray-speed-sync
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/xray-speed-sync.path <<'EOF'
+[Unit]
+Description=Watch quota metadata changes for xray-speed-sync
+
+[Path]
+PathChanged=/opt/quota/vless
+PathChanged=/opt/quota/vmess
+PathChanged=/opt/quota/trojan
+PathModified=/opt/quota/vless
+PathModified=/opt/quota/vmess
+PathModified=/opt/quota/trojan
+Unit=xray-speed-sync.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/xray-speed-sync.timer <<'EOF'
+[Unit]
+Description=Periodic xray-speed-sync (failsafe)
+
+[Timer]
+OnBootSec=1m
+OnUnitActiveSec=2m
+Persistent=true
+Unit=xray-speed-sync.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+
   systemctl daemon-reload
   systemctl enable xray-expired --now >/dev/null 2>&1 || true
   systemctl enable xray-limit-ip --now >/dev/null 2>&1 || true
   systemctl enable xray-quota --now >/dev/null 2>&1 || true
+
+  systemctl enable xray-speed-sync.path --now >/dev/null 2>&1 || true
+  systemctl enable xray-speed-sync.timer --now >/dev/null 2>&1 || true
+  systemctl start xray-speed-sync.service >/dev/null 2>&1 || true
   systemctl restart xray-expired >/dev/null 2>&1 || true
   systemctl restart xray-limit-ip >/dev/null 2>&1 || true
   systemctl restart xray-quota >/dev/null 2>&1 || true

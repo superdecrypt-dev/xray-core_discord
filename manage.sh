@@ -122,6 +122,10 @@ now_ts() {
   date '+%Y-%m-%d %H:%M:%S'
 }
 
+now_date() {
+  date '+%Y-%m-%d'
+}
+
 bytes_from_gb() {
   # GB (GiB) -> bytes
   local gb="${1:-0}"
@@ -1046,18 +1050,14 @@ if removed == 0:
 routing = (rt_cfg.get('routing') or {})
 rules = routing.get('rules')
 if isinstance(rules, list):
-  markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user"}
   for r in rules:
     if not isinstance(r, dict):
-      continue
-    if r.get('outboundTag') != 'blocked':
       continue
     u = r.get('user')
     if not isinstance(u, list):
       continue
-    if not any(m in u for m in markers):
-      continue
-    r['user'] = [x for x in u if x != email]
+    if email in u:
+      r['user'] = [x for x in u if x != email]
   routing['rules'] = rules
   rt_cfg['routing'] = routing
 
@@ -1230,7 +1230,7 @@ PY
 }
 
 write_account_artifacts() {
-  # args: protocol username cred quota_bytes days ip_limit_enabled ip_limit_value
+  # args: protocol username cred quota_bytes days ip_limit_enabled ip_limit_value speed_limit_enabled speed_download_mbps speed_upload_mbps
   local proto="$1"
   local username="$2"
   local cred="$3"
@@ -1238,6 +1238,9 @@ write_account_artifacts() {
   local days="$5"
   local ip_enabled="$6"
   local ip_limit="$7"
+  local speed_enabled="$8"
+  local speed_dl="$9"
+  local speed_ul="${10}"
 
   ensure_account_quota_dirs
   need_python3
@@ -1245,7 +1248,7 @@ write_account_artifacts() {
   local domain ip created expired
   domain="$(detect_domain)"
   ip="$(detect_public_ip_ipapi)"
-  created="$(now_ts)"
+  created="$(now_date)"
   expired="$(date -d "+${days} days" '+%Y-%m-%d' 2>/dev/null || date '+%Y-%m-%d')"
 
   local acc_file quota_file
@@ -1256,9 +1259,9 @@ write_account_artifacts() {
   local endpoints
   endpoints="$(xray_extract_endpoints "${proto}" || true)"
 
-  python3 - <<'PY' "${acc_file}" "${quota_file}" "${domain}" "${ip}" "${username}" "${proto}" "${cred}" "${quota_bytes}" "${created}" "${expired}" "${days}" "${ip_enabled}" "${ip_limit}" "${endpoints}"
+  python3 - <<'PY' "${acc_file}" "${quota_file}" "${domain}" "${ip}" "${username}" "${proto}" "${cred}" "${quota_bytes}" "${created}" "${expired}" "${days}" "${ip_enabled}" "${ip_limit}" "${speed_enabled}" "${speed_dl}" "${speed_ul}" "${endpoints}"
 import sys, json, base64, urllib.parse, datetime
-acc_file, quota_file, domain, ip, username, proto, cred, quota_bytes, created_at, expired_at, days, ip_enabled, ip_limit, endpoints = sys.argv[1:15]
+acc_file, quota_file, domain, ip, username, proto, cred, quota_bytes, created_at, expired_at, days, ip_enabled, ip_limit, speed_enabled, speed_dl, speed_ul, endpoints = sys.argv[1:18]
 quota_bytes=int(quota_bytes)
 days=int(float(days)) if str(days).strip() else 0
 ip_enabled = str(ip_enabled).lower() in ("1","true","yes","y","on")
@@ -1266,6 +1269,16 @@ try:
   ip_limit_int=int(ip_limit)
 except Exception:
   ip_limit_int=0
+
+speed_enabled = str(speed_enabled).lower() in ("1","true","yes","y","on")
+try:
+  speed_dl_int=int(speed_dl)
+except Exception:
+  speed_dl_int=0
+try:
+  speed_ul_int=int(speed_ul)
+except Exception:
+  speed_ul_int=0
 
 # Parse endpoints lines: network|value
 ep={}
@@ -1356,7 +1369,11 @@ lines.append(f"Quota Limit : {quota_gb:.0f} GB")
 lines.append(f"Expired     : {days} days")
 lines.append(f"Valid Until : {expired_at}")
 lines.append(f"Created     : {created_at}")
-lines.append(f"IP Limit    : {'ON' if ip_enabled else 'OFF'}" + (f" ({ip_limit_int})" if ip_enabled else ""))
+lines.append(f"IP Limit    : {'ON' if ip_enabled else 'OFF'}")
+lines.append(f"IP Limit Max : {ip_limit_int if ip_enabled else 0}")
+lines.append(f"Speed Download : {speed_dl_int} Mbps")
+lines.append(f"Speed Upload   : {speed_ul_int} Mbps")
+lines.append(f"Speed Limit    : {'ON' if speed_enabled else 'OFF'}")
 lines.append("")
 lines.append("Links Import:")
 lines.append(f"  WebSocket   : {links.get('ws','-')}")
@@ -1380,6 +1397,9 @@ meta={
     "quota_exhausted": False,
     "ip_limit_enabled": ip_enabled,
     "ip_limit": ip_limit_int if ip_enabled else 0,
+    "speed_limit_enabled": speed_enabled,
+    "speed_download_mbps": speed_dl_int,
+    "speed_upload_mbps": speed_ul_int,
     "ip_limit_locked": False,
     "lock_reason": "",
     "locked_at": ""
@@ -1515,16 +1535,6 @@ user_add_menu() {
     return 0
   fi
 
-  read -r -p "Masa aktif (hari) (atau kembali): " days
-  if is_back_choice "${days}"; then
-    return 0
-  fi
-  if [[ -z "${days}" || ! "${days}" =~ ^[0-9]+$ || "${days}" -le 0 ]]; then
-    warn "Masa aktif harus angka hari > 0"
-    pause
-    return 0
-  fi
-
   read -r -p "Quota (GB) (atau kembali): " quota_gb
   if is_back_choice "${quota_gb}"; then
     return 0
@@ -1557,6 +1567,47 @@ user_add_menu() {
     fi
   fi
 
+  echo "Speed limit? (on/off)"
+  read -r -p "Speed Limit (on/off) (atau kembali): " speed_toggle
+  if is_back_choice "${speed_toggle}"; then
+    return 0
+  fi
+  local speed_enabled="false"
+  local speed_dl="0"
+  local speed_ul="0"
+  if is_yes "${speed_toggle}"; then
+    speed_enabled="true"
+    read -r -p "Speed Download (Mbps) (atau kembali): " speed_dl
+    if is_back_choice "${speed_dl}"; then
+      return 0
+    fi
+    if [[ -z "${speed_dl}" || ! "${speed_dl}" =~ ^[0-9]+$ || "${speed_dl}" -le 0 ]]; then
+      warn "Speed Download harus angka > 0 (Mbps)"
+      pause
+      return 0
+    fi
+
+    read -r -p "Speed Upload (Mbps) (atau kembali): " speed_ul
+    if is_back_choice "${speed_ul}"; then
+      return 0
+    fi
+    if [[ -z "${speed_ul}" || ! "${speed_ul}" =~ ^[0-9]+$ || "${speed_ul}" -le 0 ]]; then
+      warn "Speed Upload harus angka > 0 (Mbps)"
+      pause
+      return 0
+    fi
+  fi
+
+  read -r -p "Masa aktif (hari) (atau kembali): " days
+  if is_back_choice "${days}"; then
+    return 0
+  fi
+  if [[ -z "${days}" || ! "${days}" =~ ^[0-9]+$ || "${days}" -le 0 ]]; then
+    warn "Masa aktif harus angka hari > 0"
+    pause
+    return 0
+  fi
+
   hr
   echo "Ringkasan:"
   echo "  Username : ${username}"
@@ -1565,6 +1616,7 @@ user_add_menu() {
   echo "  Expired  : ${days} hari"
   echo "  Quota    : ${quota_gb} GB"
   echo "  IP Limit : ${ip_enabled} $( [[ "${ip_enabled}" == "true" ]] && echo "(${ip_limit})" )"
+  echo "  Speed Limit : ${speed_enabled} $( [[ "${speed_enabled}" == "true" ]] && echo "(DL ${speed_dl} Mbps / UL ${speed_ul} Mbps)" )"
   hr
 
   local cred
@@ -1578,8 +1630,8 @@ PY
     cred="$(gen_uuid)"
   fi
 
-  xray_add_client "${proto}" "${username}" "${cred}"
-  write_account_artifacts "${proto}" "${username}" "${cred}" "${quota_bytes}" "${days}" "${ip_enabled}" "${ip_limit}"
+  # NOTE: Apply ke Xray/Tc/Nft dilakukan oleh xray-speed-sync (systemd). Di sini hanya update metadata.
+  write_account_artifacts "${proto}" "${username}" "${cred}" "${quota_bytes}" "${days}" "${ip_enabled}" "${ip_limit}" "${speed_enabled}" "${speed_dl}" "${speed_ul}"
 
   title
   echo "Add user sukses ✅"
@@ -1669,8 +1721,9 @@ user_del_menu() {
   fi
 
   hr
-  xray_delete_client "${proto}" "${username}"
+  # NOTE: Penghapusan dari Xray/Tc/Nft dilakukan oleh xray-speed-sync (systemd). Di sini hanya hapus metadata.
   delete_account_artifacts "${proto}" "${username}"
+
 
   title
   echo "Delete user selesai ✅"
@@ -2023,7 +2076,7 @@ PY
 
 quota_read_detail_fields() {
   # args: json_file
-  # prints: username|quota_limit_disp|quota_used_disp|expired_at_date|ip_limit_onoff|ip_limit_value|block_reason
+  # prints: username|quota_limit_disp|quota_used_disp|expired_at_date|ip_limit_onoff|ip_limit_value|block_reason|speed_download_mbps|speed_upload_mbps|speed_limit_onoff
   local qf="$1"
   need_python3
   python3 - <<'PY' "${qf}"
@@ -2032,7 +2085,7 @@ p=sys.argv[1]
 try:
   d=json.load(open(p,'r',encoding='utf-8'))
 except Exception:
-  print("-|0 GB|0 B|-|OFF|0|-")
+  print("-|0 GB|0 B|-|OFF|0|-|0|0|OFF")
   raise SystemExit(0)
 
 u=str(d.get("username") or "-")
@@ -2068,6 +2121,16 @@ except Exception:
   ip_lim=0
 ip_lim = ip_lim if ip_en else 0
 
+speed_en=bool(st.get("speed_limit_enabled"))
+try:
+  speed_dl=int(st.get("speed_download_mbps") or 0)
+except Exception:
+  speed_dl=0
+try:
+  speed_ul=int(st.get("speed_upload_mbps") or 0)
+except Exception:
+  speed_ul=0
+
 lr=str(st.get("lock_reason") or "").strip().lower()
 reason="-"
 if st.get("manual_block") or lr == "manual":
@@ -2077,7 +2140,7 @@ elif st.get("quota_exhausted") or lr == "quota":
 elif st.get("ip_limit_locked") or lr == "ip_limit":
   reason="IP_LIMIT"
 
-print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{'ON' if ip_en else 'OFF'}|{ip_lim}|{reason}")
+print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{'ON' if ip_en else 'OFF'}|{ip_lim}|{reason}|{speed_dl}|{speed_ul}|{'ON' if speed_en else 'OFF'}")
 PY
 }
 
@@ -2300,8 +2363,8 @@ quota_edit_flow() {
     echo "File  : ${qf}"
     hr
 
-    local fields username ql_disp qu_disp exp_date ip_state ip_lim block_reason
-    fields="$(quota_read_detail_fields "${qf}")"
+    local fields username ql_disp qu_disp exp_date ip_state ip_lim block_reason speed_dl speed_ul speed_state
+        fields="$(quota_read_detail_fields "${qf}")"
     username="${fields%%|*}"
     fields="${fields#*|}"
     ql_disp="${fields%%|*}"
@@ -2313,7 +2376,13 @@ quota_edit_flow() {
     ip_state="${fields%%|*}"
     fields="${fields#*|}"
     ip_lim="${fields%%|*}"
-    block_reason="${fields##*|}"
+    fields="${fields#*|}"
+    block_reason="${fields%%|*}"
+    fields="${fields#*|}"
+    speed_dl="${fields%%|*}"
+    fields="${fields#*|}"
+    speed_ul="${fields%%|*}"
+    speed_state="${fields##*|}"
 
     echo "Username     : ${username}"
     echo "Quota Limit  : ${ql_disp}"
@@ -2322,6 +2391,9 @@ quota_edit_flow() {
     echo "IP Limit     : ${ip_state}"
     echo "Block Reason : ${block_reason}"
     echo "IP Limit Max : ${ip_lim}"
+    echo "Speed Download : ${speed_dl} Mbps"
+    echo "Speed Upload   : ${speed_ul} Mbps"
+    echo "Speed Limit    : ${speed_state}"
     hr
 
     echo "  1) View JSON"
@@ -2331,6 +2403,9 @@ quota_edit_flow() {
     echo "  5) IP Limit Enable/Disable (toggle)"
     echo "  6) Set IP Limit (angka)"
     echo "  7) Unlock IP Lock"
+    echo "  8) Set Speed Download (Mbps)"
+    echo "  9) Set Speed Upload (Mbps)"
+    echo "  10) Enable/Disable Speed Limit"
     echo "  0) Back (kembali)"
     hr
     read -r -p "Pilih: " c
@@ -2424,6 +2499,46 @@ quota_edit_flow() {
         log "IP lock di-unlock"
         pause
         ;;
+      8)
+        read -r -p "Speed Download (Mbps) (atau kembali): " dl
+        if is_back_choice "${dl}"; then
+          continue
+        fi
+        if [[ -z "${dl}" || ! "${dl}" =~ ^[0-9]+$ ]]; then
+          warn "Speed Download harus angka (Mbps)"
+          pause
+          continue
+        fi
+        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_download_mbps']=int(${dl})"
+        log "Speed download diubah: ${dl} Mbps"
+        pause
+        ;;
+      9)
+        read -r -p "Speed Upload (Mbps) (atau kembali): " ul
+        if is_back_choice "${ul}"; then
+          continue
+        fi
+        if [[ -z "${ul}" || ! "${ul}" =~ ^[0-9]+$ ]]; then
+          warn "Speed Upload harus angka (Mbps)"
+          pause
+          continue
+        fi
+        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_upload_mbps']=int(${ul})"
+        log "Speed upload diubah: ${ul} Mbps"
+        pause
+        ;;
+      10)
+        local se
+        se="$(quota_get_status_bool "${qf}" "speed_limit_enabled")"
+        if [[ "${se}" == "true" ]]; then
+          quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_limit_enabled']=False"
+          log "Speed limit: OFF"
+        else
+          quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_limit_enabled']=True"
+          log "Speed limit: ON"
+        fi
+        pause
+        ;;
       *)
         warn "Pilihan tidak valid"
         sleep 1
@@ -2500,7 +2615,7 @@ quota_menu() {
 }
 
 # -------------------------
-# Network / Proxy Add-ons
+# Network Controls
 # - Egress mode: direct / warp / balancer
 # - Balancer: tag "egress-balance"
 # - Observatory: conf.d/60-observatory.json (untuk leastPing/leastLoad)
@@ -3482,7 +3597,7 @@ network_show_summary() {
 egress_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > Egress Mode & Balancer"
+    echo "4) Network Controls > Egress Mode & Balancer"
     hr
     xray_routing_default_rule_get || true
     echo ""
@@ -3733,7 +3848,7 @@ egress_observatory_settings_menu() {
 egress_menu_simple() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > Egress Mode & Balancer"
+    echo "4) Network Controls > Egress Mode & Balancer"
     hr
     printf "Current Egress Mode: %s\n" "$(warp_global_mode_pretty_get)"
     hr
@@ -4849,7 +4964,7 @@ warp_domain_geosite_menu() {
 warp_controls_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > WARP Controls"
+    echo "4) Network Controls > WARP Controls"
     hr
     echo "  1) WARP (wireproxy) status"
     echo "  2) Restart WARP (wireproxy)"
@@ -4888,7 +5003,7 @@ domain_geosite_menu() {
   need_python3
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > Domain/Geosite Routing (Direct List)"
+    echo "4) Network Controls > Domain/Geosite Routing (Direct List)"
     hr
     echo "Template (readonly):"
     python3 - <<'PY' "${XRAY_ROUTING_CONF}" 2>/dev/null || true
@@ -5442,7 +5557,7 @@ dns_show_status() {
 dns_settings_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > DNS Settings"
+    echo "4) Network Controls > DNS Settings"
     hr
     echo "  1) Set Primary DNS"
     echo "  2) Set Secondary DNS"
@@ -5508,7 +5623,7 @@ dns_settings_menu() {
 dns_addons_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > DNS Add-ons"
+    echo "4) Network Controls > DNS Add-ons"
     hr
     if [[ -f "${XRAY_DNS_CONF}" ]]; then
       echo "DNS conf: ${XRAY_DNS_CONF}"
@@ -5544,7 +5659,7 @@ dns_addons_menu() {
 network_diagnostics_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons > Diagnostics"
+    echo "4) Network Controls > Diagnostics"
     hr
     echo "  1) Show summary (routing/balancer/observatory)"
     echo "  2) Validate conf.d JSON (jq)"
@@ -5599,7 +5714,7 @@ network_diagnostics_menu() {
 network_menu() {
   while true; do
     title
-    echo "4) Network / Proxy Add-ons"
+    echo "4) Network Controls"
     hr
     echo "  1) Egress Mode & Balancer"
     echo "  2) WARP Controls"
@@ -6303,7 +6418,7 @@ main_menu() {
     echo "  1) Status & Diagnostics"
     echo "  2) User Management"
     echo "  3) Quota & Access Control"
-    echo "  4) Network / Proxy Add-ons"
+    echo "  4) Network Controls"
     echo "  5) Security"
     echo "  6) Maintenance"
     echo "  0) Exit (kembali)"
@@ -6313,7 +6428,7 @@ main_menu() {
       1) run_action "Status & Diagnostics" sanity_check_now ;;
       2) run_action "User Management" user_menu ;;
       3) run_action "Quota & Access Control" quota_menu ;;
-      4) run_action "Network / Proxy Add-ons" network_menu ;;
+      4) run_action "Network Controls" network_menu ;;
       5) run_action "Security" fail2ban_menu ;;
       6) run_action "Maintenance" maintenance_menu ;;
       0|kembali|k|back|b) exit 0 ;;
