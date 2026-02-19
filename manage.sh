@@ -2580,6 +2580,28 @@ validate_email_user() {
   [[ "${email}" =~ ^[A-Za-z0-9._-]+@(vless|vmess|trojan)$ ]]
 }
 
+is_default_xray_email_or_tag() {
+  # Hide default/bawaan Xray dari menu WARP:
+  # default@(vless|vmess|trojan)-(ws|hup|grpc)
+  local s="${1:-}"
+  [[ "${s}" =~ ^default@(vless|vmess|trojan)-(ws|hup|grpc)$ ]]
+}
+
+is_readonly_geosite_domain() {
+  # Geosite ini readonly (jangan disentuh), dan harus disembunyikan dari menu:
+  # apple, meta, google, openai, spotify, netflix, reddit
+  local ent="${1:-}"
+  case "${ent}" in
+    geosite:apple|geosite:meta|geosite:google|geosite:openai|geosite:spotify|geosite:netflix|geosite:reddit)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+
 xray_routing_default_rule_get() {
   # prints: mode=<direct|warp|balancer|unknown> tag=<tag-or-empty> balancer=<balancerTag-or-empty>
   need_python3
@@ -3192,6 +3214,30 @@ for ib in cfg.get('inbounds', []) or []:
 print(",".join(tags))
 PY
 }
+
+xray_inbounds_all_tags_get() {
+  need_python3
+  [[ -f "${XRAY_INBOUNDS_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" 2>/dev/null || true
+import json, sys
+src=sys.argv[1]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+tags=set()
+for ib in (cfg.get('inbounds') or []):
+  if not isinstance(ib, dict):
+    continue
+  tag=ib.get('tag')
+  if isinstance(tag, str) and tag.strip():
+    tags.add(tag.strip())
+for t in sorted(tags):
+  print(t)
+PY
+}
+
 
 network_show_summary() {
   title
@@ -3846,7 +3892,7 @@ PY
 warp_global_menu() {
   while true; do
     title
-    echo "WARP Controls > WARP Global"
+    echo "WARP Controls > Toggle WARP Global"
     hr
     printf "Status WARP Global: %s\n" "$(warp_global_mode_pretty_get)"
     hr
@@ -3878,11 +3924,9 @@ warp_user_set_effective_mode() {
   local email="$1"
   local desired="$2" # direct|warp
 
-  local global_mode default_mode
-  global_mode="$(warp_global_mode_get || true)"
-  default_mode="direct"
-  if [[ "${global_mode}" == "warp" ]]; then
-    default_mode="warp"
+  if is_default_xray_email_or_tag "${email}"; then
+    warn "User default Xray bersifat readonly: ${email}"
+    return 0
   fi
 
   local in_warp="no"
@@ -3896,42 +3940,25 @@ warp_user_set_effective_mode() {
 
   case "${desired}" in
     direct)
-      # Clear WARP override (if any)
       if [[ "${in_warp}" == "yes" ]]; then
         xray_routing_rule_toggle_user_outbound "dummy-warp-user" "warp" "${email}" off
       fi
-
-      # If global default is WARP, we need DIRECT override; otherwise clear DIRECT override
-      if [[ "${default_mode}" == "warp" ]]; then
-        if [[ "${in_direct}" != "yes" ]]; then
-          xray_routing_rule_toggle_user_outbound "dummy-direct-user" "direct" "${email}" on
-        fi
-      else
-        if [[ "${in_direct}" == "yes" ]]; then
-          xray_routing_rule_toggle_user_outbound "dummy-direct-user" "direct" "${email}" off
-        fi
+      if [[ "${in_direct}" != "yes" ]]; then
+        xray_routing_rule_toggle_user_outbound "dummy-direct-user" "direct" "${email}" on
       fi
       ;;
     warp)
-      # Clear DIRECT override (if any)
       if [[ "${in_direct}" == "yes" ]]; then
         xray_routing_rule_toggle_user_outbound "dummy-direct-user" "direct" "${email}" off
       fi
-
-      # If global default is DIRECT, we need WARP override; otherwise clear WARP override
-      if [[ "${default_mode}" == "direct" ]]; then
-        if [[ "${in_warp}" != "yes" ]]; then
-          xray_routing_rule_toggle_user_outbound "dummy-warp-user" "warp" "${email}" on
-        fi
-      else
-        if [[ "${in_warp}" == "yes" ]]; then
-          xray_routing_rule_toggle_user_outbound "dummy-warp-user" "warp" "${email}" off
-        fi
+      if [[ "${in_warp}" != "yes" ]]; then
+        xray_routing_rule_toggle_user_outbound "dummy-warp-user" "warp" "${email}" on
       fi
       ;;
     *) warn "Mode user harus direct|warp" ;;
   esac
 }
+
 
 warp_per_user_menu() {
   need_python3
@@ -3940,12 +3967,22 @@ warp_per_user_menu() {
   local page_size=10
 
   while true; do
-    mapfile -t all_users < <(xray_inbounds_all_client_emails_get 2>/dev/null || true)
+    mapfile -t all_users_raw < <(xray_inbounds_all_client_emails_get 2>/dev/null || true)
+
+    local all_users=()
+    local u
+    for u in "${all_users_raw[@]}"; do
+      if is_default_xray_email_or_tag "${u}"; then
+        continue
+      fi
+      all_users+=("${u}")
+    done
+
     if (( ${#all_users[@]} == 0 )); then
       title
       echo "WARP Controls > WARP per-user"
       hr
-      warn "Tidak menemukan user dari config inbounds."
+      warn "Tidak menemukan user non-default dari config inbounds."
       hr
       pause
       return 0
@@ -3957,7 +3994,6 @@ warp_per_user_menu() {
     declare -A warp_set=()
     declare -A direct_set=()
 
-    local u
     for u in "${warp_override[@]}"; do
       [[ -n "${u}" ]] && warp_set["${u}"]=1
     done
@@ -3984,10 +4020,13 @@ warp_per_user_menu() {
     title
     echo "WARP Controls > WARP per-user"
     hr
-    printf "WARP Global: %s\n" "$(warp_global_mode_pretty_get)"
+    printf "WARP Global: %s
+" "$(warp_global_mode_pretty_get)"
     hr
-    printf "%-4s %-32s %-7s\n" "No" "User" "Status"
-    printf "%-4s %-32s %-7s\n" "----" "--------------------------------" "-------"
+    printf "%-4s %-32s %-7s
+" "No" "User" "Status"
+    printf "%-4s %-32s %-7s
+" "----" "--------------------------------" "-------"
 
     for (( i=start; i<end; i++ )); do
       row=$((i - start + 1))
@@ -4001,7 +4040,8 @@ warp_per_user_menu() {
         status="${default_mode}"
       fi
 
-      printf "%-4s %-32s %-7s\n" "${row}" "${email}" "${status}"
+      printf "%-4s %-32s %-7s
+" "${row}" "${email}" "${status}"
     done
 
     echo
@@ -4092,15 +4132,14 @@ warp_per_user_menu() {
   done
 }
 
+
 warp_inbound_set_effective_mode() {
   local tag="$1"
   local desired="$2" # direct|warp
 
-  local global_mode default_mode
-  global_mode="$(warp_global_mode_get || true)"
-  default_mode="direct"
-  if [[ "${global_mode}" == "warp" ]]; then
-    default_mode="warp"
+  if [[ "${tag}" == "api" ]] || is_default_xray_email_or_tag "${tag}"; then
+    warn "Inbound default/internal bersifat readonly: ${tag}"
+    return 0
   fi
 
   local in_warp="no"
@@ -4117,59 +4156,57 @@ warp_inbound_set_effective_mode() {
       if [[ "${in_warp}" == "yes" ]]; then
         xray_routing_rule_toggle_inbounds_outbound "dummy-warp-inbounds" "warp" "${tag}" off
       fi
-
-      if [[ "${default_mode}" == "warp" ]]; then
-        if [[ "${in_direct}" != "yes" ]]; then
-          xray_routing_rule_toggle_inbounds_outbound "dummy-direct-inbounds" "direct" "${tag}" on
-        fi
-      else
-        if [[ "${in_direct}" == "yes" ]]; then
-          xray_routing_rule_toggle_inbounds_outbound "dummy-direct-inbounds" "direct" "${tag}" off
-        fi
+      if [[ "${in_direct}" != "yes" ]]; then
+        xray_routing_rule_toggle_inbounds_outbound "dummy-direct-inbounds" "direct" "${tag}" on
       fi
       ;;
     warp)
       if [[ "${in_direct}" == "yes" ]]; then
         xray_routing_rule_toggle_inbounds_outbound "dummy-direct-inbounds" "direct" "${tag}" off
       fi
-
-      if [[ "${default_mode}" == "direct" ]]; then
-        if [[ "${in_warp}" != "yes" ]]; then
-          xray_routing_rule_toggle_inbounds_outbound "dummy-warp-inbounds" "warp" "${tag}" on
-        fi
-      else
-        if [[ "${in_warp}" == "yes" ]]; then
-          xray_routing_rule_toggle_inbounds_outbound "dummy-warp-inbounds" "warp" "${tag}" off
-        fi
+      if [[ "${in_warp}" != "yes" ]]; then
+        xray_routing_rule_toggle_inbounds_outbound "dummy-warp-inbounds" "warp" "${tag}" on
       fi
       ;;
     *) warn "Mode inbound harus direct|warp" ;;
   esac
 }
 
+
 warp_per_inbounds_menu() {
   need_python3
 
-  local tags=(
-    "default@vless-ws"
-    "default@vmess-ws"
-    "default@trojan-ws"
-    "default@vless-hup"
-    "default@vmess-hup"
-    "default@trojan-hup"
-    "default@vless-grpc"
-    "default@vmess-grpc"
-    "default@trojan-grpc"
-  )
-
   while true; do
+    mapfile -t all_tags_raw < <(xray_inbounds_all_tags_get 2>/dev/null || true)
+
+    local tags=()
+    local t
+    for t in "${all_tags_raw[@]}"; do
+      if [[ "${t}" == "api" ]]; then
+        continue
+      fi
+      if is_default_xray_email_or_tag "${t}"; then
+        continue
+      fi
+      tags+=("${t}")
+    done
+
+    if (( ${#tags[@]} == 0 )); then
+      title
+      echo "WARP Controls > WARP per-protocol inbounds"
+      hr
+      warn "Tidak ada inbound non-default yang bisa diatur."
+      hr
+      pause
+      return 0
+    fi
+
     mapfile -t warp_override < <(xray_routing_rule_inbound_list_get "dummy-warp-inbounds" "warp" 2>/dev/null || true)
     mapfile -t direct_override < <(xray_routing_rule_inbound_list_get "dummy-direct-inbounds" "direct" 2>/dev/null || true)
 
     declare -A warp_set=()
     declare -A direct_set=()
 
-    local t
     for t in "${warp_override[@]}"; do
       [[ -n "${t}" ]] && warp_set["${t}"]=1
     done
@@ -4187,10 +4224,13 @@ warp_per_inbounds_menu() {
     title
     echo "WARP Controls > WARP per-protocol inbounds"
     hr
-    printf "WARP Global: %s\n" "$(warp_global_mode_pretty_get)"
+    printf "WARP Global: %s
+" "$(warp_global_mode_pretty_get)"
     hr
-    printf "%-4s %-28s %-7s\n" "No" "Protocol (Inbound Tag)" "Status"
-    printf "%-4s %-28s %-7s\n" "----" "----------------------------" "-------"
+    printf "%-4s %-28s %-7s
+" "No" "Protocol (Inbound Tag)" "Status"
+    printf "%-4s %-28s %-7s
+" "----" "----------------------------" "-------"
 
     local i status
     for (( i=0; i<${#tags[@]}; i++ )); do
@@ -4204,7 +4244,8 @@ warp_per_inbounds_menu() {
         status="${default_mode}"
       fi
 
-      printf "%-4s %-28s %-7s\n" "$((i + 1))" "${t}" "${status}"
+      printf "%-4s %-28s %-7s
+" "$((i + 1))" "${t}" "${status}"
     done
 
     hr
@@ -4273,6 +4314,7 @@ warp_per_inbounds_menu() {
   done
 }
 
+
 warp_domain_geosite_menu() {
   need_python3
 
@@ -4285,20 +4327,34 @@ warp_domain_geosite_menu() {
     echo "Status: ${mode}"
     hr
 
-    local lst header
+    local header ent
+    local -a lst_raw=()
+    local -a lst=()
+
     if [[ "${mode}" == "warp" ]]; then
       header="Custom WARP list:"
-      lst="$(xray_routing_custom_domain_list_get "regexp:^$WARP" "warp" 2>/dev/null || true)"
+      mapfile -t lst_raw < <(xray_routing_custom_domain_list_get "regexp:^$WARP" "warp" 2>/dev/null || true)
     else
       header="Custom DIRECT list:"
-      lst="$(xray_routing_custom_domain_list_get "regexp:^$" "direct" 2>/dev/null || true)"
+      mapfile -t lst_raw < <(xray_routing_custom_domain_list_get "regexp:^$" "direct" 2>/dev/null || true)
     fi
 
+    for ent in "${lst_raw[@]}"; do
+      if is_readonly_geosite_domain "${ent}"; then
+        continue
+      fi
+      lst+=("${ent}")
+    done
+
     echo "${header}"
-    if [[ -z "${lst}" ]]; then
+    if (( ${#lst[@]} == 0 )); then
       echo "  (kosong)"
     else
-      echo "${lst}" | nl -w2 -s'. ' | sed 's/^/  /'
+      local i
+      for (( i=0; i<${#lst[@]}; i++ )); do
+        printf "  %2d. %s
+" "$((i + 1))" "${lst[$i]}"
+      done
     fi
     hr
 
@@ -4328,12 +4384,17 @@ warp_domain_geosite_menu() {
           pause
           continue
         fi
+        if is_readonly_geosite_domain "${ent}"; then
+          warn "Readonly geosite tidak boleh diubah dari menu ini: ${ent}"
+          pause
+          continue
+        fi
         xray_routing_custom_domain_entry_set_mode "${mode}" "${ent}"
         log "Entry di-set ${mode^^}: ${ent}"
         pause
         ;;
       4)
-        if [[ -z "${lst}" ]]; then
+        if (( ${#lst[@]} == 0 )); then
           warn "List kosong"
           pause
           continue
@@ -4345,18 +4406,21 @@ warp_domain_geosite_menu() {
         ent="$(echo "${ent}" | tr -d '[:space:]')"
 
         if [[ "${ent}" =~ ^[0-9]+$ ]]; then
-          local picked
-          picked="$(echo "${lst}" | sed -n "${ent}p" || true)"
-          if [[ -z "${picked}" ]]; then
+          if (( ent < 1 || ent > ${#lst[@]} )); then
             warn "No tidak ditemukan"
             pause
             continue
           fi
-          ent="${picked}"
+          ent="${lst[$((ent - 1))]}"
         fi
 
         if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^$WARP" ]]; then
           warn "Entry tidak valid / reserved"
+          pause
+          continue
+        fi
+        if is_readonly_geosite_domain "${ent}"; then
+          warn "Readonly geosite tidak bisa dihapus dari menu ini: ${ent}"
           pause
           continue
         fi
@@ -4370,6 +4434,7 @@ warp_domain_geosite_menu() {
   done
 }
 
+
 warp_controls_menu() {
   while true; do
     title
@@ -4377,7 +4442,7 @@ warp_controls_menu() {
     hr
     echo "  1) WARP (wireproxy) status"
     echo "  2) Restart WARP (wireproxy)"
-    echo "  3) WARP Global"
+    echo "  3) Toggle WARP Global"
     echo "  4) WARP per-user"
     echo "  5) WARP per-protocol inbounds"
     echo "  6) WARP per-Geosite/Domain"
