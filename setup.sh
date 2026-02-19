@@ -1557,6 +1557,22 @@ failregex = ^<HOST> - .* \"(GET|POST|HEAD).*(wp-login\.php|xmlrpc\.php|\.env|php
 ignoreregex =
 EOF
   fi
+
+  if [[ ! -f /etc/fail2ban/filter.d/nginx-bad-request.conf ]]; then
+    cat > /etc/fail2ban/filter.d/nginx-bad-request.conf <<'EOF'
+[Definition]
+
+failregex = ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH).*" (400|401|403|404|405|444) .*
+            ^<HOST> - .* "(GET|POST|HEAD|PUT|DELETE).* (wp-login\.php|xmlrpc\.php|\.env|phpmyadmin|HNAP1|admin|manager)" .*
+            ^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[error\]\s+\d+#\d+:\s+\*\d+\s+client sent invalid request.*client:\s+<HOST>.*$
+            ^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[error\]\s+\d+#\d+:\s+\*\d+\s+client sent invalid method.*client:\s+<HOST>.*$
+            ^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[error\]\s+\d+#\d+:\s+\*\d+\s+invalid host in request.*client:\s+<HOST>.*$
+            ^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[error\]\s+\d+#\d+:\s+\*\d+\s+request.*invalid.*client:\s+<HOST>.*$
+
+ignoreregex =
+EOF
+  fi
+
 }
 
 configure_fail2ban_aggressive_jails() {
@@ -1567,35 +1583,45 @@ configure_fail2ban_aggressive_jails() {
   mkdir -p /etc/fail2ban
   cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
-bantime = 1d
+bantime  = 1d
 findtime = 10m
 maxretry = 3
-backend = systemd
+backend  = systemd
 ignoreip = 127.0.0.1/8 ::1
 
 [sshd]
-enabled = true
-mode = aggressive
-port = ssh
-logpath = %(sshd_log)s
+enabled  = true
+port     = ssh
+mode     = aggressive
+logpath  = %(sshd_log)s
+maxretry = 3
+findtime = 10m
+bantime  = 1d
 
-[nginx-http-auth]
-enabled = true
-mode = aggressive
-port = http,https
-logpath = /var/log/nginx/error.log
+[nginx-bad-request-access]
+enabled  = true
+port     = http,https
+mode     = aggressive
+filter   = nginx-bad-request
+logpath  = /var/log/nginx/access.log
+maxretry = 20
+findtime = 60
+bantime  = 1h
 
-[nginx-botsearch]
-enabled = true
-mode = aggressive
-port = http,https
-logpath = /var/log/nginx/access.log
+[nginx-bad-request-error]
+enabled  = true
+port     = http,https
+mode     = aggressive
+filter   = nginx-bad-request
+logpath  = /var/log/nginx/error.log
+maxretry = 10
+findtime = 60
+bantime  = 2h
 
 [recidive]
-enabled = true
-mode = aggressive
-logpath = /var/log/fail2ban.log
-bantime = 7d
+enabled  = true
+logpath  = /var/log/fail2ban.log
+bantime  = 7d
 findtime = 1d
 maxretry = 5
 EOF

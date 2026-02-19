@@ -2581,14 +2581,14 @@ validate_email_user() {
 }
 
 is_default_xray_email_or_tag() {
-  # Hide default/bawaan Xray dari menu WARP:
+  # Default/bawaan Xray (disembunyikan dari menu WARP per-user):
   # default@(vless|vmess|trojan)-(ws|hup|grpc)
   local s="${1:-}"
   [[ "${s}" =~ ^default@(vless|vmess|trojan)-(ws|hup|grpc)$ ]]
 }
 
 is_readonly_geosite_domain() {
-  # Geosite ini readonly (jangan disentuh), dan harus disembunyikan dari menu:
+  # Geosite ini readonly (jangan disentuh), tampilkan di menu tapi jangan diubah:
   # apple, meta, google, openai, spotify, netflix, reddit
   local ent="${1:-}"
   case "${ent}" in
@@ -2599,6 +2599,64 @@ is_readonly_geosite_domain() {
       return 1
       ;;
   esac
+}
+
+xray_routing_readonly_geosite_rule_print() {
+  # Menampilkan rule geosite template (readonly) dari 30-routing.json
+  # Rule ini dibuat oleh setup_modular.sh dan TIDAK boleh diedit dari menu.
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || return 0
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" 2>/dev/null || true
+import json, sys
+
+src=sys.argv[1]
+targets=[
+  "geosite:apple",
+  "geosite:meta",
+  "geosite:google",
+  "geosite:openai",
+  "geosite:spotify",
+  "geosite:netflix",
+  "geosite:reddit",
+]
+tset=set(targets)
+
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+
+rules=((cfg.get("routing") or {}).get("rules") or [])
+found=None
+for r in rules:
+  if not isinstance(r, dict):
+    continue
+  if r.get("type") != "field":
+    continue
+  dom=r.get("domain") or []
+  if not isinstance(dom, list):
+    continue
+  if any(isinstance(x,str) and x in tset for x in dom):
+    found=r
+    break
+
+if not found:
+  print("  (rule readonly geosite tidak ditemukan)")
+  raise SystemExit(0)
+
+out="-"
+if isinstance(found.get("outboundTag"), str) and found.get("outboundTag"):
+  out=found.get("outboundTag")
+elif isinstance(found.get("balancerTag"), str) and found.get("balancerTag"):
+  out="balancer:" + found.get("balancerTag")
+
+print(f"OutboundTag : {out} (readonly)")
+dom=found.get("domain") or []
+for i, x in enumerate(targets, start=1):
+  if x in dom:
+    print(f"  {i:>2}. {x}")
+PY
 }
 
 
@@ -2898,7 +2956,7 @@ with open(src,'r',encoding='utf-8') as f:
 obs=cfg.get('observatory') or {}
 if not isinstance(obs, dict):
   obs={}
-probe=obs.get('probeURL') or obs.get('probeUrl') or ''
+probe=obs.get('probeURL') or obs.get('probeUrl') or obs.get('probeURl') or ''
 interval=obs.get('probeInterval') or ''
 con=obs.get('enableConcurrency')
 sub=obs.get('subjectSelector') or []
@@ -2958,6 +3016,160 @@ PY
   xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
     cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
     die "Gagal update observatory (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+
+xray_observatory_set_probe_url() {
+  # args: probeURL
+  local probe="$1"
+  local tmp backup
+
+  need_python3
+
+  if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_OBSERVATORY_CONF}"
+    echo '{}' > "${XRAY_OBSERVATORY_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
+  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  tmp="${WORK_DIR}/60-observatory.json.tmp"
+
+  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${probe}"
+import json, sys
+src, dst, probe = sys.argv[1:4]
+probe = str(probe).strip()
+
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+obs=cfg.get('observatory')
+if not isinstance(obs, dict):
+  obs={}
+
+if probe:
+  obs['probeURL']=probe
+
+# Keep compatibility fields (do not delete), but try to normalize common typos
+if 'probeURl' in obs and 'probeURL' in obs:
+  obs.pop('probeURl', None)
+
+cfg['observatory']=obs
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
+    die "Gagal update probeURL (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_observatory_set_interval() {
+  # args: interval (contoh: 30s / 10m)
+  local interval="$1"
+  local tmp backup
+
+  need_python3
+
+  if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_OBSERVATORY_CONF}"
+    echo '{}' > "${XRAY_OBSERVATORY_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
+  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  tmp="${WORK_DIR}/60-observatory.json.tmp"
+
+  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${interval}"
+import json, sys
+src, dst, interval = sys.argv[1:4]
+interval = str(interval).strip()
+
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+obs=cfg.get('observatory')
+if not isinstance(obs, dict):
+  obs={}
+
+if interval:
+  obs['probeInterval']=interval
+
+cfg['observatory']=obs
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
+    die "Gagal update interval (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_observatory_toggle_concurrency() {
+  local tmp backup
+  need_python3
+
+  if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_OBSERVATORY_CONF}"
+    echo '{}' > "${XRAY_OBSERVATORY_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
+  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  tmp="${WORK_DIR}/60-observatory.json.tmp"
+
+  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}"
+import json, sys
+src, dst = sys.argv[1:3]
+
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+obs=cfg.get('observatory')
+if not isinstance(obs, dict):
+  obs={}
+
+cur=bool(obs.get('enableConcurrency'))
+obs['enableConcurrency']=not cur
+
+cfg['observatory']=obs
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
+    die "Gagal toggle concurrency (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
@@ -3347,6 +3559,202 @@ egress_menu() {
   done
 }
 
+
+# -------------------------
+# Egress Mode & Balancer (revisi menu sederhana)
+# -------------------------
+egress_show_detailed_status() {
+  title
+  echo "Egress Detailed Status"
+  hr
+  if [[ -f "${XRAY_ROUTING_CONF}" ]]; then
+    xray_routing_default_rule_get || true
+    hr
+    echo "Balancer (egress-balance):"
+    xray_routing_balancer_get || true
+    hr
+  else
+    warn "Routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+    hr
+  fi
+
+  echo "Observatory:"
+  xray_observatory_get || true
+  hr
+  pause
+}
+
+egress_set_mode_menu() {
+  while true; do
+    title
+    echo "Egress Mode & Balancer > Set Egress Mode"
+    hr
+    printf "Current Egress Mode: %s\n" "$(warp_global_mode_pretty_get)"
+    hr
+    echo "  1) DIRECT"
+    echo "  2) WARP"
+    echo "  3) BALANCER"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        xray_routing_default_rule_set direct
+        log "Egress Mode di-set: DIRECT"
+        pause
+        ;;
+      2)
+        xray_routing_default_rule_set warp
+        log "Egress Mode di-set: WARP"
+        pause
+        ;;
+      3)
+        xray_routing_default_rule_set balancer
+        log "Egress Mode di-set: BALANCER (egress-balance)"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+egress_balancer_settings_menu() {
+  while true; do
+    title
+    echo "Egress Mode & Balancer > Balancer Settings (egress-balance)"
+    hr
+    xray_routing_balancer_get || true
+    hr
+    echo "  1) Set Strategy"
+    echo "  2) Set Selector (auto)"
+    echo "  3) Set Selector (manual)"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        read -r -p "Strategy (random/roundRobin/leastPing/leastLoad) (atau kembali): " st
+        if is_back_choice "${st}"; then
+          continue
+        fi
+        case "${st}" in
+          random|roundRobin|leastPing|leastLoad)
+            xray_routing_balancer_set_strategy "${st}"
+            log "Balancer strategy updated: ${st}"
+            pause
+            ;;
+          *)
+            warn "Strategy tidak valid"
+            pause
+            ;;
+        esac
+        ;;
+      2)
+        xray_routing_balancer_set_selector_from_outbounds auto
+        log "Balancer selector di-set: auto"
+        pause
+        ;;
+      3)
+        read -r -p "Selector tags (tag1,tag2,...) (atau kembali): " sel
+        if is_back_choice "${sel}"; then
+          continue
+        fi
+        xray_routing_balancer_set_selector_from_outbounds "${sel}"
+        log "Balancer selector updated"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+egress_observatory_settings_menu() {
+  while true; do
+    title
+    echo "Egress Mode & Balancer > Observatory Settings"
+    hr
+
+    local probe interval conc subj
+    probe="$(xray_observatory_get | awk -F'=' '/^probeURL=/{print $2; exit}' 2>/dev/null || true)"
+    interval="$(xray_observatory_get | awk -F'=' '/^interval=/{print $2; exit}' 2>/dev/null || true)"
+    conc="$(xray_observatory_get | awk -F'=' '/^concurrency=/{print $2; exit}' 2>/dev/null || true)"
+    subj="$(xray_observatory_get | awk -F'=' '/^subjectSelector=/{print $2; exit}' 2>/dev/null || true)"
+
+    echo "probeURL        : ${probe}"
+    echo "interval        : ${interval}"
+    echo "concurrency     : ${conc}"
+    echo "subjectSelector : ${subj}"
+    hr
+
+    echo "  1) Set probeURL"
+    echo "  2) Set interval"
+    echo "  3) Toggle concurrency"
+    echo "  4) Sync subjectSelector from balancer"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        read -r -p "probeURL (contoh https://www.google.com/generate_204) (atau kembali): " purl
+        if is_back_choice "${purl}"; then
+          continue
+        fi
+        xray_observatory_set_probe_url "${purl}"
+        log "probeURL updated"
+        pause
+        ;;
+      2)
+        read -r -p "interval (contoh 30s / 10m) (atau kembali): " pint
+        if is_back_choice "${pint}"; then
+          continue
+        fi
+        xray_observatory_set_interval "${pint}"
+        log "interval updated"
+        pause
+        ;;
+      3)
+        xray_observatory_toggle_concurrency
+        log "concurrency toggled"
+        pause
+        ;;
+      4)
+        xray_observatory_sync_subject_selector_from_balancer
+        log "Observatory subjectSelector disinkronkan"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+egress_menu_simple() {
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > Egress Mode & Balancer"
+    hr
+    printf "Current Egress Mode: %s\n" "$(warp_global_mode_pretty_get)"
+    hr
+    echo "  1) Set Egress Mode"
+    echo "  2) Balancer Settings"
+    echo "  3) Observatory Settings"
+    echo "  4) Show Detailed Status"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) egress_set_mode_menu ;;
+      2) egress_balancer_settings_menu ;;
+      3) egress_observatory_settings_menu ;;
+      4) egress_show_detailed_status ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
 warp_global_mode_get() {
   xray_routing_default_rule_get | awk -F'=' '/^mode=/{print $2; exit}' 2>/dev/null || true
 }
@@ -3524,7 +3932,7 @@ warp_controls_summary() {
   wi="$(xray_routing_rule_inbound_list_get "dummy-warp-inbounds" "warp" | wc -l | tr -d ' ')"
   di="$(xray_routing_rule_inbound_list_get "dummy-direct-inbounds" "direct" | wc -l | tr -d ' ')"
   dd="$(xray_routing_custom_domain_list_get "regexp:^$" "direct" | wc -l | tr -d ' ')"
-  wd="$(xray_routing_custom_domain_list_get "regexp:^$WARP" "warp" | wc -l | tr -d ' ')"
+  wd="$(xray_routing_custom_domain_list_get 'regexp:^$WARP' "warp" | wc -l | tr -d ' ')"
 
   echo "WARP Global : ${global}"
   echo "wireproxy   : ${wire_state}"
@@ -3892,7 +4300,7 @@ PY
 warp_global_menu() {
   while true; do
     title
-    echo "WARP Controls > Toggle WARP Global"
+    echo "WARP Controls > WARP Global"
     hr
     printf "Status WARP Global: %s\n" "$(warp_global_mode_pretty_get)"
     hr
@@ -4137,8 +4545,8 @@ warp_inbound_set_effective_mode() {
   local tag="$1"
   local desired="$2" # direct|warp
 
-  if [[ "${tag}" == "api" ]] || is_default_xray_email_or_tag "${tag}"; then
-    warn "Inbound default/internal bersifat readonly: ${tag}"
+  if [[ "${tag}" == "api" ]]; then
+    warn "Inbound internal (api) bersifat readonly: ${tag}"
     return 0
   fi
 
@@ -4185,9 +4593,6 @@ warp_per_inbounds_menu() {
       if [[ "${t}" == "api" ]]; then
         continue
       fi
-      if is_default_xray_email_or_tag "${t}"; then
-        continue
-      fi
       tags+=("${t}")
     done
 
@@ -4195,7 +4600,7 @@ warp_per_inbounds_menu() {
       title
       echo "WARP Controls > WARP per-protocol inbounds"
       hr
-      warn "Tidak ada inbound non-default yang bisa diatur."
+      warn "Tidak ada inbound yang bisa diatur."
       hr
       pause
       return 0
@@ -4327,22 +4732,23 @@ warp_domain_geosite_menu() {
     echo "Status: ${mode}"
     hr
 
+    echo "Readonly (template) geosite:"
+    xray_routing_readonly_geosite_rule_print || true
+    hr
+
     local header ent
     local -a lst_raw=()
     local -a lst=()
 
     if [[ "${mode}" == "warp" ]]; then
       header="Custom WARP list:"
-      mapfile -t lst_raw < <(xray_routing_custom_domain_list_get "regexp:^$WARP" "warp" 2>/dev/null || true)
+      mapfile -t lst_raw < <(xray_routing_custom_domain_list_get 'regexp:^$WARP' "warp" 2>/dev/null || true)
     else
       header="Custom DIRECT list:"
       mapfile -t lst_raw < <(xray_routing_custom_domain_list_get "regexp:^$" "direct" 2>/dev/null || true)
     fi
 
     for ent in "${lst_raw[@]}"; do
-      if is_readonly_geosite_domain "${ent}"; then
-        continue
-      fi
       lst+=("${ent}")
     done
 
@@ -4352,8 +4758,12 @@ warp_domain_geosite_menu() {
     else
       local i
       for (( i=0; i<${#lst[@]}; i++ )); do
-        printf "  %2d. %s
-" "$((i + 1))" "${lst[$i]}"
+        ent="${lst[$i]}"
+        if is_readonly_geosite_domain "${ent}"; then
+          printf "  %2d. %s (readonly)\n" "$((i + 1))" "${ent}"
+        else
+          printf "  %2d. %s\n" "$((i + 1))" "${ent}"
+        fi
       done
     fi
     hr
@@ -4379,7 +4789,7 @@ warp_domain_geosite_menu() {
           continue
         fi
         ent="$(echo "${ent}" | tr -d '[:space:]')"
-        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^$WARP" ]]; then
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == 'regexp:^$WARP' ]]; then
           warn "Entry tidak valid / reserved"
           pause
           continue
@@ -4414,7 +4824,7 @@ warp_domain_geosite_menu() {
           ent="${lst[$((ent - 1))]}"
         fi
 
-        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^$WARP" ]]; then
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == 'regexp:^$WARP' ]]; then
           warn "Entry tidak valid / reserved"
           pause
           continue
@@ -4435,6 +4845,7 @@ warp_domain_geosite_menu() {
 }
 
 
+
 warp_controls_menu() {
   while true; do
     title
@@ -4442,7 +4853,7 @@ warp_controls_menu() {
     hr
     echo "  1) WARP (wireproxy) status"
     echo "  2) Restart WARP (wireproxy)"
-    echo "  3) Toggle WARP Global"
+    echo "  3) WARP Global"
     echo "  4) WARP per-user"
     echo "  5) WARP per-protocol inbounds"
     echo "  6) WARP per-Geosite/Domain"
@@ -4704,6 +5115,396 @@ PY
   done
 }
 
+
+# -------------------------
+# DNS Settings
+# -------------------------
+xray_dns_status_get() {
+  # output:
+  # primary=<...>
+  # secondary=<...>
+  # strategy=<...>
+  # cache=on|off
+  need_python3
+
+  if [[ ! -f "${XRAY_DNS_CONF}" ]]; then
+    echo "primary="
+    echo "secondary="
+    echo "strategy="
+    echo "cache=on"
+    return 0
+  fi
+
+  python3 - <<'PY' "${XRAY_DNS_CONF}" 2>/dev/null || true
+import json, sys
+
+src=sys.argv[1]
+try:
+  with open(src,'r',encoding='utf-8') as f:
+    cfg=json.load(f)
+except Exception:
+  raise SystemExit(0)
+
+dns=cfg.get('dns') or {}
+if not isinstance(dns, dict):
+  dns={}
+
+servers=dns.get('servers') or []
+if not isinstance(servers, list):
+  servers=[]
+
+def server_addr(s):
+  if isinstance(s, str):
+    return s
+  if isinstance(s, dict):
+    a=s.get('address')
+    if isinstance(a, str):
+      return a
+  return ''
+
+primary=server_addr(servers[0]) if len(servers) > 0 else ''
+secondary=server_addr(servers[1]) if len(servers) > 1 else ''
+
+qs=dns.get('queryStrategy')
+strategy=qs if isinstance(qs, str) else ''
+
+disable_cache=dns.get('disableCache')
+cache='off' if bool(disable_cache) else 'on'
+
+print('primary=' + primary)
+print('secondary=' + secondary)
+print('strategy=' + strategy)
+print('cache=' + cache)
+PY
+}
+
+xray_dns_set_primary() {
+  local val="$1"
+  local tmp backup
+
+  need_python3
+
+  if [[ ! -f "${XRAY_DNS_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_DNS_CONF}"
+    echo '{"dns":{}}' > "${XRAY_DNS_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_DNS_CONF}"
+  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  tmp="${WORK_DIR}/02-dns.json.tmp"
+
+  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
+import json, sys
+
+src, dst, val = sys.argv[1:4]
+val=str(val).strip()
+
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+dns=cfg.get('dns')
+if not isinstance(dns, dict):
+  dns={}
+
+servers=dns.get('servers')
+if not isinstance(servers, list):
+  servers=[]
+
+def set_server(idx, v):
+  while len(servers) <= idx:
+    servers.append("")
+  if isinstance(servers[idx], dict):
+    servers[idx]['address']=v
+  else:
+    servers[idx]=v
+
+if val:
+  set_server(0, val)
+
+dns['servers']=servers
+cfg['dns']=dns
+
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_DNS_CONF}"
+    die "Gagal update Primary DNS (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_dns_set_secondary() {
+  local val="$1"
+  local tmp backup
+
+  need_python3
+
+  if [[ ! -f "${XRAY_DNS_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_DNS_CONF}"
+    echo '{"dns":{}}' > "${XRAY_DNS_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_DNS_CONF}"
+  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  tmp="${WORK_DIR}/02-dns.json.tmp"
+
+  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
+import json, sys
+
+src, dst, val = sys.argv[1:4]
+val=str(val).strip()
+
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+dns=cfg.get('dns')
+if not isinstance(dns, dict):
+  dns={}
+
+servers=dns.get('servers')
+if not isinstance(servers, list):
+  servers=[]
+
+def set_server(idx, v):
+  while len(servers) <= idx:
+    servers.append("")
+  if isinstance(servers[idx], dict):
+    servers[idx]['address']=v
+  else:
+    servers[idx]=v
+
+if val:
+  if len(servers) == 0:
+    # isi default primary jika kosong
+    set_server(0, "1.1.1.1")
+  set_server(1, val)
+
+dns['servers']=servers
+cfg['dns']=dns
+
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_DNS_CONF}"
+    die "Gagal update Secondary DNS (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_dns_set_query_strategy() {
+  local val="$1"
+  local tmp backup
+
+  need_python3
+
+  if [[ ! -f "${XRAY_DNS_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_DNS_CONF}"
+    echo '{"dns":{}}' > "${XRAY_DNS_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_DNS_CONF}"
+  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  tmp="${WORK_DIR}/02-dns.json.tmp"
+
+  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
+import json, sys
+
+src, dst, val = sys.argv[1:4]
+val=str(val).strip()
+
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+dns=cfg.get('dns')
+if not isinstance(dns, dict):
+  dns={}
+
+if val:
+  dns['queryStrategy']=val
+
+cfg['dns']=dns
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_DNS_CONF}"
+    die "Gagal update Query Strategy (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+xray_dns_toggle_cache() {
+  local tmp backup
+  need_python3
+
+  if [[ ! -f "${XRAY_DNS_CONF}" ]]; then
+    install -m 600 -o root -g root /dev/null "${XRAY_DNS_CONF}"
+    echo '{"dns":{}}' > "${XRAY_DNS_CONF}"
+  fi
+
+  ensure_path_writable "${XRAY_DNS_CONF}"
+  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  tmp="${WORK_DIR}/02-dns.json.tmp"
+
+  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}"
+import json, sys
+
+src, dst = sys.argv[1:3]
+with open(src,'r',encoding='utf-8') as f:
+  try:
+    cfg=json.load(f)
+  except Exception:
+    cfg={}
+
+if not isinstance(cfg, dict):
+  cfg={}
+
+dns=cfg.get('dns')
+if not isinstance(dns, dict):
+  dns={}
+
+cur=bool(dns.get('disableCache'))
+dns['disableCache']=not cur
+
+cfg['dns']=dns
+with open(dst,'w',encoding='utf-8') as f:
+  json.dump(cfg,f,ensure_ascii=False,indent=2)
+  f.write("\n")
+PY
+
+  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+    cp -a "${backup}" "${XRAY_DNS_CONF}"
+    die "Gagal toggle DNS cache (rollback ke backup: ${backup})"
+  }
+
+  svc_restart xray || true
+}
+
+dns_show_status() {
+  local primary secondary strategy cache
+  primary="$(xray_dns_status_get | awk -F'=' '/^primary=/{print $2; exit}' 2>/dev/null || true)"
+  secondary="$(xray_dns_status_get | awk -F'=' '/^secondary=/{print $2; exit}' 2>/dev/null || true)"
+  strategy="$(xray_dns_status_get | awk -F'=' '/^strategy=/{print $2; exit}' 2>/dev/null || true)"
+  cache="$(xray_dns_status_get | awk -F'=' '/^cache=/{print $2; exit}' 2>/dev/null || true)"
+
+  if [[ "${cache}" == "on" ]]; then
+    cache="ON"
+  else
+    cache="OFF"
+  fi
+
+  [[ -n "${primary}" ]] || primary="-"
+  [[ -n "${secondary}" ]] || secondary="-"
+  [[ -n "${strategy}" ]] || strategy="-"
+
+  title
+  echo "DNS Status"
+  hr
+  echo
+  printf "Primary DNS     : %s\n" "${primary}"
+  printf "Secondary DNS   : %s\n" "${secondary}"
+  printf "Query Strategy  : %s\n" "${strategy}"
+  printf "Cache           : %s\n" "${cache}"
+  echo
+  hr
+  pause
+}
+
+dns_settings_menu() {
+  while true; do
+    title
+    echo "4) Network / Proxy Add-ons > DNS Settings"
+    hr
+    echo "  1) Set Primary DNS"
+    echo "  2) Set Secondary DNS"
+    echo "  3) Set Query Strategy"
+    echo "  4) Toggle DNS Cache"
+    echo "  5) Show DNS Status"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        read -r -p "Primary DNS (contoh 1.1.1.1) (atau kembali): " d
+        if is_back_choice "${d}"; then
+          continue
+        fi
+        d="$(echo "${d}" | tr -d '[:space:]')"
+        [[ -n "${d}" ]] || { warn "Primary DNS kosong" ; pause ; continue ; }
+        xray_dns_set_primary "${d}"
+        log "Primary DNS updated"
+        pause
+        ;;
+      2)
+        read -r -p "Secondary DNS (contoh 8.8.8.8) (atau kembali): " d
+        if is_back_choice "${d}"; then
+          continue
+        fi
+        d="$(echo "${d}" | tr -d '[:space:]')"
+        [[ -n "${d}" ]] || { warn "Secondary DNS kosong" ; pause ; continue ; }
+        xray_dns_set_secondary "${d}"
+        log "Secondary DNS updated"
+        pause
+        ;;
+      3)
+        read -r -p "Query Strategy (UseIP/UseIPv4/UseIPv6/PreferIPv4/PreferIPv6) (atau kembali): " qs
+        if is_back_choice "${qs}"; then
+          continue
+        fi
+        qs="$(echo "${qs}" | tr -d '[:space:]')"
+        case "${qs}" in
+          UseIP|UseIPv4|UseIPv6|PreferIPv4|PreferIPv6)
+            xray_dns_set_query_strategy "${qs}"
+            log "Query Strategy updated: ${qs}"
+            pause
+            ;;
+          *)
+            warn "Query Strategy tidak valid"
+            pause
+            ;;
+        esac
+        ;;
+      4)
+        xray_dns_toggle_cache
+        log "DNS Cache toggled"
+        pause
+        ;;
+      5) dns_show_status ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
 dns_addons_menu() {
   while true; do
     title
@@ -4802,15 +5603,15 @@ network_menu() {
     hr
     echo "  1) Egress Mode & Balancer"
     echo "  2) WARP Controls"
-    echo "  3) DNS Add-ons"
+    echo "  3) DNS Settings"
     echo "  4) Diagnostics"
     echo "  0) Back (kembali)"
     hr
     read -r -p "Pilih: " c
     case "${c}" in
-      1) egress_menu ;;
+      1) egress_menu_simple ;;
       2) warp_controls_menu ;;
-      3) dns_addons_menu ;;
+      3) dns_settings_menu ;;
       4) network_diagnostics_menu ;;
       0|kembali|k|back|b) break ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
@@ -4819,48 +5620,650 @@ network_menu() {
 }
 
 # -------------------------
-# Security (fail2ban) (opsional)
+# Security
+# - TLS & Certificate
+# - Fail2ban Protection
+# - System Hardening Status
+# - Security Overview
 # -------------------------
+cert_openssl_info() {
+  if ! have_cmd openssl; then
+    warn "openssl tidak tersedia"
+    return 1
+  fi
+  if [[ ! -f "${CERT_FULLCHAIN}" ]]; then
+    warn "Cert tidak ditemukan: ${CERT_FULLCHAIN}"
+    return 1
+  fi
+  openssl x509 -in "${CERT_FULLCHAIN}" -noout     -subject -issuer -serial -startdate -enddate -fingerprint -sha256 2>/dev/null || return 1
+  return 0
+}
+
+cert_expiry_days_left() {
+  # prints integer days left, or empty on error
+  if ! have_cmd openssl; then
+    echo ""
+    return 0
+  fi
+  if [[ ! -f "${CERT_FULLCHAIN}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  local end end_ts now_ts diff
+  end="$(openssl x509 -in "${CERT_FULLCHAIN}" -noout -enddate 2>/dev/null | sed -e 's/^notAfter=//')"
+  if [[ -z "${end}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  end_ts="$(date -d "${end}" +%s 2>/dev/null || true)"
+  now_ts="$(date +%s 2>/dev/null || true)"
+  if [[ -z "${end_ts}" || -z "${now_ts}" ]]; then
+    echo ""
+    return 0
+  fi
+  diff=$(( (end_ts - now_ts) / 86400 ))
+  echo "${diff}"
+}
+
+cert_menu_show_info() {
+  title
+  echo "TLS & Certificate > Show Certificate Info"
+  hr
+  if ! cert_openssl_info; then
+    warn "Gagal membaca info sertifikat"
+  fi
+  hr
+  pause
+}
+
+cert_menu_check_expiry() {
+  title
+  echo "TLS & Certificate > Check Expiry"
+  hr
+  local days
+  days="$(cert_expiry_days_left)"
+  if [[ -z "${days}" ]]; then
+    warn "Tidak dapat menghitung masa berlaku TLS"
+  else
+    if (( days < 0 )); then
+      echo "TLS Expiry : Expired"
+    else
+      echo "TLS Expiry : ${days} days"
+    fi
+  fi
+  hr
+  pause
+}
+
+acme_sh_path_get() {
+  if [[ -x "/root/.acme.sh/acme.sh" ]]; then
+    echo "/root/.acme.sh/acme.sh"
+    return 0
+  fi
+  if have_cmd acme.sh; then
+    command -v acme.sh
+    return 0
+  fi
+  echo ""
+}
+
+cert_menu_renew() {
+  title
+  echo "TLS & Certificate > Renew Certificate"
+  hr
+
+  local acme
+  acme="$(acme_sh_path_get)"
+  if [[ -z "${acme}" ]]; then
+    warn "acme.sh tidak ditemukan. Pastikan setup_modular.sh sudah memasang acme.sh."
+    hr
+    pause
+    return 0
+  fi
+
+  export PATH="/root/.acme.sh:${PATH}"
+  local domain
+  domain="$(detect_domain)"
+  echo "Domain terdeteksi: ${domain}"
+  hr
+  echo "Menjalankan acme.sh renew..."
+  echo
+
+  if ! "${acme}" --cron --force 2>&1; then
+    warn "acme.sh --cron --force gagal, mencoba renew domain spesifik..."
+    if ! "${acme}" --renew -d "${domain}" --force 2>&1; then
+      warn "Renew gagal. Cek output di atas."
+      hr
+      pause
+      return 0
+    fi
+  fi
+
+  echo
+  log "Renew certificate selesai (cek expiry untuk memastikan)."
+  hr
+  pause
+}
+
+cert_menu_reload_nginx() {
+  title
+  echo "TLS & Certificate > Reload Nginx"
+  hr
+  if ! svc_exists nginx; then
+    warn "nginx.service tidak terdeteksi"
+    hr
+    pause
+    return 0
+  fi
+
+  if systemctl reload nginx 2>/dev/null; then
+    log "nginx reload: OK"
+  else
+    warn "nginx reload gagal, mencoba restart..."
+    systemctl restart nginx 2>/dev/null || true
+    if svc_is_active nginx; then
+      log "nginx restart: OK"
+    else
+      warn "nginx masih tidak aktif"
+    fi
+  fi
+  hr
+  pause
+}
+
+security_tls_menu() {
+  while true; do
+    title
+    echo "TLS & Certificate"
+    hr
+    echo "  1) Show Certificate Info"
+    echo "  2) Check Expiry"
+    echo "  3) Renew Certificate"
+    echo "  4) Reload Nginx"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) cert_menu_show_info ;;
+      2) cert_menu_check_expiry ;;
+      3) cert_menu_renew ;;
+      4) cert_menu_reload_nginx ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+fail2ban_client_ready() {
+  if ! have_cmd fail2ban-client; then
+    return 1
+  fi
+  return 0
+}
+
+fail2ban_jails_list_get() {
+  # prints jail names one per line
+  if ! fail2ban_client_ready; then
+    return 0
+  fi
+  fail2ban-client status 2>/dev/null | awk -F': ' '/Jail list:/ {print $2}'     | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -E '.+' || true
+}
+
+fail2ban_jail_banned_counts_get() {
+  # args: jail -> prints: current|total
+  local jail="$1"
+  if ! fail2ban_client_ready; then
+    echo "0|0"
+    return 0
+  fi
+  local out cur tot
+  out="$(fail2ban-client status "${jail}" 2>/dev/null || true)"
+  cur="$(printf '%s\n' "${out}" | awk -F': ' '/Currently banned:/ {print $2; exit}' | tr -d '[:space:]')"
+  tot="$(printf '%s\n' "${out}" | awk -F': ' '/Total banned:/ {print $2; exit}' | tr -d '[:space:]')"
+  [[ -n "${cur}" ]] || cur="0"
+  [[ -n "${tot}" ]] || tot="0"
+  echo "${cur}|${tot}"
+}
+
+fail2ban_total_banned_get() {
+  if ! fail2ban_client_ready; then
+    echo "0"
+    return 0
+  fi
+  local total=0 jail counts cur
+  while IFS= read -r jail; do
+    counts="$(fail2ban_jail_banned_counts_get "${jail}")"
+    cur="${counts%%|*}"
+    [[ "${cur}" =~ ^[0-9]+$ ]] || cur=0
+    total=$((total + cur))
+  done < <(fail2ban_jails_list_get)
+  echo "${total}"
+}
+
+fail2ban_menu_show_jail_status() {
+  title
+  echo "Fail2ban Protection > Show Jail Status"
+  hr
+
+  if ! svc_exists fail2ban; then
+    warn "fail2ban.service tidak terdeteksi"
+  fi
+
+  if ! fail2ban_client_ready; then
+    warn "fail2ban-client tidak tersedia"
+    hr
+    pause
+    return 0
+  fi
+
+  fail2ban-client status 2>/dev/null || true
+  hr
+
+  local jails=()
+  while IFS= read -r j; do
+    [[ -n "${j}" ]] && jails+=("${j}")
+  done < <(fail2ban_jails_list_get)
+
+  if (( ${#jails[@]} == 0 )); then
+    warn "Tidak ada jail yang terdeteksi."
+    hr
+    pause
+    return 0
+  fi
+
+  printf "%-30s %-12s %-12s\n" "JAIL" "BANNED" "TOTAL"
+  printf "%-30s %-12s %-12s\n" "------------------------------" "------------" "------------"
+  local jail counts cur tot
+  for jail in "${jails[@]}"; do
+    counts="$(fail2ban_jail_banned_counts_get "${jail}")"
+    cur="${counts%%|*}"
+    tot="${counts##*|}"
+    printf "%-30s %-12s %-12s\n" "${jail}" "${cur}" "${tot}"
+  done
+  hr
+  pause
+}
+
+fail2ban_menu_show_banned_ip() {
+  title
+  echo "Fail2ban Protection > Show Banned IP"
+  hr
+  if ! fail2ban_client_ready; then
+    warn "fail2ban-client tidak tersedia"
+    hr
+    pause
+    return 0
+  fi
+
+  local jails=()
+  while IFS= read -r j; do
+    [[ -n "${j}" ]] && jails+=("${j}")
+  done < <(fail2ban_jails_list_get)
+
+  if (( ${#jails[@]} == 0 )); then
+    warn "Tidak ada jail yang terdeteksi."
+    hr
+    pause
+    return 0
+  fi
+
+  local jail ips
+  for jail in "${jails[@]}"; do
+    echo "[${jail}]"
+    ips="$(fail2ban-client get "${jail}" banip 2>/dev/null || true)"
+    if [[ -z "${ips}" ]]; then
+      echo "  (kosong)"
+    else
+      echo "${ips}" | tr ' ' '\n' | sed -E 's/^/  - /'
+    fi
+    echo
+  done
+  hr
+  pause
+}
+
+fail2ban_menu_unban_ip() {
+  title
+  echo "Fail2ban Protection > Unban IP"
+  hr
+  if ! fail2ban_client_ready; then
+    warn "fail2ban-client tidak tersedia"
+    hr
+    pause
+    return 0
+  fi
+
+  local jails=()
+  while IFS= read -r j; do
+    [[ -n "${j}" ]] && jails+=("${j}")
+  done < <(fail2ban_jails_list_get)
+
+  if (( ${#jails[@]} == 0 )); then
+    warn "Tidak ada jail yang terdeteksi."
+    hr
+    pause
+    return 0
+  fi
+
+  echo "Daftar jail:"
+  local i
+  for i in "${!jails[@]}"; do
+    printf "  %d) %s\n" "$((i + 1))" "${jails[$i]}"
+  done
+  echo "  0) Back"
+  hr
+
+  read -r -p "Pilih jail (1-${#jails[@]}/0): " c
+  if is_back_choice "${c}"; then
+    return 0
+  fi
+  [[ "${c}" =~ ^[0-9]+$ ]] || { warn "Input bukan angka"; pause; return 0; }
+  if (( c < 1 || c > ${#jails[@]} )); then
+    warn "Pilihan jail di luar range"
+    pause
+    return 0
+  fi
+  local jail
+  jail="${jails[$((c - 1))]}"
+
+  read -r -p "IP yang ingin di-unban (atau kembali): " ip
+  if is_back_choice "${ip}"; then
+    return 0
+  fi
+  if [[ -z "${ip}" ]]; then
+    warn "IP kosong"
+    pause
+    return 0
+  fi
+
+  if fail2ban-client set "${jail}" unbanip "${ip}" 2>/dev/null; then
+    log "Unban sukses: ${ip} (${jail})"
+  else
+    warn "Unban gagal. Pastikan jail & IP valid."
+  fi
+  hr
+  pause
+}
+
+fail2ban_menu_restart() {
+  title
+  echo "Fail2ban Protection > Restart Fail2ban"
+  hr
+  if ! svc_exists fail2ban; then
+    warn "fail2ban.service tidak terdeteksi"
+    hr
+    pause
+    return 0
+  fi
+
+  systemctl restart fail2ban 2>/dev/null || true
+  if svc_is_active fail2ban; then
+    log "fail2ban: active"
+  else
+    warn "fail2ban: inactive"
+  fi
+  hr
+  pause
+}
+
+security_fail2ban_menu() {
+  while true; do
+    title
+    echo "Fail2ban Protection"
+    hr
+    echo "  1) Show Jail Status"
+    echo "  2) Show Banned IP"
+    echo "  3) Unban IP"
+    echo "  4) Restart Fail2ban"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) fail2ban_menu_show_jail_status ;;
+      2) fail2ban_menu_show_banned_ip ;;
+      3) fail2ban_menu_unban_ip ;;
+      4) fail2ban_menu_restart ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+hardening_check_bbr() {
+  title
+  echo "System Hardening Status > Check BBR"
+  hr
+  if ! have_cmd sysctl; then
+    warn "sysctl tidak tersedia"
+    hr
+    pause
+    return 0
+  fi
+
+  local cc qdisc
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+
+  echo "tcp_congestion_control : ${cc:-"-"}"
+  echo "default_qdisc          : ${qdisc:-"-"}"
+  echo
+  if [[ "${cc}" == "bbr" ]]; then
+    echo "BBR : Enabled"
+  else
+    echo "BBR : Disabled"
+  fi
+  hr
+  pause
+}
+
+swap_status_pretty_get() {
+  # prints: "<n>GB Active" or "Disabled"
+  if ! have_cmd free; then
+    echo "Unknown"
+    return 0
+  fi
+  local bytes
+  bytes="$(free -b 2>/dev/null | awk '/^Swap:/ {print $2; exit}' || true)"
+  [[ -n "${bytes}" ]] || bytes="0"
+  if [[ ! "${bytes}" =~ ^[0-9]+$ ]]; then
+    bytes="0"
+  fi
+  if (( bytes <= 0 )); then
+    echo "Disabled"
+    return 0
+  fi
+  local gb
+  gb=$(( (bytes + 1024**3 - 1) / (1024**3) ))
+  echo "${gb}GB Active"
+}
+
+hardening_check_swap() {
+  title
+  echo "System Hardening Status > Check Swap"
+  hr
+  if ! have_cmd free; then
+    warn "free tidak tersedia"
+    hr
+    pause
+    return 0
+  fi
+
+  free -h || true
+  hr
+  echo "Swap : $(swap_status_pretty_get)"
+  hr
+  pause
+}
+
+hardening_check_ulimit() {
+  title
+  echo "System Hardening Status > Check Ulimit"
+  hr
+  local cur
+  cur="$(ulimit -n 2>/dev/null || echo "-")"
+  echo "Shell ulimit -n : ${cur}"
+  echo
+  if svc_exists xray; then
+    local lim
+    lim="$(systemctl show -p LimitNOFILE --value xray 2>/dev/null || true)"
+    echo "xray LimitNOFILE: ${lim:-"-"}"
+  fi
+  hr
+  pause
+}
+
+hardening_check_chrony() {
+  title
+  echo "System Hardening Status > Check Chrony"
+  hr
+  if svc_exists chrony; then
+    echo "$(svc_status_line chrony)"
+    hr
+    systemctl status chrony --no-pager || true
+  elif svc_exists chronyd; then
+    echo "$(svc_status_line chronyd)"
+    hr
+    systemctl status chronyd --no-pager || true
+  else
+    warn "chrony/chronyd service tidak terdeteksi"
+  fi
+  hr
+  pause
+}
+
+security_hardening_menu() {
+  while true; do
+    title
+    echo "System Hardening Status"
+    hr
+    echo "  1) Check BBR"
+    echo "  2) Check Swap"
+    echo "  3) Check Ulimit"
+    echo "  4) Check Chrony"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) hardening_check_bbr ;;
+      2) hardening_check_swap ;;
+      3) hardening_check_ulimit ;;
+      4) hardening_check_chrony ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+bbr_enabled_bool() {
+  if ! have_cmd sysctl; then
+    return 1
+  fi
+  local cc
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  [[ "${cc}" == "bbr" ]]
+}
+
+fail2ban_jail_active_bool() {
+  # args: jail name
+  local jail="$1"
+  if ! fail2ban_client_ready; then
+    return 1
+  fi
+  fail2ban-client status "${jail}" >/dev/null 2>&1
+}
+
+security_overview_menu() {
+  title
+  echo "Security Overview"
+  hr
+
+  local tls_days tls_line
+  tls_days="$(cert_expiry_days_left)"
+  if [[ -z "${tls_days}" ]]; then
+    tls_line="-"
+  else
+    if (( tls_days < 0 )); then
+      tls_line="Expired"
+    else
+      tls_line="${tls_days} days"
+    fi
+  fi
+
+  local f2b_line banned ssh_line nginx_line rec_line
+  if svc_is_active fail2ban 2>/dev/null; then
+    f2b_line="Active"
+  else
+    f2b_line="Inactive"
+  fi
+
+  banned="$(fail2ban_total_banned_get)"
+  [[ -n "${banned}" ]] || banned="0"
+
+  if fail2ban_jail_active_bool sshd; then
+    ssh_line="Active"
+  else
+    ssh_line="Inactive"
+  fi
+
+  if fail2ban_jail_active_bool nginx-bad-request-access || fail2ban_jail_active_bool nginx-bad-request-error; then
+    nginx_line="Active"
+  else
+    nginx_line="Inactive"
+  fi
+
+  if fail2ban_jail_active_bool recidive; then
+    rec_line="Active"
+  else
+    rec_line="Inactive"
+  fi
+
+  local bbr_line
+  if bbr_enabled_bool; then
+    bbr_line="Enabled"
+  else
+    bbr_line="Disabled"
+  fi
+
+  local swap_line
+  swap_line="$(swap_status_pretty_get)"
+
+  echo
+  echo "TLS Expiry        : ${tls_line}"
+  echo "Fail2ban          : ${f2b_line}"
+  echo "Banned IP         : ${banned}"
+  echo "SSH Protection    : ${ssh_line}"
+  echo "Nginx Protection  : ${nginx_line}"
+  echo "Recidive          : ${rec_line}"
+  echo "BBR               : ${bbr_line}"
+  echo "Swap              : ${swap_line}"
+  hr
+  pause
+}
+
 fail2ban_menu() {
   while true; do
     title
     echo "5) Security"
     hr
-    echo "  1. Fail2ban status"
-    echo "  2. Fail2ban jail list"
-    echo "  3. Unban IP (TODO)"
-    echo "  0. Back (kembali)"
+    echo "  1) TLS & Certificate"
+    echo "  2) Fail2ban Protection"
+    echo "  3) System Hardening Status"
+    echo "  4) Security Overview"
+    echo "  0) Back"
     hr
     read -r -p "Pilih: " c
     case "${c}" in
-      1)
-        title
-        systemctl status fail2ban --no-pager || true
-        hr
-        pause
-        ;;
-      2)
-        title
-        if have_cmd fail2ban-client; then
-          fail2ban-client status || true
-        else
-          warn "fail2ban-client tidak ada"
-        fi
-        hr
-        pause
-        ;;
-      3)
-        title
-        echo "TODO: unban IP"
-        hr
-        pause
-        ;;
+      1) security_tls_menu ;;
+      2) security_fail2ban_menu ;;
+      3) security_hardening_menu ;;
+      4) security_overview_menu ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ; return 0 ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
   done
 }
-
 # -------------------------
 # Maintenance
 # -------------------------
