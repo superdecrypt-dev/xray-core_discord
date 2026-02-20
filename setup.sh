@@ -748,6 +748,13 @@ write_xray_config() {
       {
         "type": "field",
         "user": [
+          "dummy-direct-user"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "user": [
           "dummy-block-user"
         ],
         "outboundTag": "blocked"

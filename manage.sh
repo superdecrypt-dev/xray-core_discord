@@ -949,9 +949,10 @@ for c in iter_clients_for_protocol(proto):
     raise SystemExit(f"user sudah ada di config untuk {proto}: {email}")
 
 # Build client object by protocol
-if proto in ('vless','vmess'):
+if proto == 'vless':
   client = {'id': cred, 'email': email}
-  # Many configs expect flow only for vless; we keep minimal.
+elif proto == 'vmess':
+  client = {'id': cred, 'alterId': 0, 'email': email}
 elif proto == 'trojan':
   client = {'password': cred, 'email': email}
 else:
