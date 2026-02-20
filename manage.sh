@@ -1045,11 +1045,12 @@ if removed == 0:
 routing = (rt_cfg.get('routing') or {})
 rules = routing.get('rules')
 if isinstance(rules, list):
-  markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user"}
+  # Semua marker yang digunakan oleh daemon/manage untuk block/route user.
+  # dummy-warp-user dan dummy-direct-user disertakan agar entry warp/direct override
+  # juga dibersihkan saat user dihapus.
+  markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user","dummy-warp-user","dummy-direct-user"}
   for r in rules:
     if not isinstance(r, dict):
-      continue
-    if r.get('outboundTag') != 'blocked':
       continue
     u = r.get('user')
     if not isinstance(u, list):
@@ -1245,7 +1246,7 @@ write_account_artifacts() {
   domain="$(detect_domain)"
   ip="$(detect_public_ip_ipapi)"
   created="$(now_ts)"
-  expired="$(date -d "+${days} days" '+%Y-%m-%d' 2>/dev/null || date '+%Y-%m-%d')"
+  expired="$(date -u -d "+${days} days" '+%Y-%m-%dT00:00:00Z' 2>/dev/null || date -u '+%Y-%m-%dT00:00:00Z')"
 
   local acc_file quota_file
   acc_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
@@ -1371,6 +1372,7 @@ meta={
   "username": username + "@" + proto,
   "protocol": proto,
   "quota_limit": quota_bytes,
+  "quota_unit": "binary",
   "quota_used": 0,
   "created_at": created_at,
   "expired_at": expired_at,
@@ -1818,7 +1820,7 @@ try:
 except Exception:
   base = today
 result = base + timedelta(days=add)
-print(result.strftime('%Y-%m-%d'))
+print(result.strftime('%Y-%m-%dT00:00:00Z'))
 PY
 )"
       ;;
@@ -1847,7 +1849,7 @@ import sys
 from datetime import datetime
 s = sys.argv[1].strip()
 datetime.strptime(s, '%Y-%m-%d')
-print(s)
+print(s + 'T00:00:00Z')
 PY
 )"
       ;;
@@ -2608,7 +2610,6 @@ quota_edit_flow() {
         if [[ "${ip_on}" == "true" ]]; then
           quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['ip_limit_enabled']=False; st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
           xray_routing_set_user_in_marker "dummy-limit-user" "${username}" off
-          /usr/local/bin/limit-ip unlock "${username}" >/dev/null 2>&1 || true
           svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
           log "IP limit: OFF"
         else
@@ -2636,7 +2637,6 @@ quota_edit_flow() {
       7)
         /usr/local/bin/limit-ip unlock "${username}" >/dev/null 2>&1 || true
         quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
-        xray_routing_set_user_in_marker "dummy-limit-user" "${username}" off
         svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP lock di-unlock"
         pause
@@ -5930,7 +5930,7 @@ cert_menu_renew() {
   local acme
   acme="$(acme_sh_path_get)"
   if [[ -z "${acme}" ]]; then
-    warn "acme.sh tidak ditemukan. Pastikan setup_modular.sh sudah memasang acme.sh."
+    warn "acme.sh tidak ditemukan. Pastikan setup.sh sudah memasang acme.sh."
     hr
     pause
     return 0
