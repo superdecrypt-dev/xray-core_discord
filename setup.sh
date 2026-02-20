@@ -1163,7 +1163,7 @@ routing["balancers"] = balancers
 
 observatory = {
   "subjectSelector": ["direct", "warp"],
-  "probeURl": "https://www.google.com/generate_204",
+  "probeURL": "https://www.google.com/generate_204",
   "probeInterval": "10m",
   "enableConcurrency": True
 }
@@ -1907,42 +1907,6 @@ enable_cron_service() {
   ok "cron aktif."
 }
 
-setup_log_cleanup() {
-  ok "Setup auto remove log Xray & Nginx (24 jam)..."
-
-  cat > /usr/local/bin/cleanup-xray-nginx-logs <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-truncate_log() {
-  local f="$1"
-  if [[ -f "$f" ]]; then
-    : > "$f"
-  fi
-}
-
-truncate_log /var/log/xray/access.log
-truncate_log /var/log/xray/error.log
-truncate_log /var/log/nginx/access.log
-truncate_log /var/log/nginx/error.log
-
-# Hapus log rotate lama (kalau ada)
-find /var/log/nginx -maxdepth 1 -type f \( -name "access.log.*" -o -name "error.log.*" -o -name "*.gz" \) -mtime +0 -delete 2>/dev/null || true
-find /var/log/xray -maxdepth 1 -type f \( -name "*.log.*" -o -name "*.gz" \) -mtime +0 -delete 2>/dev/null || true
-EOF
-
-  chmod +x /usr/local/bin/cleanup-xray-nginx-logs
-
-  cat > /etc/cron.d/cleanup-xray-nginx-logs <<'EOF'
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-
-0 3 * * * root /usr/local/bin/cleanup-xray-nginx-logs >/dev/null 2>&1
-EOF
-
-  ok "Cron log cleanup terpasang: /etc/cron.d/cleanup-xray-nginx-logs"
-}
-
 setup_xray_geodata_updater() {
   ok "Setup updater geodata Xray-core (24 jam)..."
 
@@ -2009,7 +1973,9 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
-XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_CONFIG_DEFAULT   = "/usr/local/etc/xray/conf.d/30-routing.json"
+XRAY_INBOUNDS_DEFAULT = "/usr/local/etc/xray/conf.d/10-inbounds.json"
+XRAY_ROUTING_DEFAULT  = "/usr/local/etc/xray/conf.d/30-routing.json"
 ACCOUNT_ROOT = "/opt/account"
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
@@ -2051,8 +2017,7 @@ def restart_xray():
   )
 
 def remove_user_from_inbounds(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   inbounds = cfg.get("inbounds") or []
   for inbound in inbounds:
     settings = inbound.get("settings") or {}
@@ -2070,8 +2035,7 @@ def remove_user_from_inbounds(cfg, username):
   return changed
 
 def remove_user_from_rules(cfg, username):
-  changed_inb = False
-  changed_rt = False
+  changed = False
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
@@ -2925,12 +2889,12 @@ if command -v nginx >/dev/null 2>&1; then
 fi
 fi
 
-if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
-  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
+if command -v jq >/dev/null 2>&1 && [[ -f "${XRAY_CONFDIR}/10-inbounds.json" ]]; then
+  if jq -e . "${XRAY_CONFDIR}/10-inbounds.json" >/dev/null 2>&1; then
     ok "sanity: xray config JSON OK"
   else
   warn "sanity: xray config JSON INVALID"
-  jq -e . "$XRAY_CONFIG" >&2 || true
+  jq -e . "${XRAY_CONFDIR}/10-inbounds.json" >&2 || true
   failed=1
 fi
 fi
@@ -2956,6 +2920,7 @@ fi
 }
 
 main() {
+	clear
   need_root
   check_os
   install_base_deps

@@ -2766,3 +2766,317 @@ main() {
 }
 
 main "$@"
+# email -> {"uplink": int, "downlink": int}
+  for it in data.get("stat") or []:
+    name = it.get("name") if isinstance(it, dict) else None
+    if not isinstance(name, str):
+      continue
+    parts = name.split(">>>")
+    if len(parts) < 4:
+      continue
+    if parts[0] != "user" or parts[2] != "traffic":
+      continue
+    email = parts[1]
+    direction = parts[3]
+    val = parse_int(it.get("value") if isinstance(it, dict) else None)
+    d = traffic.setdefault(email, {"uplink": 0, "downlink": 0})
+    if direction == "uplink":
+      d["uplink"] = val
+    elif direction == "downlink":
+      d["downlink"] = val
+
+  totals = {}
+  for email, d in traffic.items():
+    totals[email] = parse_int(d.get("uplink")) + parse_int(d.get("downlink"))
+  return totals
+
+def ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg):
+  st = meta.get("status") or {}
+  changed = False
+
+  prev_used = parse_int(meta.get("quota_used"))
+  q_used_eff = max(prev_used, parse_int(q_used))
+
+  if meta.get("quota_limit") != q_limit:
+    meta["quota_limit"] = q_limit
+    changed = True
+
+  if meta.get("quota_used") != q_used_eff:
+    meta["quota_used"] = q_used_eff
+    changed = True
+
+  if meta.get("quota_unit") != q_unit:
+    meta["quota_unit"] = q_unit
+    changed = True
+  if parse_int(meta.get("quota_bytes_per_gb")) != parse_int(bpg):
+    meta["quota_bytes_per_gb"] = int(bpg)
+    changed = True
+
+  if bool(st.get("quota_exhausted", False)) != bool(exhausted):
+    st["quota_exhausted"] = bool(exhausted)
+    changed = True
+
+  if exhausted:
+    if st.get("lock_reason") != "quota":
+      st["lock_reason"] = "quota"
+      changed = True
+    if not st.get("locked_at"):
+      st["locked_at"] = now_iso()
+      changed = True
+
+  meta["status"] = st
+  return changed
+
+def run_once(config_path, marker, api_server, dry_run=False):
+  try:
+    cfg = load_json(config_path)
+  except Exception:
+    return 0
+
+  rule = find_marker_rule(cfg, marker, "blocked")
+  if rule is None:
+    return 0
+
+  totals = fetch_all_user_traffic(api_server)
+
+  changed_cfg = False
+  for _, path in iter_quota_files():
+    try:
+      meta = load_json(path)
+    except Exception:
+      continue
+
+    username = os.path.splitext(os.path.basename(path))[0]
+    if isinstance(meta, dict):
+      u2 = meta.get("username")
+      if isinstance(u2, str) and u2.strip():
+        username = u2.strip()
+    if not username:
+      continue
+
+    raw_limit = parse_int(meta.get("quota_limit") if isinstance(meta, dict) else 0)
+    q_limit, q_unit, bpg = normalize_quota_limit(meta, raw_limit) if isinstance(meta, dict) else (raw_limit, "decimal", GB_DECIMAL)
+    prev_used = parse_int(meta.get("quota_used") if isinstance(meta, dict) else 0)
+    api_used = parse_int(totals.get(username, 0))
+    q_used = max(prev_used, api_used)
+
+    exhausted = (q_limit > 0 and q_used >= q_limit)
+    meta_changed = ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg) if isinstance(meta, dict) else False
+
+    if meta_changed and not dry_run:
+      try:
+        save_json_atomic(path, meta)
+      except Exception:
+        pass
+
+    if exhausted:
+      if ensure_user(rule, username, marker):
+        changed_cfg = True
+
+  if changed_cfg and not dry_run:
+    try:
+      save_json_atomic(config_path, cfg)
+    except Exception:
+      return 0
+    restart_xray()
+
+  return 0
+
+def main():
+  ap = argparse.ArgumentParser(prog="xray-quota")
+  sub = ap.add_subparsers(dest="cmd", required=True)
+
+  p_once = sub.add_parser("once")
+  p_once.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
+  p_once.add_argument("--marker", default="dummy-quota-user")
+  p_once.add_argument("--api-server", default=API_SERVER_DEFAULT)
+  p_once.add_argument("--dry-run", action="store_true")
+
+  p_watch = sub.add_parser("watch")
+  p_watch.add_argument("--config", default=XRAY_CONFIG_DEFAULT)
+  p_watch.add_argument("--marker", default="dummy-quota-user")
+  p_watch.add_argument("--api-server", default=API_SERVER_DEFAULT)
+  p_watch.add_argument("--interval", type=int, default=2)
+  p_watch.add_argument("--dry-run", action="store_true")
+
+  args = ap.parse_args()
+
+  if args.cmd == "once":
+    return run_once(args.config, args.marker, args.api_server, dry_run=args.dry_run)
+
+  interval = max(2, int(args.interval))
+  while True:
+    try:
+      run_once(args.config, args.marker, args.api_server, dry_run=args.dry_run)
+    except Exception:
+      pass
+    time.sleep(interval)
+
+if __name__ == "__main__":
+  raise SystemExit(main())
+
+EOF
+  chmod +x /usr/local/bin/xray-quota
+  cat > /etc/systemd/system/xray-expired.service <<'EOF'
+[Unit]
+Description=Xray expired cleaner (real-time)
+After=network-online.target xray.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray-expired --inbounds /usr/local/etc/xray/conf.d/10-inbounds.json --routing /usr/local/etc/xray/conf.d/30-routing.json --interval 2
+Restart=always
+RestartSec=2
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/xray-limit-ip.service <<'EOF'
+[Unit]
+Description=Xray limit IP watcher (real-time)
+After=network-online.target xray.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/limit-ip watch --config /usr/local/etc/xray/conf.d/30-routing.json --marker dummy-limit-user --window-seconds 600
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/xray-quota.service <<'EOF'
+[Unit]
+Description=Xray quota watcher (metadata -> auto block)
+After=network-online.target xray.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray-quota watch --config /usr/local/etc/xray/conf.d/30-routing.json --marker dummy-quota-user --interval 2
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable xray-expired --now >/dev/null 2>&1 || true
+  systemctl enable xray-limit-ip --now >/dev/null 2>&1 || true
+  systemctl enable xray-quota --now >/dev/null 2>&1 || true
+  systemctl restart xray-expired >/dev/null 2>&1 || true
+  systemctl restart xray-limit-ip >/dev/null 2>&1 || true
+  systemctl restart xray-quota >/dev/null 2>&1 || true
+
+  ok "Script manajemen siap:"
+  ok "  - /usr/local/bin/user-expired (service: xray-expired)"
+  ok "  - /usr/local/bin/limit-ip     (service: xray-limit-ip)"
+  ok "  - /usr/local/bin/user-block   (CLI)"
+  ok "  - /usr/local/bin/xray-quota    (service: xray-quota)"
+}
+
+sanity_check() {
+  local failed=0
+
+  # Core services (must be active)
+  if systemctl is-active --quiet xray; then
+    ok "sanity: xray active"
+  else
+  warn "sanity: xray NOT active"
+  systemctl status xray --no-pager >&2 || true
+  journalctl -u xray -n 200 --no-pager >&2 || true
+  failed=1
+fi
+
+if systemctl is-active --quiet nginx; then
+  ok "sanity: nginx active"
+else
+warn "sanity: nginx NOT active"
+systemctl status nginx --no-pager >&2 || true
+journalctl -u nginx -n 200 --no-pager >&2 || true
+failed=1
+fi
+
+# Config sanity (non-fatal if tools missing)
+if command -v nginx >/dev/null 2>&1; then
+  if nginx -t >/dev/null 2>&1; then
+    ok "sanity: nginx -t OK"
+  else
+  warn "sanity: nginx -t FAILED"
+  nginx -t >&2 || true
+  failed=1
+fi
+fi
+
+if command -v jq >/dev/null 2>&1 && [[ -f "$XRAY_CONFIG" ]]; then
+  if jq -e . "$XRAY_CONFIG" >/dev/null 2>&1; then
+    ok "sanity: xray config JSON OK"
+  else
+  warn "sanity: xray config JSON INVALID"
+  jq -e . "$XRAY_CONFIG" >&2 || true
+  failed=1
+fi
+fi
+
+# Cert presence (TLS termination depends on these)
+if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
+  ok "sanity: TLS cert files present"
+else
+warn "sanity: TLS cert files missing under /opt/cert"
+failed=1
+fi
+
+# Listener hints (informational only)
+if ss -lntp 2>/dev/null | grep -q ':443'; then
+  ok "sanity: port 443 is listening"
+else
+warn "sanity: port 443 not detected as listening (check nginx)"
+fi
+
+if [[ "$failed" -ne 0 ]]; then
+  die "Sanity check gagal. Lihat log di atas."
+fi
+}
+
+main() {
+  need_root
+  check_os
+  install_base_deps
+  need_python3
+  install_extra_deps
+  enable_cron_service
+  setup_time_sync_chrony
+  install_fail2ban_aggressive
+  enable_bbr
+  setup_swap_2gb
+  tune_ulimit
+  install_wgcf
+  install_wireproxy
+  setup_wgcf
+  setup_wireproxy
+  cleanup_wgcf_files
+  domain_menu_v2
+  install_nginx_official_repo
+  write_nginx_main_conf
+  install_acme_and_issue_cert
+  install_xray
+  setup_xray_geodata_updater
+  write_xray_config
+  write_xray_modular_configs
+  configure_xray_service_confdir
+  write_nginx_config
+  install_management_scripts
+  setup_log_cleanup
+  setup_logrotate
+  configure_fail2ban_aggressive_jails
+  sanity_check
+  ok "Setup telah selesai ✅"
+}
+
+main "$@"

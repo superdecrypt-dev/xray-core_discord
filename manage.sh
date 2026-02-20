@@ -24,7 +24,6 @@ NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
 CERT_PRIVKEY="${CERT_DIR}/privkey.pem"
-CLIENT_INFO="/root/xray-client-info.txt"
 
 # Account store (read-only source for Menu 2)
 ACCOUNT_ROOT="/opt/account"
@@ -1682,6 +1681,222 @@ user_del_menu() {
 
 
 
+user_extend_expiry_menu() {
+  local page=0
+  while true; do
+    title
+    echo "User Management > Extend/Set Expiry"
+    hr
+    echo "Daftar akun (10 per halaman):"
+    hr
+    account_collect_files
+    ACCOUNT_PAGE="${page}"
+    account_print_table_page "${ACCOUNT_PAGE}"
+    hr
+    echo "Ketik: lanjut / next / previous / kembali"
+    read -r -p "Pilihan: " nav
+    if is_back_choice "${nav}"; then
+      return 0
+    fi
+    case "${nav}" in
+      lanjut|lanjutkan|l) break ;;
+      next|n)
+        local pages
+        pages="$(account_total_pages)"
+        if (( pages > 0 && page < pages - 1 )); then page=$((page + 1)); fi
+        ;;
+      previous|p|prev)
+        if (( page > 0 )); then page=$((page - 1)); fi
+        ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+
+  title
+  echo "User Management > Extend/Set Expiry"
+  hr
+
+  ensure_account_quota_dirs
+  need_python3
+
+  echo "Pilih protocol:"
+  echo "  1) vless"
+  echo "  2) vmess"
+  echo "  3) trojan"
+  echo "  kembali) Back"
+  hr
+  read -r -p "Protocol (1-3/kembali): " p
+  if is_back_choice "${p}"; then
+    return 0
+  fi
+  local proto=""
+  case "${p}" in
+    1) proto="vless" ;;
+    2) proto="vmess" ;;
+    3) proto="trojan" ;;
+    *) warn "Protocol tidak valid" ; pause ; return 0 ;;
+  esac
+
+  read -r -p "Username (atau kembali): " username
+  if is_back_choice "${username}"; then
+    return 0
+  fi
+  if [[ -z "${username}" ]]; then
+    warn "Username kosong"
+    pause
+    return 0
+  fi
+
+  if ! validate_username "${username}"; then
+    warn "Username tidak valid. Gunakan: A-Z a-z 0-9 . _ - (tanpa spasi, tanpa '/', tanpa '..', tanpa '@')."
+    pause
+    return 0
+  fi
+
+  local quota_file acc_file
+  quota_file="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
+  acc_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
+
+  if [[ ! -f "${quota_file}" ]]; then
+    warn "Quota file tidak ditemukan: ${quota_file}"
+    pause
+    return 0
+  fi
+
+  # Tampilkan expiry saat ini
+  local current_expiry
+  current_expiry="$(python3 - <<'PY' "${quota_file}"
+import json, sys
+p = sys.argv[1]
+try:
+  d = json.load(open(p, 'r', encoding='utf-8'))
+  print(str(d.get("expired_at") or "-"))
+except Exception:
+  print("-")
+PY
+)"
+
+  hr
+  echo "Username    : ${username}"
+  echo "Protocol    : ${proto}"
+  echo "Expiry saat ini : ${current_expiry}"
+  hr
+  echo "  1) Tambah hari (extend)"
+  echo "  2) Set tanggal langsung (YYYY-MM-DD)"
+  echo "  0) Back (kembali)"
+  hr
+  read -r -p "Pilih mode: " mode
+  if is_back_choice "${mode}"; then
+    return 0
+  fi
+
+  local new_expiry=""
+
+  case "${mode}" in
+    1)
+      read -r -p "Tambah berapa hari? (atau kembali): " add_days
+      if is_back_choice "${add_days}"; then
+        return 0
+      fi
+      if [[ -z "${add_days}" || ! "${add_days}" =~ ^[0-9]+$ || "${add_days}" -le 0 ]]; then
+        warn "Jumlah hari harus angka > 0"
+        pause
+        return 0
+      fi
+      # Hitung dari expiry saat ini, jika sudah lewat hitung dari hari ini
+      new_expiry="$(python3 - <<PY "${current_expiry}" "${add_days}"
+import sys
+from datetime import datetime, timedelta, timezone
+exp_str = sys.argv[1].strip()
+add = int(sys.argv[2])
+today = datetime.now(timezone.utc).date()
+try:
+  base = datetime.fromisoformat(exp_str[:10]).date()
+  # Jika sudah expired, mulai dari hari ini
+  if base < today:
+    base = today
+except Exception:
+  base = today
+result = base + timedelta(days=add)
+print(result.strftime('%Y-%m-%d'))
+PY
+)"
+      ;;
+    2)
+      read -r -p "Tanggal expiry baru (YYYY-MM-DD) (atau kembali): " input_date
+      if is_back_choice "${input_date}"; then
+        return 0
+      fi
+      # Validasi format tanggal
+      if ! python3 - <<PY "${input_date}" 2>/dev/null; then
+import sys
+from datetime import datetime
+s = sys.argv[1].strip()
+try:
+  datetime.strptime(s, '%Y-%m-%d')
+  print(s)
+except Exception:
+  raise SystemExit(1)
+PY
+        warn "Format tanggal tidak valid. Gunakan: YYYY-MM-DD"
+        pause
+        return 0
+      fi
+      new_expiry="$(python3 - <<PY "${input_date}"
+import sys
+from datetime import datetime
+s = sys.argv[1].strip()
+datetime.strptime(s, '%Y-%m-%d')
+print(s)
+PY
+)"
+      ;;
+    0|kembali|k|back|b)
+      return 0
+      ;;
+    *)
+      warn "Pilihan tidak valid"
+      pause
+      return 0
+      ;;
+  esac
+
+  if [[ -z "${new_expiry}" ]]; then
+    warn "Gagal menghitung tanggal baru"
+    pause
+    return 0
+  fi
+
+  hr
+  echo "Ringkasan perubahan:"
+  echo "  Username  : ${username}@${proto}"
+  echo "  Expiry lama : ${current_expiry}"
+  echo "  Expiry baru : ${new_expiry}"
+  hr
+  read -r -p "Konfirmasi simpan? (y/n): " confirm
+  if ! is_yes "${confirm}"; then
+    warn "Dibatalkan."
+    pause
+    return 0
+  fi
+
+  # Update quota JSON
+  quota_atomic_update_file "${quota_file}" "d['expired_at'] = '${new_expiry}'"
+
+  # Update account txt (baris Valid Until)
+  if [[ -f "${acc_file}" ]]; then
+    sed -i "s|^Valid Until :.*|Valid Until : ${new_expiry}|" "${acc_file}" 2>/dev/null || true
+  fi
+
+  title
+  echo "Extend/Set Expiry selesai ✅"
+  hr
+  echo "  ${username}@${proto}"
+  echo "  Expiry baru : ${new_expiry}"
+  hr
+  pause
+}
+
 user_list_menu() {
   ACCOUNT_PAGE=0
   while true; do
@@ -1840,16 +2055,18 @@ user_menu() {
     hr
     echo "  1. Add user"
     echo "  2. Delete user"
-    echo "  3. List users (read-only)"
-    echo "  4. Export client links"
+    echo "  3. Extend/Set Expiry"
+    echo "  4. List users (read-only)"
+    echo "  5. Export client links"
     echo "  0. Back (kembali)"
     hr
     read -r -p "Pilih: " c
     case "${c}" in
       1) user_add_menu ;;
       2) user_del_menu ;;
-      3) user_list_menu ;;
-      4) user_export_links_menu ;;
+      3) user_extend_expiry_menu ;;
+      4) user_list_menu ;;
+      5) user_export_links_menu ;;
       0|kembali|k|back|b) break ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ; return 0 ;;
     esac
@@ -2956,7 +3173,7 @@ with open(src,'r',encoding='utf-8') as f:
 obs=cfg.get('observatory') or {}
 if not isinstance(obs, dict):
   obs={}
-probe=obs.get('probeURL') or obs.get('probeUrl') or obs.get('probeURl') or ''
+probe=obs.get('probeURL') or obs.get('probeUrl') or ''
 interval=obs.get('probeInterval') or ''
 con=obs.get('enableConcurrency')
 sub=obs.get('subjectSelector') or []
@@ -3058,10 +3275,6 @@ if not isinstance(obs, dict):
 
 if probe:
   obs['probeURL']=probe
-
-# Keep compatibility fields (do not delete), but try to normalize common typos
-if 'probeURl' in obs and 'probeURL' in obs:
-  obs.pop('probeURl', None)
 
 cfg['observatory']=obs
 with open(dst,'w',encoding='utf-8') as f:
