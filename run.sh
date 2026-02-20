@@ -124,7 +124,7 @@ main() {
   ok "Instalasi selesai!"
   echo
   echo -e "  Gunakan perintah berikut untuk membuka menu manajemen:"
-  echo -e "  ${BOLD}sudo manage${NC}"
+  echo -e "  ${BOLD}sudo manage / manage${NC}"
   echo -e "${BOLD}============================================================${NC}"
   echo
 }
