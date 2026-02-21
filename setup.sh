@@ -42,6 +42,10 @@ CF_ZONE_ID=""
 CF_ACCOUNT_ID=""
 VPS_IPV4=""
 CF_PROXIED="false"
+XRAY_INSTALL_REF="${XRAY_INSTALL_REF:-e741a4f56d368afbb9e5be3361b40c4552d3710d}"
+ACME_SH_INSTALL_REF="${ACME_SH_INSTALL_REF:-f39d066ced0271d87790dc426556c1e02a88c91b}"
+XRAY_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALL_REF}/install-release.sh"
+ACME_SH_SCRIPT_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/acme.sh"
 
 die() {
   echo -e "${RED}[ERROR]${NC} $*" >&2
@@ -54,6 +58,28 @@ ok() {
 
 warn() {
   echo -e "${YELLOW}[WARN]${NC} $*"
+}
+
+safe_clear() {
+  # clear bisa gagal pada shell non-interaktif (TERM tidak ada).
+  if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
+    clear || true
+  fi
+}
+
+download_file_or_die() {
+  local url="$1"
+  local out="$2"
+  curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$out" \
+    || die "Gagal download: $url"
+}
+
+service_enable_restart_checked() {
+  local svc="$1"
+  systemctl enable "$svc" --now >/dev/null 2>&1 || return 1
+  systemctl restart "$svc" >/dev/null 2>&1 || return 1
+  systemctl is-active --quiet "$svc" || return 1
+  return 0
 }
 
 need_root() {
@@ -498,8 +524,9 @@ _PICK_PORT_REGISTRY="$(mktemp)"
 trap "rm -f '${_PICK_PORT_REGISTRY}' 2>/dev/null || true" EXIT
 
 pick_port() {
-  local p
-  while true; do
+  local p tries=0
+  local max_tries=10000
+  while (( tries < max_tries )); do
     p=$(( 20000 + RANDOM % 40000 ))
     # Cek: tidak sedang LISTEN dan belum pernah dipesan di sesi ini
     if is_port_free "$p" && ! grep -qxF "$p" "${_PICK_PORT_REGISTRY}" 2>/dev/null; then
@@ -507,7 +534,9 @@ pick_port() {
       echo "$p"
       return 0
     fi
+    tries=$((tries + 1))
   done
+  die "Gagal mendapatkan port kosong setelah ${max_tries} percobaan."
 }
 
 stop_conflicting_services() {
@@ -570,8 +599,16 @@ install_acme_and_issue_cert() {
 
   stop_conflicting_services
 
-  curl -fsSL https://get.acme.sh | sh -s email="$EMAIL" >/dev/null
+  local acme_installer
+  acme_installer="$(mktemp)"
+  download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_installer}"
+  chmod 700 "${acme_installer}"
+  bash "${acme_installer}" --install --home /root/.acme.sh --accountemail "$EMAIL" >/dev/null \
+    || { rm -f "${acme_installer}" >/dev/null 2>&1 || true; die "Gagal install acme.sh dari ref ${ACME_SH_INSTALL_REF}."; }
+  rm -f "${acme_installer}" >/dev/null 2>&1 || true
+
   export PATH="/root/.acme.sh:$PATH"
+  [[ -x /root/.acme.sh/acme.sh ]] || die "acme.sh tidak ditemukan setelah proses install."
   /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null || true
 
   mkdir -p "$CERT_DIR"
@@ -614,7 +651,14 @@ install_acme_and_issue_cert() {
 
 install_xray() {
   ok "Install Xray-core..."
-  bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install >/dev/null
+  local xray_installer
+  xray_installer="$(mktemp)"
+  download_file_or_die "${XRAY_INSTALL_SCRIPT_URL}" "${xray_installer}"
+  chmod 700 "${xray_installer}"
+  bash "${xray_installer}" install >/dev/null \
+    || { rm -f "${xray_installer}" >/dev/null 2>&1 || true; die "Gagal install Xray dari ref ${XRAY_INSTALL_REF}."; }
+  rm -f "${xray_installer}" >/dev/null 2>&1 || true
+
   command -v xray >/dev/null 2>&1 || die "Xray tidak terpasang."
   ok "Xray-core terpasang."
 }
@@ -1515,9 +1559,11 @@ install_extra_deps() {
 install_fail2ban_aggressive() {
   ok "Enable fail2ban..."
 
-  systemctl enable fail2ban --now >/dev/null 2>&1 || true
-  systemctl restart fail2ban >/dev/null 2>&1 || true
-  ok "fail2ban aktif. Konfigurasi jail.local aggressive akan diterapkan setelah Nginx siap."
+  if service_enable_restart_checked fail2ban; then
+    ok "fail2ban aktif. Konfigurasi jail.local aggressive akan diterapkan setelah Nginx siap."
+  else
+    warn "fail2ban belum aktif (akan dicoba lagi setelah jail.local diterapkan)."
+  fi
 }
 
 ensure_fail2ban_nginx_filters() {
@@ -1616,8 +1662,7 @@ findtime = 1d
 maxretry = 5
 EOF
 
-  systemctl enable fail2ban --now >/dev/null 2>&1 || true
-  systemctl restart fail2ban >/dev/null 2>&1 || true
+  service_enable_restart_checked fail2ban || die "Gagal mengaktifkan fail2ban setelah menerapkan jail.local."
   ok "fail2ban jails aggressive diterapkan."
 }
 
@@ -1648,7 +1693,9 @@ setup_swap_2gb() {
     mkswap /swapfile >/dev/null
   fi
 
-  swapon /swapfile >/dev/null 2>&1 || true
+  if ! swapon /swapfile >/dev/null 2>&1; then
+    warn "Gagal mengaktifkan /swapfile (kernel/permission/fs constraint)."
+  fi
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
   cat > /etc/sysctl.d/99-custom-vm.conf <<'EOF'
@@ -1657,7 +1704,11 @@ vm.vfs_cache_pressure = 50
 EOF
 
   sysctl --system >/dev/null 2>&1 || true
-  ok "Swap 2GB aktif."
+  if swapon --show 2>/dev/null | awk '{print $1}' | grep -qx "/swapfile"; then
+    ok "Swap 2GB aktif."
+  else
+    warn "Swap belum aktif. Lanjut tanpa swap."
+  fi
 }
 
 tune_ulimit() {
@@ -1879,8 +1930,7 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable wireproxy --now >/dev/null 2>&1 || true
-  systemctl restart wireproxy >/dev/null 2>&1 || true
+  service_enable_restart_checked wireproxy || die "wireproxy gagal diaktifkan. Cek: journalctl -u wireproxy -n 100 --no-pager"
   ok "wireproxy service aktif."
 }
 
@@ -1894,22 +1944,34 @@ cleanup_wgcf_files() {
 enable_cron_service() {
   ok "Enable cron..."
 
-  systemctl enable cron --now >/dev/null 2>&1 \
-  || systemctl enable crond --now >/dev/null 2>&1 \
-  || true
-  systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
+  local cron_svc=""
+  if service_enable_restart_checked cron; then
+    cron_svc="cron"
+  elif service_enable_restart_checked crond; then
+    cron_svc="crond"
+  else
+    die "Gagal mengaktifkan cron maupun crond."
+  fi
 
-  ok "cron aktif."
+  ok "cron aktif (${cron_svc})."
 }
 
 setup_xray_geodata_updater() {
   ok "Setup updater geodata Xray-core (24 jam)..."
 
-  cat > /usr/local/bin/xray-update-geodata <<'EOF'
+  cat > /usr/local/bin/xray-update-geodata <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1
+URL="${XRAY_INSTALL_SCRIPT_URL}"
+tmp="\$(mktemp)"
+cleanup() {
+  rm -f "\${tmp}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+curl -fsSL --connect-timeout 15 --max-time 120 "\${URL}" -o "\${tmp}"
+bash "\${tmp}" install-geodata >/dev/null 2>&1
 EOF
 
   chmod +x /usr/local/bin/xray-update-geodata
@@ -3490,7 +3552,7 @@ sanity_check() {
 }
 
 main() {
-  clear
+  safe_clear
   need_root
   check_os
   install_base_deps

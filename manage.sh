@@ -35,19 +35,27 @@ QUOTA_PROTO_DIRS=("vless" "vmess" "trojan")
 
 # Direktori kerja untuk operasi aman (atomic write)
 WORK_DIR="/var/lib/xray-manage"
-mkdir -p "${WORK_DIR}"
-chmod 700 "${WORK_DIR}"
 
 # File lock bersama untuk sinkronisasi write ke routing config dengan daemon Python
 # (xray-quota, limit-ip, user-block). Semua pihak harus acquire lock ini sebelum
 # memodifikasi 30-routing.json untuk menghindari race condition last-write-wins.
 ROUTING_LOCK_FILE="/var/lock/xray-routing.lock"
-mkdir -p "$(dirname "${ROUTING_LOCK_FILE}")" 2>/dev/null || true
 
 # Direktori laporan/export
 REPORT_DIR="/var/log/xray-manage"
-mkdir -p "${REPORT_DIR}"
-chmod 700 "${REPORT_DIR}"
+
+# Cache metadata quota (proto:username -> "quota_gb|expired|created|ip_enabled|ip_limit")
+declare -Ag QUOTA_FIELDS_CACHE=()
+
+init_runtime_dirs() {
+  mkdir -p "${WORK_DIR}"
+  chmod 700 "${WORK_DIR}"
+
+  mkdir -p "$(dirname "${ROUTING_LOCK_FILE}")" 2>/dev/null || true
+
+  mkdir -p "${REPORT_DIR}"
+  chmod 700 "${REPORT_DIR}"
+}
 
 # Pastikan directory account/quota ada
 ensure_account_quota_dirs() {
@@ -527,6 +535,108 @@ svc_restart_any() {
 ACCOUNT_FILES=()
 ACCOUNT_FILE_PROTOS=()
 
+quota_cache_rebuild() {
+  QUOTA_FIELDS_CACHE=()
+  need_python3
+
+  local line key val
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    key="${line%%|*}"
+    val="${line#*|}"
+    [[ -n "${key}" ]] || continue
+    QUOTA_FIELDS_CACHE["${key}"]="${val}"
+  done < <(python3 - <<'PY' "${QUOTA_ROOT}" "${QUOTA_PROTO_DIRS[@]}" 2>/dev/null || true
+import json
+import os
+import sys
+
+quota_root = sys.argv[1]
+protos = tuple(sys.argv[2:])
+
+def to_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s = str(v).strip()
+    if s == "":
+      return default
+    return int(float(s))
+  except Exception:
+    return default
+
+def fmt_gb(v):
+  try:
+    v = float(v)
+  except Exception:
+    return "0"
+  if v <= 0:
+    return "0"
+  if abs(v - round(v)) < 1e-9:
+    return str(int(round(v)))
+  s = f"{v:.2f}"
+  s = s.rstrip("0").rstrip(".")
+  return s
+
+for proto in protos:
+  d = os.path.join(quota_root, proto)
+  if not os.path.isdir(d):
+    continue
+
+  chosen = {}
+  chosen_has_at = {}
+  for name in sorted(os.listdir(d)):
+    if not name.endswith(".json"):
+      continue
+    base = name[:-5]
+    username = base.split("@", 1)[0] if "@" in base else base
+    if not username:
+      continue
+    has_at = "@" in base
+    prev = chosen.get(username)
+    if prev is not None:
+      # Prefer username@proto.json over legacy username.json
+      if has_at and not chosen_has_at.get(username, False):
+        chosen[username] = os.path.join(d, name)
+        chosen_has_at[username] = True
+      continue
+    chosen[username] = os.path.join(d, name)
+    chosen_has_at[username] = has_at
+
+  for username in sorted(chosen.keys()):
+    qf = chosen[username]
+    quota_gb = "0"
+    expired = "-"
+    created = "-"
+    ip_enabled = "false"
+    ip_limit = 0
+
+    try:
+      with open(qf, "r", encoding="utf-8") as f:
+        data = json.load(f)
+      if isinstance(data, dict):
+        ql = to_int(data.get("quota_limit"), 0)
+        unit = str(data.get("quota_unit") or "binary").strip().lower()
+        bpg = 1000**3 if unit in ("decimal", "gb", "1000", "gigabyte") else 1024**3
+        quota_gb = fmt_gb(ql / bpg) if ql else "0"
+        expired = str(data.get("expired_at") or "-")
+        created = str(data.get("created_at") or "-")
+        st_raw = data.get("status")
+        st = st_raw if isinstance(st_raw, dict) else {}
+        ip_enabled = str(bool(st.get("ip_limit_enabled"))).lower()
+        ip_limit = to_int(st.get("ip_limit"), 0)
+    except Exception:
+      pass
+
+    print(f"{proto}:{username}|{quota_gb}|{expired}|{created}|{ip_enabled}|{ip_limit}")
+PY
+)
+}
+
 account_collect_files() {
   ACCOUNT_FILES=()
   ACCOUNT_FILE_PROTOS=()
@@ -569,6 +679,9 @@ account_collect_files() {
       ACCOUNT_FILE_PROTOS+=("${proto}")
     done < <(find "${dir}" -maxdepth 1 -type f -name '*.txt' -print0 2>/dev/null | sort -z)
   done
+
+  # Build metadata cache in one Python process to avoid N subprocesses per row.
+  quota_cache_rebuild
 }
 
 ACCOUNT_PAGE_SIZE=10
@@ -602,6 +715,14 @@ quota_read_fields() {
   # args: proto username -> prints: quota_gb|expired_at|created_at|ip_enabled|ip_limit
   local proto="$1"
   local username="$2"
+  local key="${proto}:${username}"
+  local parsed
+
+  if [[ -n "${QUOTA_FIELDS_CACHE["${key}"]+_}" ]]; then
+    echo "${QUOTA_FIELDS_CACHE["${key}"]}"
+    return 0
+  fi
+
   local qf="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
   if [[ ! -f "${qf}" ]]; then
     qf="${QUOTA_ROOT}/${proto}/${username}.json"
@@ -611,7 +732,7 @@ quota_read_fields() {
     return 0
   fi
 
-  python3 - <<'PY' "${qf}"
+  parsed="$(python3 - <<'PY' "${qf}"
 import json, sys
 p=sys.argv[1]
 try:
@@ -664,6 +785,9 @@ ip_en=bool(st.get("ip_limit_enabled"))
 ip_lim=to_int(st.get("ip_limit"), 0)
 print(f"{quota_gb}|{expired}|{created}|{str(ip_en).lower()}|{ip_lim}")
 PY
+)"
+  QUOTA_FIELDS_CACHE["${key}"]="${parsed}"
+  echo "${parsed}"
 }
 
 account_print_table_page() {
@@ -2760,6 +2884,7 @@ finally:
 PY
 
   chmod 600 "${qf}" 2>/dev/null || true
+  QUOTA_FIELDS_CACHE=()
 }
 
 quota_view_json() {
@@ -7192,6 +7317,7 @@ main_menu() {
 
 main() {
   need_root
+  init_runtime_dirs
   ensure_account_quota_dirs
   quota_migrate_dates_to_dateonly
   main_menu
