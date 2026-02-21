@@ -50,6 +50,8 @@ XRAY_INSTALL_REF="${XRAY_INSTALL_REF:-e741a4f56d368afbb9e5be3361b40c4552d3710d}"
 ACME_SH_INSTALL_REF="${ACME_SH_INSTALL_REF:-f39d066ced0271d87790dc426556c1e02a88c91b}"
 XRAY_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALL_REF}/install-release.sh"
 ACME_SH_SCRIPT_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/acme.sh"
+ACME_SH_TARBALL_URL="https://codeload.github.com/acmesh-official/acme.sh/tar.gz/${ACME_SH_INSTALL_REF}"
+ACME_SH_DNS_CF_HOOK_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/dnsapi/dns_cf.sh"
 
 die() {
   echo -e "${RED}[ERROR]${NC} $*" >&2
@@ -603,15 +605,29 @@ install_acme_and_issue_cert() {
 
   stop_conflicting_services
 
-  # acme.sh installer tertentu mengharuskan nama file "acme.sh" ada di cwd
-  # saat --install (jika tidak, bisa muncul: cp: cannot stat 'acme.sh').
-  local acme_tmpdir acme_installer acme_install_log
+  # Prefer source bundle (termasuk folder dnsapi/deploy/notify), bukan single-file.
+  # Ini mencegah error wildcard: "Cannot find DNS API hook for: dns_cf".
+  local acme_tmpdir acme_src_dir acme_tgz acme_install_log
   acme_tmpdir="$(mktemp -d)"
-  acme_installer="${acme_tmpdir}/acme.sh"
+  acme_tgz="${acme_tmpdir}/acme.tar.gz"
   acme_install_log="${acme_tmpdir}/acme-install.log"
-  download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_installer}"
-  chmod 700 "${acme_installer}"
-  if ! (cd "${acme_tmpdir}" && bash ./acme.sh --install --home /root/.acme.sh --accountemail "$EMAIL") >"${acme_install_log}" 2>&1; then
+  acme_src_dir=""
+
+  if curl -fsSL --connect-timeout 15 --max-time 120 "${ACME_SH_TARBALL_URL}" -o "${acme_tgz}" 2>/dev/null; then
+    if tar -xzf "${acme_tgz}" -C "${acme_tmpdir}" >/dev/null 2>&1; then
+      acme_src_dir="$(find "${acme_tmpdir}" -maxdepth 1 -type d -name 'acme.sh-*' -print -quit)"
+    fi
+  fi
+
+  if [[ -z "${acme_src_dir:-}" || ! -f "${acme_src_dir}/acme.sh" ]]; then
+    warn "Source bundle acme.sh tidak tersedia, fallback ke single-file installer."
+    acme_src_dir="${acme_tmpdir}/acme-single"
+    mkdir -p "${acme_src_dir}"
+    download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_src_dir}/acme.sh"
+  fi
+
+  chmod 700 "${acme_src_dir}/acme.sh"
+  if ! (cd "${acme_src_dir}" && bash ./acme.sh --install --home /root/.acme.sh --accountemail "$EMAIL") >"${acme_install_log}" 2>&1; then
     warn "Install acme.sh gagal. Ringkasan log:"
     sed -n '1,120p' "${acme_install_log}" >&2 || true
     rm -rf "${acme_tmpdir}" >/dev/null 2>&1 || true
@@ -629,7 +645,22 @@ install_acme_and_issue_cert() {
   if [[ "${ACME_CERT_MODE:-standalone}" == "dns_cf_wildcard" ]]; then
     [[ -n "${ACME_ROOT_DOMAIN:-}" ]] || die "ACME_ROOT_DOMAIN kosong (mode dns_cf_wildcard)."
     [[ -n "${DOMAIN:-}" ]] || die "DOMAIN kosong (mode dns_cf_wildcard)."
+    [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "CLOUDFLARE_API_TOKEN kosong untuk mode wildcard dns_cf."
     ok "Issue sertifikat wildcard untuk ${DOMAIN} via acme.sh (dns_cf)..."
+
+    # Beberapa instalasi lama tidak membawa dnsapi hook. Pulihkan otomatis jika hilang.
+    if [[ ! -s /root/.acme.sh/dnsapi/dns_cf.sh ]]; then
+      warn "dns_cf hook tidak ditemukan, mencoba bootstrap dari ref ${ACME_SH_INSTALL_REF} ..."
+      mkdir -p /root/.acme.sh/dnsapi
+      download_file_or_die "${ACME_SH_DNS_CF_HOOK_URL}" /root/.acme.sh/dnsapi/dns_cf.sh
+      chmod 700 /root/.acme.sh/dnsapi/dns_cf.sh >/dev/null 2>&1 || true
+    fi
+    [[ -s /root/.acme.sh/dnsapi/dns_cf.sh ]] || die "Hook dns_cf tetap tidak ditemukan setelah bootstrap."
+
+    # Fail-fast agar error token/scope lebih jelas sebelum acme.sh issue.
+    if ! cf_api GET "/user/tokens/verify" >/dev/null 2>&1; then
+      die "Token Cloudflare tidak valid/kurang scope. Butuh minimal: Zone:DNS Edit + Zone:Read untuk zone domain."
+    fi
 
     export CF_Token="$CLOUDFLARE_API_TOKEN"
     [[ -n "${CF_ACCOUNT_ID:-}" ]] && export CF_Account_ID="$CF_ACCOUNT_ID"
