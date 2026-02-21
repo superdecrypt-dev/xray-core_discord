@@ -1405,6 +1405,11 @@ src, lock_file, proto, email, cred = sys.argv[1:6]
 
 def save_json_atomic(path, data):
   dirn = os.path.dirname(path) or "."
+  st = None
+  try:
+    st = os.stat(path)
+  except Exception:
+    st = None
   fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
   try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1412,6 +1417,15 @@ def save_json_atomic(path, data):
       f.write("\n")
       f.flush()
       os.fsync(f.fileno())
+    if st is not None:
+      try:
+        os.chmod(tmp, st.st_mode & 0o7777)
+      except Exception:
+        pass
+      try:
+        os.chown(tmp, st.st_uid, st.st_gid)
+      except Exception:
+        pass
     os.replace(tmp, path)
   finally:
     try:
@@ -1522,6 +1536,11 @@ inb_src, rt_src, lock_file, proto, email = sys.argv[1:6]
 
 def save_json_atomic(path, data):
   dirn = os.path.dirname(path) or "."
+  st = None
+  try:
+    st = os.stat(path)
+  except Exception:
+    st = None
   fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
   try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1529,6 +1548,15 @@ def save_json_atomic(path, data):
       f.write("\n")
       f.flush()
       os.fsync(f.fileno())
+    if st is not None:
+      try:
+        os.chmod(tmp, st.st_mode & 0o7777)
+      except Exception:
+        pass
+      try:
+        os.chown(tmp, st.st_uid, st.st_gid)
+      except Exception:
+        pass
     os.replace(tmp, path)
   finally:
     try:
@@ -1701,6 +1729,11 @@ with open(lock_file, "w", encoding="utf-8") as lf:
 
     if changed:
       dirn = os.path.dirname(src) or "."
+      st = None
+      try:
+        st = os.stat(src)
+      except Exception:
+        st = None
       fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
       try:
         with os.fdopen(fd, "w", encoding="utf-8") as wf:
@@ -1708,6 +1741,15 @@ with open(lock_file, "w", encoding="utf-8") as lf:
           wf.write("\n")
           wf.flush()
           os.fsync(wf.fileno())
+        if st is not None:
+          try:
+            os.chmod(tmp, st.st_mode & 0o7777)
+          except Exception:
+            pass
+          try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+          except Exception:
+            pass
         os.replace(tmp, src)
       finally:
         try:
@@ -3403,6 +3445,16 @@ def to_int(v, default=0):
   except Exception:
     return default
 
+def fmt_gb(v):
+  try:
+    n=float(v)
+  except Exception:
+    n=0.0
+  if n < 0:
+    n=0.0
+  s=f"{n:.3f}".rstrip('0').rstrip('.')
+  return s if s else "0"
+
 u=str(d.get("username") or "-")
 ql=to_int(d.get("quota_limit"), 0)
 qu=to_int(d.get("quota_used"), 0)
@@ -3503,6 +3555,16 @@ def to_float(v, default=0.0):
     return float(s)
   except Exception:
     return default
+
+def fmt_gb(v):
+  try:
+    n=float(v)
+  except Exception:
+    n=0.0
+  if n < 0:
+    n=0.0
+  s=f"{n:.3f}".rstrip('0').rstrip('.')
+  return s if s else "0"
 
 def fmt_mbit(v):
   try:
