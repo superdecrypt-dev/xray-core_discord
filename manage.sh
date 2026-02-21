@@ -8342,19 +8342,66 @@ cert_menu_renew() {
   export PATH="/root/.acme.sh:${PATH}"
   local domain
   domain="$(detect_domain)"
+  if [[ -z "${domain}" ]]; then
+    warn "Domain aktif tidak terdeteksi."
+    hr
+    pause
+    return 0
+  fi
+
   echo "Domain terdeteksi: ${domain}"
   hr
   echo "Menjalankan acme.sh renew..."
   echo
 
-  if ! "${acme}" --cron --force 2>&1; then
-    warn "acme.sh --cron --force gagal, mencoba renew domain spesifik..."
-    if ! "${acme}" --renew -d "${domain}" --force 2>&1; then
-      warn "Renew gagal. Cek output di atas."
-      hr
-      pause
-      return 0
+  local renew_ok="false"
+  local port80_conflict="false"
+  local renew_log
+  renew_log="$(mktemp)"
+
+  if "${acme}" --cron --force 2>&1 | tee "${renew_log}"; then
+    renew_ok="true"
+  else
+    if grep -Eqi "port 80 is already used|Please stop it first" "${renew_log}"; then
+      port80_conflict="true"
     fi
+  fi
+  rm -f "${renew_log}" >/dev/null 2>&1 || true
+
+  if [[ "${renew_ok}" != "true" ]]; then
+    if [[ "${port80_conflict}" == "true" ]]; then
+      warn "Terdeteksi konflik port 80. Menghentikan web service sementara untuk retry renew..."
+      local -a stopped_services=()
+      local svc
+      for svc in nginx apache2 caddy lighttpd; do
+        if svc_exists "${svc}" && svc_is_active "${svc}"; then
+          stopped_services+=("${svc}")
+          systemctl stop "${svc}" >/dev/null 2>&1 || true
+        fi
+      done
+
+      if "${acme}" --renew -d "${domain}" --force 2>&1; then
+        renew_ok="true"
+      fi
+
+      for svc in "${stopped_services[@]}"; do
+        if svc_exists "${svc}"; then
+          systemctl start "${svc}" >/dev/null 2>&1 || warn "Gagal restore service: ${svc}"
+        fi
+      done
+    else
+      warn "acme.sh --cron --force gagal, mencoba renew domain spesifik..."
+      if "${acme}" --renew -d "${domain}" --force 2>&1; then
+        renew_ok="true"
+      fi
+    fi
+  fi
+
+  if [[ "${renew_ok}" != "true" ]]; then
+    warn "Renew gagal. Cek output di atas."
+    hr
+    pause
+    return 0
   fi
 
   echo
