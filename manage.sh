@@ -24,6 +24,8 @@ NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
 CERT_PRIVKEY="${CERT_DIR}/privkey.pem"
+WIREPROXY_CONF="/etc/wireproxy/config.conf"
+WGCF_DIR="/etc/wgcf"
 
 # Domain / ACME / Cloudflare (disamakan dengan setup.sh)
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ}"
@@ -76,6 +78,8 @@ ROUTING_LOCK_FILE="/var/lock/xray-routing.lock"
 
 # Direktori laporan/export
 REPORT_DIR="/var/log/xray-manage"
+WARP_TIER_STATE_KEY="warp_tier_target"
+WARP_PLUS_LICENSE_STATE_KEY="warp_plus_license_key"
 
 # Cache metadata quota (proto:username -> "quota_gb|expired|created|ip_enabled|ip_limit")
 declare -Ag QUOTA_FIELDS_CACHE=()
@@ -7540,6 +7544,469 @@ warp_domain_geosite_menu() {
 
 
 
+warp_tier_state_target_get() {
+  local raw
+  raw="$(network_state_get "${WARP_TIER_STATE_KEY}" 2>/dev/null || true)"
+  raw="$(echo "${raw}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "${raw}" in
+    free|plus) echo "${raw}" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+warp_plus_license_state_get() {
+  network_state_get "${WARP_PLUS_LICENSE_STATE_KEY}" 2>/dev/null | tr -d '\r' || true
+}
+
+warp_plus_license_mask() {
+  local key="${1:-}"
+  local len
+  key="$(echo "${key}" | tr -d '[:space:]')"
+  len="${#key}"
+  if (( len <= 8 )); then
+    echo "${key}"
+    return 0
+  fi
+  echo "${key:0:4}****${key:len-4:4}"
+}
+
+warp_trace_field_get() {
+  # args: field_name
+  local field="${1:-}"
+  local bind_addr trace
+  [[ -n "${field}" ]] || return 0
+  [[ -f "${WIREPROXY_CONF}" ]] || return 0
+  if ! have_cmd curl; then
+    return 0
+  fi
+  bind_addr="$(awk -F'=' '
+    /^[[:space:]]*BindAddress[[:space:]]*=/ {
+      v=$2
+      gsub(/[[:space:]]/, "", v)
+      print v
+      exit
+    }
+  ' "${WIREPROXY_CONF}" 2>/dev/null || true)"
+  [[ -n "${bind_addr}" ]] || bind_addr="127.0.0.1:40000"
+
+  trace="$(curl -fsS --max-time 8 --socks5 "${bind_addr}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)"
+  [[ -n "${trace}" ]] || return 0
+  echo "${trace}" | awk -F= -v k="${field}" '$1==k {print $2; exit}'
+}
+
+warp_live_tier_get() {
+  local warpv
+  warpv="$(warp_trace_field_get warp | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "${warpv}" in
+    plus) echo "plus" ;;
+    on) echo "free" ;;
+    off) echo "off" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+warp_wireproxy_socks_block_get() {
+  if [[ ! -f "${WIREPROXY_CONF}" ]]; then
+    cat <<'EOF'
+[Socks5]
+BindAddress = 127.0.0.1:40000
+EOF
+    return 0
+  fi
+
+  awk '
+    BEGIN { inblk=0; found=0 }
+    /^[[:space:]]*\[(Socks|Socks5)\][[:space:]]*$/ {
+      inblk=1
+      if (found==0) {
+        print "[Socks5]"
+        found=1
+      }
+      next
+    }
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      inblk=0
+      next
+    }
+    inblk { print; next }
+    END {
+      if (found==0) {
+        print "[Socks5]"
+        print "BindAddress = 127.0.0.1:40000"
+      }
+    }
+  ' "${WIREPROXY_CONF}" 2>/dev/null
+}
+
+warp_wireproxy_apply_profile() {
+  # args: wgcf_profile_path
+  local profile="${1:-}"
+  local tmp backup socks_block ts
+  [[ -n "${profile}" && -f "${profile}" ]] || {
+    warn "Profile wgcf tidak ditemukan: ${profile}"
+    return 1
+  }
+
+  mkdir -p "$(dirname "${WIREPROXY_CONF}")"
+  tmp="$(mktemp)"
+  socks_block="$(warp_wireproxy_socks_block_get)"
+
+  awk '
+    BEGIN { drop=0 }
+    /^[[:space:]]*\[(Socks|Socks5)\][[:space:]]*$/ { drop=1; next }
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { drop=0 }
+    drop { next }
+    { print }
+  ' "${profile}" > "${tmp}"
+  printf "\n%s\n" "${socks_block}" >> "${tmp}"
+
+  if [[ -f "${WIREPROXY_CONF}" ]]; then
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="${WIREPROXY_CONF}.bak.${ts}"
+    cp -f "${WIREPROXY_CONF}" "${backup}" 2>/dev/null || true
+  fi
+
+  if ! install -m 600 "${tmp}" "${WIREPROXY_CONF}"; then
+    rm -f "${tmp}" 2>/dev/null || true
+    warn "Gagal menulis wireproxy config: ${WIREPROXY_CONF}"
+    return 1
+  fi
+  rm -f "${tmp}" 2>/dev/null || true
+  return 0
+}
+
+warp_wgcf_register_noninteractive() {
+  local reg_log="/tmp/wgcf-register-manage.$$.log"
+
+  mkdir -p "${WGCF_DIR}"
+  pushd "${WGCF_DIR}" >/dev/null || {
+    warn "Gagal masuk ke ${WGCF_DIR}"
+    return 1
+  }
+
+  if [[ -f "wgcf-account.toml" ]]; then
+    popd >/dev/null || true
+    return 0
+  fi
+
+  if have_cmd expect; then
+    expect <<'EOF' >"${reg_log}" 2>&1 || true
+set timeout 180
+log_user 1
+spawn wgcf register
+expect {
+  -re {Use the arrow keys.*} { send "\r"; exp_continue }
+  -re {Do you agree.*} { send "\r"; exp_continue }
+  -re {\(y/n\)} { send "y\r"; exp_continue }
+  -re {Yes/No} { send "\r"; exp_continue }
+  -re {accept} { send "\r"; exp_continue }
+  eof
+}
+EOF
+  else
+    set +o pipefail
+    yes | wgcf register >"${reg_log}" 2>&1 || true
+    set -o pipefail
+  fi
+
+  popd >/dev/null || true
+  if [[ ! -f "${WGCF_DIR}/wgcf-account.toml" ]]; then
+    warn "wgcf register gagal. Log: ${reg_log}"
+    tail -n 60 "${reg_log}" >&2 || true
+    return 1
+  fi
+  return 0
+}
+
+warp_wgcf_build_profile() {
+  # args: tier [license_key]
+  local tier="${1:-free}"
+  local license_key="${2:-}"
+  local gen_log="/tmp/wgcf-generate-manage.$$.log"
+  local upd_log="/tmp/wgcf-update-manage.$$.log"
+
+  mkdir -p "${WGCF_DIR}"
+  if [[ ! -f "${WGCF_DIR}/wgcf-account.toml" ]]; then
+    if ! warp_wgcf_register_noninteractive; then
+      return 1
+    fi
+  fi
+
+  pushd "${WGCF_DIR}" >/dev/null || {
+    warn "Gagal masuk ke ${WGCF_DIR}"
+    return 1
+  }
+
+  if [[ "${tier}" == "plus" ]]; then
+    license_key="$(echo "${license_key}" | tr -d '[:space:]')"
+    if [[ -z "${license_key}" ]]; then
+      popd >/dev/null || true
+      warn "License key WARP+ kosong"
+      return 1
+    fi
+    if ! wgcf update --license-key "${license_key}" >"${upd_log}" 2>&1; then
+      popd >/dev/null || true
+      warn "wgcf update --license-key gagal. Log: ${upd_log}"
+      tail -n 60 "${upd_log}" >&2 || true
+      return 1
+    fi
+  fi
+
+  if ! wgcf generate -p "${WGCF_DIR}/wgcf-profile.conf" >"${gen_log}" 2>&1; then
+    popd >/dev/null || true
+    warn "wgcf generate gagal. Log: ${gen_log}"
+    tail -n 60 "${gen_log}" >&2 || true
+    return 1
+  fi
+  popd >/dev/null || true
+
+  if [[ ! -s "${WGCF_DIR}/wgcf-profile.conf" ]]; then
+    warn "wgcf-profile.conf tidak ditemukan setelah generate"
+    return 1
+  fi
+  return 0
+}
+
+warp_tier_show_status() {
+  local target live svc_state license_raw license_masked
+  target="$(warp_tier_state_target_get)"
+  live="$(warp_live_tier_get)"
+  license_raw="$(warp_plus_license_state_get)"
+  license_masked="$(warp_plus_license_mask "${license_raw}")"
+  if svc_exists wireproxy; then
+    svc_state="$(svc_state wireproxy)"
+  else
+    svc_state="not-installed"
+  fi
+
+  printf "Target Tier   : %s\n" "${target}"
+  printf "Live Tier     : %s\n" "${live}"
+  printf "wireproxy     : %s\n" "${svc_state}"
+  if [[ -n "${license_raw}" ]]; then
+    printf "WARP+ License : %s\n" "${license_masked}"
+  else
+    printf "WARP+ License : (kosong)\n"
+  fi
+}
+
+warp_tier_switch_free() {
+  title
+  echo "4) Network Controls > WARP Controls > Switch ke WARP Free"
+  hr
+
+  if ! have_cmd wgcf; then
+    warn "wgcf tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    hr
+    pause
+    return 0
+  fi
+  if ! have_cmd wireproxy; then
+    warn "wireproxy tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    hr
+    pause
+    return 0
+  fi
+
+  mkdir -p "${WGCF_DIR}"
+  if [[ -f "${WGCF_DIR}/wgcf-account.toml" ]]; then
+    cp -f "${WGCF_DIR}/wgcf-account.toml" "${WGCF_DIR}/wgcf-account.toml.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+  fi
+  rm -f "${WGCF_DIR}/wgcf-account.toml" "${WGCF_DIR}/wgcf-profile.conf" 2>/dev/null || true
+
+  if ! warp_wgcf_register_noninteractive; then
+    hr
+    pause
+    return 0
+  fi
+  if ! warp_wgcf_build_profile free; then
+    hr
+    pause
+    return 0
+  fi
+  if ! warp_wireproxy_apply_profile "${WGCF_DIR}/wgcf-profile.conf"; then
+    hr
+    pause
+    return 0
+  fi
+
+  network_state_set "${WARP_TIER_STATE_KEY}" "free"
+  log "WARP tier target di-set: free"
+  if svc_exists wireproxy; then
+    svc_restart wireproxy || true
+  else
+    warn "wireproxy.service tidak terdeteksi"
+  fi
+  hr
+  warp_tier_show_status
+  hr
+  pause
+}
+
+warp_tier_switch_plus() {
+  local saved_key key masked
+  title
+  echo "4) Network Controls > WARP Controls > Switch ke WARP Plus"
+  hr
+
+  if ! have_cmd wgcf; then
+    warn "wgcf tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    hr
+    pause
+    return 0
+  fi
+  if ! have_cmd wireproxy; then
+    warn "wireproxy tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    hr
+    pause
+    return 0
+  fi
+
+  saved_key="$(warp_plus_license_state_get)"
+  masked="$(warp_plus_license_mask "${saved_key}")"
+  if [[ -n "${saved_key}" ]]; then
+    echo "License tersimpan: ${masked}"
+    read -r -p "Input WARP+ License Key (Enter=pakai tersimpan, atau kembali): " key
+    if is_back_choice "${key}"; then
+      return 0
+    fi
+    key="$(echo "${key}" | tr -d '[:space:]')"
+    [[ -n "${key}" ]] || key="${saved_key}"
+  else
+    read -r -p "Input WARP+ License Key (atau kembali): " key
+    if is_back_choice "${key}"; then
+      return 0
+    fi
+    key="$(echo "${key}" | tr -d '[:space:]')"
+  fi
+
+  if [[ -z "${key}" ]]; then
+    warn "License key WARP+ kosong"
+    hr
+    pause
+    return 0
+  fi
+
+  if ! warp_wgcf_build_profile plus "${key}"; then
+    hr
+    pause
+    return 0
+  fi
+  if ! warp_wireproxy_apply_profile "${WGCF_DIR}/wgcf-profile.conf"; then
+    hr
+    pause
+    return 0
+  fi
+
+  network_state_set "${WARP_TIER_STATE_KEY}" "plus"
+  network_state_set "${WARP_PLUS_LICENSE_STATE_KEY}" "${key}"
+  log "WARP tier target di-set: plus"
+  if svc_exists wireproxy; then
+    svc_restart wireproxy || true
+  else
+    warn "wireproxy.service tidak terdeteksi"
+  fi
+  hr
+  warp_tier_show_status
+  hr
+  pause
+}
+
+warp_tier_reconnect_regenerate() {
+  local target key
+  title
+  echo "4) Network Controls > WARP Controls > Reconnect/Regenerate"
+  hr
+
+  if ! have_cmd wgcf; then
+    warn "wgcf tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    hr
+    pause
+    return 0
+  fi
+  if ! have_cmd wireproxy; then
+    warn "wireproxy tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    hr
+    pause
+    return 0
+  fi
+
+  target="$(warp_tier_state_target_get)"
+  if [[ "${target}" != "free" && "${target}" != "plus" ]]; then
+    target="free"
+  fi
+
+  if [[ "${target}" == "plus" ]]; then
+    key="$(warp_plus_license_state_get)"
+    key="$(echo "${key}" | tr -d '[:space:]')"
+    if [[ -z "${key}" ]]; then
+      warn "Target plus aktif, tapi license key kosong. Gunakan menu Switch ke WARP Plus dulu."
+      hr
+      pause
+      return 0
+    fi
+    if ! warp_wgcf_build_profile plus "${key}"; then
+      hr
+      pause
+      return 0
+    fi
+  else
+    if ! warp_wgcf_build_profile free; then
+      hr
+      pause
+      return 0
+    fi
+  fi
+
+  if ! warp_wireproxy_apply_profile "${WGCF_DIR}/wgcf-profile.conf"; then
+    hr
+    pause
+    return 0
+  fi
+
+  if svc_exists wireproxy; then
+    svc_restart wireproxy || true
+  else
+    warn "wireproxy.service tidak terdeteksi"
+  fi
+  log "Reconnect/regenerate selesai untuk target tier: ${target}"
+  hr
+  warp_tier_show_status
+  hr
+  pause
+}
+
+warp_tier_menu() {
+  while true; do
+    title
+    echo "4) Network Controls > WARP Controls > WARP Tier (Free/Plus)"
+    hr
+    warp_tier_show_status
+    hr
+    echo "  1) Show status"
+    echo "  2) Switch ke WARP Free"
+    echo "  3) Switch ke WARP Plus"
+    echo "  4) Reconnect/Regenerate sesuai target"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        title
+        echo "4) Network Controls > WARP Controls > WARP Tier Status"
+        hr
+        warp_tier_show_status
+        hr
+        pause
+        ;;
+      2) warp_tier_switch_free ;;
+      3) warp_tier_switch_plus ;;
+      4) warp_tier_reconnect_regenerate ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
 warp_controls_menu() {
   while true; do
     title
@@ -7551,6 +8018,7 @@ warp_controls_menu() {
     echo "  4) WARP per-user"
     echo "  5) WARP per-protocol inbounds"
     echo "  6) WARP per-Geosite/Domain"
+    echo "  7) WARP Tier (Free/Plus)"
     echo "  0) Back"
     hr
     read -r -p "Pilih: " c
@@ -7572,6 +8040,7 @@ warp_controls_menu() {
       4) warp_per_user_menu ;;
       5) warp_per_inbounds_menu ;;
       6) warp_domain_geosite_menu ;;
+      7) warp_tier_menu ;;
       0|kembali|k|back|b) break ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
@@ -8662,7 +9131,20 @@ fail2ban_jails_list_get() {
   if ! fail2ban_client_ready; then
     return 0
   fi
-  fail2ban-client status 2>/dev/null | awk -F': ' '/Jail list:/ {print $2}'     | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -E '.+' || true
+  local out line
+  out="$(fail2ban-client status 2>/dev/null || true)"
+  [[ -n "${out}" ]] || return 0
+
+  # Format output fail2ban bisa memakai prefix "|-" atau "`-" dan separator
+  # setelah ":" bisa berupa spasi/tab, jadi parsing harus longgar.
+  line="$(printf '%s\n' "${out}" | sed -nE 's/.*[Jj]ail list[[:space:]]*:[[:space:]]*//p' | head -n1)"
+  line="${line//$'\r'/}"
+  [[ -n "${line}" ]] || return 0
+
+  printf '%s\n' "${line}" \
+    | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+    | grep -E '.+' || true
 }
 
 fail2ban_jail_banned_counts_get() {
@@ -8674,8 +9156,10 @@ fail2ban_jail_banned_counts_get() {
   fi
   local out cur tot
   out="$(fail2ban-client status "${jail}" 2>/dev/null || true)"
-  cur="$(printf '%s\n' "${out}" | awk -F': ' '/Currently banned:/ {print $2; exit}' | tr -d '[:space:]')"
-  tot="$(printf '%s\n' "${out}" | awk -F': ' '/Total banned:/ {print $2; exit}' | tr -d '[:space:]')"
+  # Output fail2ban bisa memakai tab/spasi campuran setelah ":".
+  # Parsing dibuat longgar agar "Currently banned" dan "Total banned" selalu terbaca.
+  cur="$(printf '%s\n' "${out}" | sed -nE 's/.*Currently banned:[[:space:]]*([0-9]+).*/\1/p' | head -n1)"
+  tot="$(printf '%s\n' "${out}" | sed -nE 's/.*Total banned:[[:space:]]*([0-9]+).*/\1/p' | head -n1)"
   [[ -n "${cur}" ]] || cur="0"
   [[ -n "${tot}" ]] || tot="0"
   echo "${cur}|${tot}"
