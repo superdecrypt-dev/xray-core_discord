@@ -1,169 +1,184 @@
-# Xray VPN Server — Auto Setup & Management
+# Xray VPN Server - Auto Setup and Management
 
-Script bash untuk instalasi dan manajemen server proxy berbasis **Xray-core** dengan dukungan protokol **VLESS**, **VMess**, dan **Trojan** melalui transport **WebSocket (WS)**, **HTTPUpgrade**, dan **gRPC**, dilengkapi TLS via Nginx dan sertifikat SSL otomatis.
+Automasi instalasi dan operasional server proxy berbasis Xray-core, dengan dukungan protokol VLESS, VMess, dan Trojan melalui WS, HTTPUpgrade, dan gRPC, serta TLS termination di Nginx.
 
----
-
-## ⚡ Instalasi Cepat
-
-Jalankan perintah berikut di VPS sebagai root:
+## Instalasi Cepat
+Jalankan di VPS sebagai `root`:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/xray-core_discord/main/run.sh)
 ```
 
-Script akan otomatis mengunduh repositori, memasang perintah `manage`, dan menjalankan setup interaktif.
+`run.sh` akan:
+1. Clone repository.
+2. Install command `manage` ke `/usr/local/bin/manage`.
+3. Menjalankan `setup.sh` (interaktif, one-time).
 
----
-
-## 📁 File Utama
-
+## File Utama
 | File | Fungsi |
-|------|--------|
-| `setup.sh` | Instalasi awal server (satu kali jalan) |
-| `manage.sh` | Manajemen harian pasca-setup (menu interaktif) |
+|---|---|
+| `setup.sh` | Instalasi awal server (one-time setup) |
+| `manage.sh` | Operasional harian (menu interaktif) |
+| `run.sh` | Bootstrap installer cepat (clone + install `manage` + jalankan setup) |
 
----
+## Persyaratan
+- OS: Ubuntu >= 20.04 atau Debian >= 11
+- Hak akses: root
+- Akses internet keluar (untuk install paket, ACME, geodata, dan download binary)
 
-## ⚙️ Persyaratan Sistem
+Dependency dasar dipasang otomatis oleh `setup.sh`.
 
-- **OS:** Ubuntu ≥ 20.04 atau Debian ≥ 11
-- **Virtualisasi:** KVM only
-- **Hak akses:** Root (`sudo`)
-- **Dependency:** `curl`, `python3`, `jq`, `unzip`, `socat`, `cron`, `dnsutils`, `iproute2`
+## Ringkasan `setup.sh`
+`setup.sh` menangani provisioning dari nol sampai siap dipakai:
 
-> Dependency akan dipasang otomatis oleh `setup.sh` jika belum tersedia.
+1. Install dependency sistem.
+2. Install Nginx dari repo resmi `nginx.org`.
+3. Install Xray-core.
+4. Generate konfigurasi Xray modular di `/usr/local/etc/xray/conf.d/`.
+5. Install TLS certificate via acme.sh.
+6. Install daemon operasional: `xray-expired`, `xray-quota`, `xray-limit-ip`, `xray-speed`.
+7. Install hardening dasar (fail2ban, sysctl, logrotate, dsb).
 
----
+### Domain Mode saat Setup
+`setup.sh` menyediakan 2 mode domain:
 
-## 🚀 Instalasi (`setup.sh`)
+1. `input domain sendiri`
+- Domain harus sudah mengarah ke IP VPS.
+- ACME mode: `standalone` (port 80 diperlukan saat issue cert).
 
-Script ini menangani seluruh proses setup dari nol hingga server siap dipakai.
+2. `gunakan domain yang disediakan`
+- Pilih root domain dari daftar bawaan, lalu pilih/generate subdomain.
+- Script membuat/mengupdate A record via Cloudflare API.
+- ACME mode: `dns_cf_wildcard`.
 
-### Yang Dilakukan setup.sh
+### Catatan Cloudflare Token
+- Variable yang dipakai: `CLOUDFLARE_API_TOKEN`.
+- Di `setup.sh` sudah ada default token hardcoded.
+- Anda tetap bisa override via environment variable sebelum menjalankan setup:
 
-- Memeriksa kompatibilitas OS
-- Menginstal dependency dasar
-- Menginstal **Xray-core** dari sumber resmi
-- Menginstal dan mengkonfigurasi **Nginx** (dari nginx.org repo)
-- Menerbitkan sertifikat TLS via **acme.sh** dengan dua mode:
-  - `standalone` — untuk domain milik sendiri (verifikasi port 80)
-  - `dns_cf_wildcard` — wildcard cert via Cloudflare DNS API
-- Mengkonfigurasi Xray dengan **port & path internal yang diacak** (lebih aman)
-- Menyimpan sertifikat ke `/opt/cert/fullchain.pem` dan `/opt/cert/privkey.pem`
-- Mendukung domain sendiri **atau** subdomain dari daftar domain yang disediakan
-
-### Opsi Domain
-
-Saat setup dijalankan, Anda akan diminta memilih:
-
-1. **Input domain sendiri** — masukkan domain/subdomain yang sudah diarahkan ke IP VPS
-2. **Gunakan domain yang disediakan** — subdomain otomatis dibuat di atas domain bawaan via Cloudflare API
-
----
-
-## 🛠️ Manajemen Harian (`manage.sh`)
-
-Script interaktif berbasis menu untuk operasi setelah setup selesai.
-
-### Struktur Menu
-
+```bash
+export CLOUDFLARE_API_TOKEN="token-anda"
 ```
+
+## Ringkasan `manage.sh`
+`manage.sh` adalah menu operasional harian. Berbeda dengan versi dokumentasi lama, script ini memang melakukan perubahan konfigurasi runtime (inbounds, routing, outbounds, metadata) saat aksi operasional dijalankan.
+
+Struktur menu utama:
+
+```text
 Main Menu
-├── 1) Status & Diagnostics      — Cek status layanan, koneksi, dan konfigurasi
-├── 2) User Management           — Tambah / hapus / lihat akun pengguna
-├── 3) Quota & Access Control    — Kelola kuota data per user per protokol
-├── 4) Network Controls          — Pengaturan jaringan
-├── 5) Security                  — TLS, Fail2ban, Hardening, Security Overview
-│   ├── TLS & Certificate        — Cek dan perbarui sertifikat SSL
-│   ├── Fail2ban Protection      — Lihat jail, banned IP, unban, restart
-│   ├── System Hardening Status  — Cek BBR, Swap, Ulimit, Chrony
-│   └── Security Overview        — Ringkasan status keamanan server
-└── 6) Maintenance               — Restart layanan, lihat log Xray/Nginx
+  1) Status & Diagnostics
+  2) User Management
+  3) Quota & Access Control
+  4) Network Controls
+  5) Security
+  6) Maintenance
+  0) Exit
 ```
 
-### Fitur Utama manage.sh
+### User Management
+- Add user (VLESS/VMess/Trojan)
+- Delete user
+- Extend/Set expiry
+- List users
 
-**User Management**
-- Tambah/hapus akun untuk protokol VLESS, VMess, atau Trojan
-- Validasi username (aman dari path traversal)
-- Generate UUID otomatis untuk akun baru
+Input saat add user:
+- username
+- masa aktif (hari)
+- quota (GB)
+- IP limit on/off + nilai limit
+- speed limit on/off + speed download/upload
 
-**Quota & Access Control**
-- Set kuota data (dalam GB) per user per protokol
-- Pantau penggunaan dan sisa kuota
-- Data kuota disimpan di `/opt/quota/`
+### Quota and Access Control
+Detail menu per user:
 
-**Security**
-- Pantau masa berlaku sertifikat TLS
-- Kelola IP yang diblokir oleh Fail2ban (SSH, Nginx, Recidive jail)
-- Cek status BBR, Swap, file descriptor limit (ulimit), dan Chrony
-
-**Maintenance**
-- Restart Xray, Nginx, atau keduanya sekaligus
-- Tampilkan log real-time (`tail`) dari Xray maupun Nginx
-
----
-
-## 📂 Struktur Direktori
-
-```
-/usr/local/etc/xray/conf.d/     # Konfigurasi Xray (modular)
-  ├── 00-log.json
-  ├── 01-api.json
-  ├── 02-dns.json
-  ├── 10-inbounds.json
-  ├── 20-outbounds.json
-  ├── 30-routing.json
-  ├── 40-policy.json
-  ├── 50-stats.json
-  └── 60-observatory.json
-
-/etc/nginx/conf.d/xray.conf     # Konfigurasi Nginx
-/opt/cert/                      # Sertifikat TLS
-  ├── fullchain.pem
-  └── privkey.pem
-
-/opt/account/                   # Data akun user (read-only referensi)
-  ├── vless/
-  ├── vmess/
-  └── trojan/
-
-/opt/quota/                     # Metadata kuota per user
-  ├── vless/
-  ├── vmess/
-  └── trojan/
-
-/var/lib/xray-manage/           # Direktori kerja internal (atomic write)
-/var/log/xray-manage/           # Laporan & export
+```text
+1) View JSON
+2) Set Quota Limit (GB)
+3) Reset Quota Used (set 0)
+4) Manual Block/Unblock (toggle)
+5) IP Limit Enable/Disable (toggle)
+6) Set IP Limit (angka)
+7) Unlock IP Lock
+8) Set Speed Download (Mbps)
+9) Set Speed Upload (Mbps)
+10) Speed Limit Enable/Disable (toggle)
+0) Back
 ```
 
----
+Status yang ditampilkan di detail:
+- Quota Limit / Used / Expired
+- IP Limit ON/OFF + max IP
+- Block Reason (MANUAL / QUOTA / IP_LIMIT)
+- Speed Download / Speed Upload / Speed Limit ON/OFF
 
-## 🔐 Keamanan
+## Daemon Runtime
+Daemon yang dipasang oleh setup:
 
-- Port dan path internal Xray **diacak saat setup** untuk menghindari deteksi mudah
-- Path publik Nginx tetap konsisten (sesuai konfigurasi)
-- Integrasi Fail2ban untuk proteksi SSH dan Nginx
-- Dukungan Cloudflare DNS API untuk wildcard cert (tidak memerlukan port 80 terbuka)
+- `xray-expired`: hapus user expired dari inbounds/routing.
+- `xray-quota`: sinkron usage dari Xray API, lock user jika quota habis.
+- `xray-limit-ip`: lock user jika jumlah IP aktif melebihi batas.
+- `xray-speed`: apply shaping per-user berbasis mark (tc + nft).
 
----
+Cek status:
 
-## 📝 Catatan Penting
+```bash
+systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-pager
+```
 
-- `setup.sh` hanya dijalankan **sekali** saat instalasi awal
-- `manage.sh` **tidak mengubah** konfigurasi yang dibuat oleh `setup.sh`
-- Semua operasi di `manage.sh` menggunakan **atomic write** untuk menghindari kerusakan konfigurasi
-- Script membutuhkan akses **root** untuk dijalankan
+## Struktur Direktori Penting
+```text
+/usr/local/etc/xray/conf.d/
+  00-log.json
+  01-api.json
+  02-dns.json
+  10-inbounds.json
+  20-outbounds.json
+  30-routing.json
+  40-policy.json
+  50-stats.json
+  60-observatory.json
 
----
+/etc/nginx/conf.d/xray.conf
+/opt/cert/fullchain.pem
+/opt/cert/privkey.pem
 
-## 🆘 Troubleshooting
+/opt/account/{vless,vmess,trojan}/
+/opt/quota/{vless,vmess,trojan}/
+/opt/speed/{vless,vmess,trojan}/
 
+/etc/xray-speed/config.json
+/var/lib/xray-speed/state.json
+/var/lib/xray-manage/
+/var/log/xray-manage/
+```
+
+## Catatan Teknis Penting
+- Operasi write ke config dilakukan atomik dan memakai lock file untuk mengurangi race condition daemon.
+- Permission file config Xray yang disarankan:
+  - `/usr/local/etc/xray/conf.d/10-inbounds.json` -> `640 root:xray`
+  - `/usr/local/etc/xray/conf.d/20-outbounds.json` -> `640 root:xray`
+  - `/usr/local/etc/xray/conf.d/30-routing.json` -> `640 root:xray`
+- Setelah perubahan besar pada user/routing/speed, `xray` bisa direstart oleh script agar perubahan langsung aktif.
+
+## Troubleshooting Cepat
 | Masalah | Solusi |
-|---------|--------|
-| `Jalankan sebagai root` | Gunakan `sudo ./manage.sh` |
-| `File immutable` | Jalankan `chattr -i <file>` lalu ulangi |
-| `python3 tidak ditemukan` | `apt-get install -y python3` |
-| Sertifikat expired | Masuk menu **5 → 1 (TLS & Certificate)** |
-| Layanan tidak aktif | Masuk menu **6 → 1/2/3 (Restart)** |
+|---|---|
+| `Jalankan sebagai root` | Jalankan dengan `sudo` atau login root |
+| `Cannot find DNS API hook for: dns_cf` | Jalankan setup versi terbaru (acme source bundle + bootstrap dns_cf hook sudah ditangani) |
+| `permission denied ... 30-routing.json` saat start xray | Set `chown root:xray` dan `chmod 640` untuk file routing |
+| Speed limit tidak terasa | Cek `systemctl status xray-speed`, lalu `xray-speed status --config /etc/xray-speed/config.json` |
+| User tidak terhapus/terkunci sesuai ekspektasi | Cek status daemon `xray-quota` dan `xray-limit-ip` |
+
+## Operasi Dasar
+Jalankan menu manajemen:
+
+```bash
+manage
+```
+
+Atau:
+
+```bash
+/usr/local/bin/manage
+```
