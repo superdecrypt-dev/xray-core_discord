@@ -1882,6 +1882,15 @@ check_xray_config_json() {
   log "Xray conf.d JSON: OK"
 }
 
+xray_confdir_syntax_test() {
+  # Return 0 jika syntax confdir valid atau binary xray tidak tersedia.
+  # Return non-zero jika xray tersedia namun test config gagal.
+  if ! have_cmd xray; then
+    return 0
+  fi
+  xray run -test -confdir "${XRAY_CONFDIR}" >/dev/null 2>&1
+}
+
 
 check_tls_expiry() {
   if have_cmd openssl && [[ -f "${CERT_FULLCHAIN}" ]]; then
@@ -5157,9 +5166,9 @@ xray_routing_default_rule_set() {
 
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}"
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${SPEED_OUTBOUND_TAG_PREFIX}"
 import json, sys
-src, dst, mode = sys.argv[1:4]
+src, ob_src, dst, mode, speed_out_prefix = sys.argv[1:6]
 with open(src,'r',encoding='utf-8') as f:
   cfg=json.load(f)
 
@@ -5190,6 +5199,47 @@ for i,r in enumerate(rules):
 if idx is None:
   raise SystemExit("Default rule (port 1-65535) tidak ditemukan")
 
+try:
+  with open(ob_src,'r',encoding='utf-8') as f:
+    ob_cfg=json.load(f)
+except Exception:
+  ob_cfg={}
+
+def list_outbound_tags():
+  out=[]
+  seen=set()
+  for o in (ob_cfg.get('outbounds') or []):
+    if not isinstance(o, dict):
+      continue
+    t=o.get('tag')
+    if not isinstance(t, str):
+      continue
+    t=t.strip()
+    if not t or t in seen:
+      continue
+    seen.add(t)
+    out.append(t)
+  return out
+
+def pick_default_selector(tags):
+  deny={"api","blocked"}
+  sel=[]
+  for t in ("direct","warp"):
+    if t in tags and t not in sel:
+      sel.append(t)
+  if not sel:
+    for t in tags:
+      if t in deny:
+        continue
+      if speed_out_prefix and isinstance(t, str) and t.startswith(speed_out_prefix):
+        continue
+      if t in sel:
+        continue
+      sel.append(t)
+      if len(sel) >= 2:
+        break
+  return sel
+
 r=rules[idx]
 if mode == 'direct':
   r.pop('balancerTag', None)
@@ -5198,6 +5248,59 @@ elif mode == 'warp':
   r.pop('balancerTag', None)
   r['outboundTag']='warp'
 elif mode == 'balancer':
+  tags=list_outbound_tags()
+  balancers=routing.get('balancers')
+  if not isinstance(balancers, list):
+    balancers=[]
+
+  b=None
+  for it in balancers:
+    if isinstance(it, dict) and it.get('tag') == 'egress-balance':
+      b=it
+      break
+
+  if b is None:
+    b={"tag":"egress-balance","selector":[],"strategy":{"type":"random"}}
+    balancers.insert(0,b)
+
+  raw_sel=b.get('selector')
+  if not isinstance(raw_sel, list):
+    raw_sel=[]
+
+  deny={"api","blocked"}
+  valid_sel=[]
+  seen=set()
+  for t in raw_sel:
+    if not isinstance(t, str):
+      continue
+    t=t.strip()
+    if not t:
+      continue
+    if t in deny:
+      continue
+    if speed_out_prefix and t.startswith(speed_out_prefix):
+      continue
+    if t not in tags:
+      continue
+    if t in seen:
+      continue
+    seen.add(t)
+    valid_sel.append(t)
+
+  if not valid_sel:
+    valid_sel=pick_default_selector(tags)
+  if not valid_sel:
+    raise SystemExit("Tidak ada outbound valid untuk balancer egress-balance.")
+
+  b['selector']=valid_sel
+  st=b.get('strategy')
+  if not isinstance(st, dict):
+    st={}
+  if not isinstance(st.get('type'), str) or not st.get('type'):
+    st['type']='random'
+  b['strategy']=st
+  routing['balancers']=balancers
+
   r.pop('outboundTag', None)
   r['balancerTag']='egress-balance'
 else:
@@ -5219,6 +5322,14 @@ PY
     ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update routing (rollback ke backup: ${backup})"
   }
+
+  if ! xray_confdir_syntax_test; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    die "Konfigurasi xray invalid setelah update routing default. Config di-rollback ke backup: ${backup}"
+  fi
 
   svc_restart xray || true
   if ! svc_wait_active xray 20; then
