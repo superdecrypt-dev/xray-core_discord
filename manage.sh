@@ -9876,10 +9876,17 @@ wireproxy_status_menu() {
 
   hr
   echo "Konfigurasi : /etc/wireproxy/config.conf"
-  echo "Log service :"
-  journalctl -u wireproxy --no-pager -n 30 2>/dev/null || true
+  echo "Info log    : disembunyikan agar tampilan ringkas"
+  echo
+  echo "  1) Lihat log wireproxy (20 baris)"
+  echo "  0) Back"
   hr
-  pause
+  read -r -p "Pilih: " c
+  case "${c}" in
+    1) daemon_log_tail_show wireproxy 20 ;;
+    0|kembali|k|back|b) : ;;
+    *) warn "Pilihan tidak valid" ; sleep 1 ;;
+  esac
 }
 
 wireproxy_restart_menu() {
@@ -9895,6 +9902,22 @@ wireproxy_restart_menu() {
   fi
 
   svc_restart wireproxy
+  hr
+  pause
+}
+
+daemon_log_tail_show() {
+  # args: service_name [lines]
+  local svc="$1"
+  local lines="${2:-20}"
+  title
+  echo "8) Maintenance > Log ${svc}"
+  hr
+  if svc_exists "${svc}"; then
+    journalctl -u "${svc}" --no-pager -n "${lines}" 2>/dev/null || true
+  else
+    warn "${svc}.service tidak terpasang"
+  fi
   hr
   pause
 }
@@ -9915,14 +9938,7 @@ daemon_status_menu() {
   done
   hr
 
-  echo "Log terakhir daemon:"
-  hr
-  for d in "xray-expired" "xray-quota" "xray-limit-ip" "xray-speed"; do
-    if svc_exists "${d}"; then
-      echo "--- ${d} (5 baris terakhir) ---"
-      journalctl -u "${d}" --no-pager -n 5 2>/dev/null || true
-    fi
-  done
+  echo "Info: log daemon disembunyikan agar tampilan ringkas."
   hr
 
   echo "  1) Restart xray-expired"
@@ -9930,6 +9946,10 @@ daemon_status_menu() {
   echo "  3) Restart xray-limit-ip"
   echo "  4) Restart xray-speed"
   echo "  5) Restart semua daemon (xray-expired + xray-quota + xray-limit-ip + xray-speed)"
+  echo "  6) Lihat log xray-expired (20 baris)"
+  echo "  7) Lihat log xray-quota (20 baris)"
+  echo "  8) Lihat log xray-limit-ip (20 baris)"
+  echo "  9) Lihat log xray-speed (20 baris)"
   echo "  0) Back"
   hr
   if ! read -r -p "Pilih: " c; then
@@ -9963,6 +9983,10 @@ daemon_status_menu() {
       done
       pause
       ;;
+    6) daemon_log_tail_show xray-expired 20 ;;
+    7) daemon_log_tail_show xray-quota 20 ;;
+    8) daemon_log_tail_show xray-limit-ip 20 ;;
+    9) daemon_log_tail_show xray-speed 20 ;;
     0|kembali|k|back|b) return 0 ;;
     *) warn "Pilihan tidak valid" ; sleep 1 ;;
   esac
@@ -9981,7 +10005,7 @@ maintenance_menu() {
     echo "  3. Restart all (xray+nginx)"
     echo "  4. View xray logs (tail)"
     echo "  5. View nginx logs (tail)"
-    echo "  6. Wireproxy (WARP) Status & Monitor"
+    echo "  6. Wireproxy (WARP) Status (ringkas)"
     echo "  7. Restart wireproxy (WARP)"
     echo "  8. Daemon Status & Restart (xray-expired / xray-quota / xray-limit-ip / xray-speed)"
     echo "  0. Back (kembali)"
