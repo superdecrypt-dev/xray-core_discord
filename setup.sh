@@ -1599,6 +1599,49 @@ install_extra_deps() {
   ok "Dependency tambahan terpasang (jq, fail2ban, chrony, expect, logrotate, nftables)."
 }
 
+install_speedtest_snap() {
+  ok "Install speedtest via snap..."
+
+  if command -v speedtest >/dev/null 2>&1; then
+    ok "speedtest sudah tersedia: $(command -v speedtest)"
+    return 0
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+  if ! command -v snap >/dev/null 2>&1; then
+    apt-get install -y snapd || die "Gagal install snapd."
+  fi
+
+  systemctl enable --now snapd.socket >/dev/null 2>&1 || true
+  systemctl enable --now snapd.service >/dev/null 2>&1 || true
+
+  if [[ ! -e /snap ]]; then
+    ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true
+  fi
+
+  export PATH="${PATH}:/snap/bin"
+
+  local i
+  for i in {1..15}; do
+    if snap version >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  snap version >/dev/null 2>&1 || die "snapd belum siap. Cek: systemctl status snapd --no-pager"
+
+  if ! snap list speedtest >/dev/null 2>&1; then
+    snap install speedtest || die "Gagal install speedtest via snap."
+  fi
+
+  hash -r || true
+  if command -v speedtest >/dev/null 2>&1 || [[ -x /snap/bin/speedtest ]]; then
+    ok "speedtest terpasang via snap."
+  else
+    warn "speedtest terpasang, namun binary belum ada di PATH shell saat ini. Gunakan /snap/bin/speedtest."
+  fi
+}
+
 install_fail2ban_aggressive() {
   ok "Enable fail2ban..."
 
@@ -4199,6 +4242,7 @@ main() {
   install_base_deps
   need_python3
   install_extra_deps
+  install_speedtest_snap
   enable_cron_service
   setup_time_sync_chrony
   install_fail2ban_aggressive

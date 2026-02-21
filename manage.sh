@@ -1156,9 +1156,10 @@ domain_control_menu() {
     hr
     echo "  1) Set Domain + Issue Certificate (sama seperti setup.sh)"
     echo "  2) Show Current Domain"
-    echo "  0) Back"
+    echo "  0) Back (kembali)"
+    echo "  kembali) Back"
     hr
-    read -r -p "Pilih: " c
+    read -r -p "Pilih (1-2/0/kembali): " c
     case "${c}" in
       1) domain_control_set_domain_now ;;
       2) domain_control_show_info ;;
@@ -8236,6 +8237,84 @@ network_menu() {
 }
 
 # -------------------------
+# Speedtest
+# -------------------------
+speedtest_bin_get() {
+  if have_cmd speedtest; then
+    echo "speedtest"
+    return 0
+  fi
+  if [[ -x /snap/bin/speedtest ]]; then
+    echo "/snap/bin/speedtest"
+    return 0
+  fi
+  echo ""
+}
+
+speedtest_run_now() {
+  title
+  echo "6) Speedtest > Run Speedtest"
+  hr
+
+  local speedtest_bin
+  speedtest_bin="$(speedtest_bin_get)"
+  if [[ -z "${speedtest_bin}" ]]; then
+    warn "speedtest belum tersedia. Jalankan setup.sh untuk install speedtest via snap."
+    hr
+    pause
+    return 0
+  fi
+
+  echo "Menjalankan: ${speedtest_bin} --accept-license --accept-gdpr"
+  echo
+  if ! "${speedtest_bin}" --accept-license --accept-gdpr; then
+    warn "Speedtest gagal dijalankan."
+  fi
+  hr
+  pause
+}
+
+speedtest_show_version() {
+  title
+  echo "6) Speedtest > Version"
+  hr
+
+  local speedtest_bin
+  speedtest_bin="$(speedtest_bin_get)"
+  if [[ -z "${speedtest_bin}" ]]; then
+    warn "speedtest belum tersedia."
+    hr
+    pause
+    return 0
+  fi
+
+  if ! "${speedtest_bin}" --version 2>/dev/null; then
+    warn "Tidak bisa membaca versi speedtest."
+  fi
+  hr
+  pause
+}
+
+speedtest_menu() {
+  while true; do
+    title
+    echo "6) Speedtest"
+    hr
+    echo "  1) Run Speedtest (Ookla)"
+    echo "  2) Show Speedtest Version"
+    echo "  0) Back (kembali)"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) speedtest_run_now ;;
+      2) speedtest_show_version ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+# -------------------------
 # Security
 # - TLS & Certificate
 # - Fail2ban Protection
@@ -8908,7 +8987,7 @@ security_overview_menu() {
 fail2ban_menu() {
   while true; do
     title
-    echo "6) Security"
+    echo "7) Security"
     hr
     echo "  1) TLS & Certificate"
     echo "  2) Fail2ban Protection"
@@ -8932,7 +9011,7 @@ fail2ban_menu() {
 # -------------------------
 wireproxy_status_menu() {
   title
-  echo "7) Maintenance > Wireproxy (WARP) Status"
+  echo "8) Maintenance > Wireproxy (WARP) Status"
   hr
 
   if ! svc_exists wireproxy; then
@@ -8995,7 +9074,7 @@ wireproxy_status_menu() {
 
 wireproxy_restart_menu() {
   title
-  echo "7) Maintenance > Restart Wireproxy (WARP)"
+  echo "8) Maintenance > Restart Wireproxy (WARP)"
   hr
 
   if ! svc_exists wireproxy; then
@@ -9012,7 +9091,7 @@ wireproxy_restart_menu() {
 
 daemon_status_menu() {
   title
-  echo "7) Maintenance > Daemon Status"
+  echo "8) Maintenance > Daemon Status"
   hr
 
   local daemons=("xray" "nginx" "xray-expired" "xray-quota" "xray-limit-ip" "xray-speed" "wireproxy")
@@ -9085,7 +9164,7 @@ daemon_status_menu() {
 maintenance_menu() {
   while true; do
     title
-    echo "7) Maintenance"
+    echo "8) Maintenance"
     hr
     echo "  1. Restart xray"
     echo "  2. Restart nginx"
@@ -9129,8 +9208,9 @@ main_menu() {
     echo "  3) Quota & Access Control"
     echo "  4) Network Controls"
     echo "  5) Domain Control"
-    echo "  6) Security"
-    echo "  7) Maintenance"
+    echo "  6) Speedtest"
+    echo "  7) Security"
+    echo "  8) Maintenance"
     echo "  0) Exit (kembali)"
     hr
     if ! read -r -p "Pilih: " c; then
@@ -9143,8 +9223,9 @@ main_menu() {
       3) run_action "Quota & Access Control" quota_menu ;;
       4) run_action "Network Controls" network_menu ;;
       5) run_action "Domain Control" domain_control_menu ;;
-      6) run_action "Security" fail2ban_menu ;;
-      7) run_action "Maintenance" maintenance_menu ;;
+      6) run_action "Speedtest" speedtest_menu ;;
+      7) run_action "Security" fail2ban_menu ;;
+      8) run_action "Maintenance" maintenance_menu ;;
       0|kembali|k|back|b) exit 0 ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
