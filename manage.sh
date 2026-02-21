@@ -81,6 +81,16 @@ REPORT_DIR="/var/log/xray-manage"
 WARP_TIER_STATE_KEY="warp_tier_target"
 WARP_PLUS_LICENSE_STATE_KEY="warp_plus_license_key"
 
+# Main Menu header cache (best-effort, supaya render menu tetap cepat)
+MAIN_INFO_CACHE_TTL=300
+MAIN_INFO_CACHE_TS=0
+MAIN_INFO_CACHE_OS="-"
+MAIN_INFO_CACHE_RAM="-"
+MAIN_INFO_CACHE_IP="-"
+MAIN_INFO_CACHE_ISP="-"
+MAIN_INFO_CACHE_COUNTRY="-"
+MAIN_INFO_CACHE_DOMAIN="-"
+
 # Cache metadata quota (proto:username -> "quota_gb|expired|created|ip_enabled|ip_limit")
 declare -Ag QUOTA_FIELDS_CACHE=()
 
@@ -587,6 +597,210 @@ detect_public_ip_ipapi() {
     ip="$(detect_public_ip)"
   fi
   echo "${ip}"
+}
+
+main_info_os_get() {
+  local pretty=""
+  if [[ -r /etc/os-release ]]; then
+    pretty="$(awk -F= '/^PRETTY_NAME=/{print $2; exit}' /etc/os-release 2>/dev/null | sed -E 's/^"//; s/"$//')"
+  fi
+  [[ -n "${pretty}" ]] || pretty="$(uname -sr 2>/dev/null || true)"
+  [[ -n "${pretty}" ]] || pretty="-"
+  echo "${pretty}"
+}
+
+main_info_ram_get() {
+  local kb
+  kb="$(awk '/^MemTotal:[[:space:]]+[0-9]+/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+  if [[ -z "${kb}" || ! "${kb}" =~ ^[0-9]+$ ]]; then
+    echo "-"
+    return 0
+  fi
+  awk -v kb="${kb}" 'BEGIN{
+    gib = kb / 1024 / 1024;
+    if (gib >= 1) {
+      printf "%.2f GiB", gib;
+    } else {
+      printf "%.0f MiB", kb / 1024;
+    }
+  }'
+}
+
+main_info_uptime_get() {
+  local u
+  if have_cmd uptime; then
+    u="$(uptime -p 2>/dev/null | sed -E 's/^up[[:space:]]+//')"
+    [[ -n "${u}" ]] && { echo "${u}"; return 0; }
+  fi
+  u="$(awk '{print int($1)}' /proc/uptime 2>/dev/null || true)"
+  if [[ -n "${u}" && "${u}" =~ ^[0-9]+$ ]]; then
+    local d h m r
+    d=$((u / 86400))
+    r=$((u % 86400))
+    h=$((r / 3600))
+    r=$((r % 3600))
+    m=$((r / 60))
+    if (( d > 0 )); then
+      echo "${d}d ${h}h ${m}m"
+    elif (( h > 0 )); then
+      echo "${h}h ${m}m"
+    else
+      echo "${m}m"
+    fi
+    return 0
+  fi
+  echo "-"
+}
+
+main_info_ip_quiet_get() {
+  local ip=""
+  if have_cmd curl; then
+    ip="$(curl -4fsSL --max-time 4 "https://api.ipify.org" 2>/dev/null || true)"
+  elif have_cmd wget; then
+    ip="$(wget -qO- --timeout=4 "https://api.ipify.org" 2>/dev/null || true)"
+  fi
+  if [[ -z "${ip}" || ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ip="$(detect_public_ip)"
+  fi
+  if [[ "${ip}" == "0.0.0.0" ]]; then
+    ip="-"
+  fi
+  [[ -n "${ip}" ]] || ip="-"
+  echo "${ip}"
+}
+
+main_info_geo_lookup() {
+  # args: ip -> prints: isp|country
+  local ip="$1"
+  local isp="-" country="-"
+  local json
+
+  case "${ip}" in
+    ""|"-"|"0.0.0.0"|"127."*|"10."*|"192.168."*|"172.16."*|"172.17."*|"172.18."*|"172.19."*|"172.2"?.*|"172.30."*|"172.31."*)
+      echo "-|-"
+      return 0
+      ;;
+  esac
+
+  if [[ "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && have_cmd curl && have_cmd jq; then
+    json="$(curl -fsSL --max-time 6 "https://ipwho.is/${ip}" 2>/dev/null || true)"
+    if [[ -n "${json}" ]]; then
+      country="$(echo "${json}" | jq -r 'if .success == true then (.country // "-") else "-" end' 2>/dev/null || true)"
+      isp="$(echo "${json}" | jq -r 'if .success == true then (.connection.isp // .isp // "-") else "-" end' 2>/dev/null || true)"
+    fi
+  fi
+
+  [[ -n "${isp}" && "${isp}" != "null" ]] || isp="-"
+  [[ -n "${country}" && "${country}" != "null" ]] || country="-"
+  echo "${isp}|${country}"
+}
+
+main_info_tls_expired_get() {
+  local days
+  days="$(cert_expiry_days_left)"
+  if [[ -z "${days}" ]]; then
+    echo "-"
+    return 0
+  fi
+  if (( days < 0 )); then
+    echo "Expired"
+  else
+    echo "${days} days"
+  fi
+}
+
+main_info_warp_status_get() {
+  local target
+  if ! svc_exists wireproxy; then
+    echo "Not Installed"
+    return 0
+  fi
+  if ! svc_is_active wireproxy; then
+    echo "Inactive"
+    return 0
+  fi
+  target="$(warp_tier_state_target_get)"
+  case "${target}" in
+    plus) echo "Active (PLUS)" ;;
+    free) echo "Active (FREE)" ;;
+    *) echo "Active" ;;
+  esac
+}
+
+account_count_by_proto() {
+  # args: proto -> prints number of unique usernames from /opt/account/<proto>/*.txt
+  local proto="$1"
+  local dir="${ACCOUNT_ROOT}/${proto}"
+  local f base username
+  declare -A seen=()
+
+  [[ -d "${dir}" ]] || { echo "0"; return 0; }
+  while IFS= read -r -d '' f; do
+    base="$(basename "${f}")"
+    base="${base%.txt}"
+    username="${base%%@*}"
+    [[ -n "${username}" ]] || continue
+    seen["${username}"]=1
+  done < <(find "${dir}" -maxdepth 1 -type f -name '*.txt' -print0 2>/dev/null)
+
+  echo "${#seen[@]}"
+}
+
+main_info_cache_refresh() {
+  local now elapsed ip geo isp country
+  now="$(date +%s 2>/dev/null || echo 0)"
+  elapsed=$(( now - MAIN_INFO_CACHE_TS ))
+  if (( MAIN_INFO_CACHE_TS > 0 && elapsed >= 0 && elapsed < MAIN_INFO_CACHE_TTL )); then
+    return 0
+  fi
+
+  MAIN_INFO_CACHE_OS="$(main_info_os_get)"
+  MAIN_INFO_CACHE_RAM="$(main_info_ram_get)"
+  MAIN_INFO_CACHE_DOMAIN="$(detect_domain)"
+  MAIN_INFO_CACHE_IP="$(main_info_ip_quiet_get)"
+
+  ip="${MAIN_INFO_CACHE_IP}"
+  geo="$(main_info_geo_lookup "${ip}")"
+  isp="${geo%%|*}"
+  country="${geo##*|}"
+  [[ -n "${isp}" ]] || isp="-"
+  [[ -n "${country}" ]] || country="-"
+  MAIN_INFO_CACHE_ISP="${isp}"
+  MAIN_INFO_CACHE_COUNTRY="${country}"
+  MAIN_INFO_CACHE_TS="${now}"
+}
+
+main_menu_info_header_print() {
+  local os ram up ip isp country domain tls warp
+  local vless_count vmess_count trojan_count
+
+  main_info_cache_refresh
+
+  os="${MAIN_INFO_CACHE_OS}"
+  ram="${MAIN_INFO_CACHE_RAM}"
+  up="$(main_info_uptime_get)"
+  ip="${MAIN_INFO_CACHE_IP}"
+  isp="${MAIN_INFO_CACHE_ISP}"
+  country="${MAIN_INFO_CACHE_COUNTRY}"
+  domain="${MAIN_INFO_CACHE_DOMAIN}"
+  tls="$(main_info_tls_expired_get)"
+  warp="$(main_info_warp_status_get)"
+  vless_count="$(account_count_by_proto "vless")"
+  vmess_count="$(account_count_by_proto "vmess")"
+  trojan_count="$(account_count_by_proto "trojan")"
+
+  printf "%-11s : %s\n" "SYSTEM OS" "${os}"
+  printf "%-11s : %s\n" "RAM" "${ram}"
+  printf "%-11s : %s\n" "UPTIME" "${up}"
+  printf "%-11s : %s\n" "IP VPS" "${ip}"
+  printf "%-11s : %s\n" "ISP" "${isp}"
+  printf "%-11s : %s\n" "COUNTRY" "${country}"
+  printf "%-11s : %s\n" "DOMAIN" "${domain}"
+  printf "%-11s : %s\n" "TLS EXPIRED" "${tls}"
+  printf "%-11s : %s\n" "WARP STATUS" "${warp}"
+  hr
+  echo "ACCOUNTS: VLESS=${vless_count} | VMESS=${vmess_count} | TROJAN=${trojan_count}"
+  hr
 }
 
 download_file_or_die() {
@@ -9797,6 +10011,7 @@ maintenance_menu() {
 main_menu() {
   while true; do
     title
+    main_menu_info_header_print
     echo "Main Menu"
     hr
     echo "  1) Status & Diagnostics"
