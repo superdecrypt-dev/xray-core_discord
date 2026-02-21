@@ -33,6 +33,16 @@ ACCOUNT_PROTO_DIRS=("vless" "vmess" "trojan")
 QUOTA_ROOT="/opt/quota"
 QUOTA_PROTO_DIRS=("vless" "vmess" "trojan")
 
+# Speed policy store (fondasi dari setup.sh)
+SPEED_POLICY_ROOT="/opt/speed"
+SPEED_POLICY_PROTO_DIRS=("vless" "vmess" "trojan")
+SPEED_CONFIG_FILE="/etc/xray-speed/config.json"
+SPEED_MARK_MIN=1000
+SPEED_MARK_MAX=59999
+SPEED_OUTBOUND_TAG_PREFIX="speed-mark-"
+SPEED_RULE_MARKER_PREFIX="dummy-speed-user-"
+SPEED_POLICY_LOCK_FILE="/var/lock/xray-speed-policy.lock"
+
 # Direktori kerja untuk operasi aman (atomic write)
 WORK_DIR="/var/lib/xray-manage"
 
@@ -73,6 +83,119 @@ ensure_account_quota_dirs() {
     mkdir -p "${QUOTA_ROOT}/${proto}"
     chmod 700 "${QUOTA_ROOT}/${proto}" || true
   done
+}
+
+ensure_speed_policy_dirs() {
+  local proto
+  mkdir -p "${SPEED_POLICY_ROOT}"
+  chmod 700 "${SPEED_POLICY_ROOT}" || true
+  for proto in "${SPEED_POLICY_PROTO_DIRS[@]}"; do
+    mkdir -p "${SPEED_POLICY_ROOT}/${proto}"
+    chmod 700 "${SPEED_POLICY_ROOT}/${proto}" || true
+  done
+}
+
+speed_policy_lock_prepare() {
+  mkdir -p "$(dirname "${SPEED_POLICY_LOCK_FILE}")" 2>/dev/null || true
+}
+
+speed_policy_has_entries() {
+  local proto
+  for proto in "${SPEED_POLICY_PROTO_DIRS[@]}"; do
+    if compgen -G "${SPEED_POLICY_ROOT}/${proto}/*.json" >/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+speed_policy_artifacts_present_in_xray() {
+  # Cek apakah masih ada artefak speed policy di config Xray walau policy file kosong.
+  # Ini penting untuk skenario "hapus policy terakhir tapi sync gagal".
+  need_python3
+  [[ -f "${XRAY_OUTBOUNDS_CONF}" && -f "${XRAY_ROUTING_CONF}" ]] || return 1
+
+  python3 - <<'PY' \
+    "${XRAY_OUTBOUNDS_CONF}" \
+    "${XRAY_ROUTING_CONF}" \
+    "${SPEED_OUTBOUND_TAG_PREFIX}" \
+    "${SPEED_RULE_MARKER_PREFIX}"
+import json
+import sys
+
+out_src, rt_src, out_prefix, marker_prefix = sys.argv[1:5]
+bal_prefix = f"{out_prefix}bal-"
+
+def load_json(path):
+  with open(path, "r", encoding="utf-8") as f:
+    return json.load(f)
+
+try:
+  out_cfg = load_json(out_src)
+  rt_cfg = load_json(rt_src)
+except Exception:
+  # Konservatif: jika tidak bisa diparse, paksa jalur resync agar kondisi stale tidak terlewat.
+  raise SystemExit(0)
+
+for o in (out_cfg.get("outbounds") or []):
+  if not isinstance(o, dict):
+    continue
+  tag = o.get("tag")
+  if isinstance(tag, str) and tag.startswith(out_prefix):
+    raise SystemExit(0)
+
+routing = rt_cfg.get("routing") or {}
+
+for b in (routing.get("balancers") or []):
+  if not isinstance(b, dict):
+    continue
+  tag = b.get("tag")
+  if isinstance(tag, str) and tag.startswith(bal_prefix):
+    raise SystemExit(0)
+
+for r in (routing.get("rules") or []):
+  if not isinstance(r, dict):
+    continue
+  if r.get("type") != "field":
+    continue
+  ot = r.get("outboundTag")
+  bt = r.get("balancerTag")
+  if isinstance(ot, str) and ot.startswith(out_prefix):
+    raise SystemExit(0)
+  if isinstance(bt, str) and bt.startswith(bal_prefix):
+    raise SystemExit(0)
+  users = r.get("user")
+  if isinstance(users, list):
+    for u in users:
+      if isinstance(u, str) and u.startswith(marker_prefix):
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+speed_policy_resync_after_egress_change() {
+  # Default egress/balancer mempengaruhi jalur dasar speed-mark outbounds.
+  # Wajib sinkron ulang supaya speed user tidak memakai topology lama.
+  # Walau policy kosong, tetap perlu sync bila artefak speed lama masih tertinggal.
+  local need_sync="false"
+  if speed_policy_has_entries; then
+    need_sync="true"
+  elif speed_policy_artifacts_present_in_xray; then
+    need_sync="true"
+  fi
+
+  if [[ "${need_sync}" != "true" ]]; then
+    return 0
+  fi
+
+  if ! speed_policy_sync_xray; then
+    warn "Perubahan egress tersimpan, tetapi sinkronisasi speed policy gagal."
+    return 1
+  fi
+
+  speed_policy_apply_now >/dev/null 2>&1 || true
+  return 0
 }
 
 quota_migrate_dates_to_dateonly() {
@@ -282,6 +405,25 @@ normalize_gb_input() {
     return 0
   fi
   echo ""
+}
+
+normalize_speed_mbit_input() {
+  # Accept "10", "10mbit", "10mbps", "10m" (case-insensitive), return numeric string.
+  local v="${1:-}"
+  v="$(echo "${v}" | tr -d '[:space:]')"
+  v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "${v}" =~ ^([0-9]+([.][0-9]+)?)(mbit|mbps|m)?$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  echo ""
+}
+
+speed_mbit_is_positive() {
+  local n="${1:-}"
+  [[ "${n}" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  awk "BEGIN { exit !(${n} > 0) }"
 }
 
 validate_username() {
@@ -1429,13 +1571,17 @@ with open(lock_file, "w", encoding="utf-8") as lf:
     rules = routing.get("rules")
     if isinstance(rules, list):
       markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user","dummy-warp-user","dummy-direct-user"}
+      speed_marker_prefix = "dummy-speed-user-"
       for r in rules:
         if not isinstance(r, dict):
           continue
         u = r.get("user")
         if not isinstance(u, list):
           continue
-        if not any(m in u for m in markers):
+        managed = any(m in u for m in markers)
+        if not managed:
+          managed = any(isinstance(x, str) and x.startswith(speed_marker_prefix) for x in u)
+        if not managed:
           continue
         r["user"] = [x for x in u if x != email]
       routing["rules"] = rules
@@ -1635,8 +1781,574 @@ for ib in cfg.get('inbounds', []) or []:
 PY
 }
 
+speed_policy_file_path() {
+  # args: proto username
+  local proto="$1"
+  local username="$2"
+  echo "${SPEED_POLICY_ROOT}/${proto}/${username}@${proto}.json"
+}
+
+speed_policy_exists() {
+  # args: proto username
+  local proto="$1"
+  local username="$2"
+  local f
+  f="$(speed_policy_file_path "${proto}" "${username}")"
+  [[ -f "${f}" ]]
+}
+
+speed_policy_remove() {
+  # args: proto username
+  local proto="$1"
+  local username="$2"
+  local f
+  f="$(speed_policy_file_path "${proto}" "${username}")"
+  speed_policy_lock_prepare
+  (
+    flock -x 200
+    if [[ -f "${f}" ]]; then
+      rm -f "${f}" 2>/dev/null || true
+    fi
+  ) 200>"${SPEED_POLICY_LOCK_FILE}"
+}
+
+speed_policy_upsert() {
+  # args: proto username down_mbit up_mbit
+  local proto="$1"
+  local username="$2"
+  local down_mbit="$3"
+  local up_mbit="$4"
+
+  ensure_speed_policy_dirs
+  speed_policy_lock_prepare
+  need_python3
+
+  local email out_file mark
+  email="${username}@${proto}"
+  out_file="$(speed_policy_file_path "${proto}" "${username}")"
+
+  mark="$(
+    (
+      flock -x 200
+      python3 - <<'PY' "${SPEED_POLICY_ROOT}" "${proto}" "${email}" "${down_mbit}" "${up_mbit}" "${out_file}"
+import hashlib
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+root, proto, email, down_raw, up_raw, out_file = sys.argv[1:7]
+
+def to_float(v):
+  try:
+    n = float(v)
+  except Exception:
+    return 0.0
+  if n <= 0:
+    return 0.0
+  return round(n, 3)
+
+down = to_float(down_raw)
+up = to_float(up_raw)
+if down <= 0 or up <= 0:
+  raise SystemExit("speed mbit harus > 0")
+
+MARK_MIN = 1000
+MARK_MAX = 59999
+RANGE = MARK_MAX - MARK_MIN + 1
+
+def valid_mark(v):
+  try:
+    m = int(v)
+  except Exception:
+    return False
+  return MARK_MIN <= m <= MARK_MAX
+
+def load_json(path):
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      return json.load(f)
+  except Exception:
+    return {}
+
+used = set()
+for p1 in ("vless", "vmess", "trojan"):
+  d = os.path.join(root, p1)
+  if not os.path.isdir(d):
+    continue
+  for name in os.listdir(d):
+    if not name.endswith(".json"):
+      continue
+    fp = os.path.join(d, name)
+    if os.path.abspath(fp) == os.path.abspath(out_file):
+      continue
+    data = load_json(fp)
+    m = data.get("mark")
+    if valid_mark(m):
+      used.add(int(m))
+
+existing = load_json(out_file)
+existing_mark = existing.get("mark")
+
+if valid_mark(existing_mark) and int(existing_mark) not in used:
+  mark = int(existing_mark)
+else:
+  seed = int(hashlib.sha256(email.encode("utf-8")).hexdigest()[:8], 16)
+  start = MARK_MIN + (seed % RANGE)
+  mark = None
+  for i in range(RANGE):
+    cand = MARK_MIN + ((start - MARK_MIN + i) % RANGE)
+    if cand not in used:
+      mark = cand
+      break
+  if mark is None:
+    raise SystemExit("mark speed policy habis")
+
+payload = {
+  "enabled": True,
+  "username": email,
+  "protocol": proto,
+  "mark": mark,
+  "down_mbit": down,
+  "up_mbit": up,
+  "updated_at": datetime.now(timezone.utc).isoformat(),
+}
+
+os.makedirs(os.path.dirname(out_file) or ".", exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=os.path.dirname(out_file) or ".")
+try:
+  with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+  os.replace(tmp, out_file)
+finally:
+  try:
+    if os.path.exists(tmp):
+      os.remove(tmp)
+  except Exception:
+    pass
+
+print(mark)
+PY
+    ) 200>"${SPEED_POLICY_LOCK_FILE}"
+  )" || return 1
+
+  [[ -n "${mark:-}" ]] || return 1
+  chmod 600 "${out_file}" 2>/dev/null || true
+  echo "${mark}"
+}
+
+speed_policy_apply_now() {
+  if [[ -x /usr/local/bin/xray-speed && -f "${SPEED_CONFIG_FILE}" ]]; then
+    /usr/local/bin/xray-speed once --config "${SPEED_CONFIG_FILE}" >/dev/null 2>&1 && return 0
+  fi
+  if svc_exists xray-speed; then
+    svc_restart xray-speed >/dev/null 2>&1 || true
+    svc_is_active xray-speed && return 0
+  fi
+  return 1
+}
+
+speed_policy_sync_xray() {
+  need_python3
+  [[ -f "${XRAY_OUTBOUNDS_CONF}" ]] || return 1
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || return 1
+  ensure_path_writable "${XRAY_OUTBOUNDS_CONF}"
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+
+  local backup_out backup_rt tmp_out tmp_rt
+  backup_out="$(xray_backup_config "${XRAY_OUTBOUNDS_CONF}")"
+  backup_rt="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp_out="${WORK_DIR}/20-outbounds.json.tmp"
+  tmp_rt="${WORK_DIR}/30-routing-speed.json.tmp"
+
+  (
+    flock -x 200
+    python3 - <<'PY' \
+      "${SPEED_POLICY_ROOT}" \
+      "${XRAY_OUTBOUNDS_CONF}" \
+      "${XRAY_ROUTING_CONF}" \
+      "${tmp_out}" \
+      "${tmp_rt}" \
+      "${SPEED_OUTBOUND_TAG_PREFIX}" \
+      "${SPEED_RULE_MARKER_PREFIX}" \
+      "${SPEED_MARK_MIN}" \
+      "${SPEED_MARK_MAX}"
+import copy
+import json
+import os
+import re
+import sys
+
+policy_root, out_src, rt_src, out_dst, rt_dst, out_prefix, marker_prefix, mark_min_raw, mark_max_raw = sys.argv[1:10]
+mark_min = int(mark_min_raw)
+mark_max = int(mark_max_raw)
+speed_bal_prefix = f"{out_prefix}bal-"
+
+def load_json(path):
+  with open(path, "r", encoding="utf-8") as f:
+    return json.load(f)
+
+def dump_json(path, obj):
+  with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+
+def boolify(v):
+  if isinstance(v, bool):
+    return v
+  if isinstance(v, (int, float)):
+    return bool(v)
+  s = str(v or "").strip().lower()
+  return s in ("1", "true", "yes", "on", "y")
+
+def to_float(v):
+  try:
+    n = float(v)
+  except Exception:
+    return 0.0
+  if n <= 0:
+    return 0.0
+  return n
+
+def to_mark(v):
+  try:
+    m = int(v)
+  except Exception:
+    return None
+  if m < mark_min or m > mark_max:
+    return None
+  return m
+
+def list_mark_users(root):
+  mark_users = {}
+  for proto in ("vless", "vmess", "trojan"):
+    d = os.path.join(root, proto)
+    if not os.path.isdir(d):
+      continue
+    for name in sorted(os.listdir(d)):
+      if not name.endswith(".json"):
+        continue
+      fp = os.path.join(d, name)
+      try:
+        data = load_json(fp)
+      except Exception:
+        continue
+      if not isinstance(data, dict):
+        continue
+      if not boolify(data.get("enabled", True)):
+        continue
+      mark = to_mark(data.get("mark"))
+      if mark is None:
+        continue
+      down = to_float(data.get("down_mbit"))
+      up = to_float(data.get("up_mbit"))
+      if down <= 0 or up <= 0:
+        continue
+      email = str(data.get("username") or data.get("email") or os.path.splitext(name)[0]).strip()
+      if not email:
+        continue
+      mark_users.setdefault(mark, set()).add(email)
+  return {k: sorted(v) for k, v in sorted(mark_users.items())}
+
+def is_default_rule(r):
+  if not isinstance(r, dict):
+    return False
+  if r.get("type") != "field":
+    return False
+  port = str(r.get("port", "")).strip()
+  if port not in ("1-65535", "0-65535"):
+    return False
+  if r.get("user") or r.get("domain") or r.get("ip") or r.get("protocol"):
+    return False
+  return True
+
+def is_protected_rule(r):
+  if not isinstance(r, dict):
+    return False
+  if r.get("type") != "field":
+    return False
+  ot = r.get("outboundTag")
+  return isinstance(ot, str) and ot in ("api", "blocked")
+
+def norm_tag(v):
+  if not isinstance(v, str):
+    return ""
+  return v.strip()
+
+def sanitize_tag(v):
+  s = norm_tag(v)
+  if not s:
+    return "x"
+  return re.sub(r"[^A-Za-z0-9_.-]", "-", s)
+
+mark_users = list_mark_users(policy_root)
+
+out_cfg = load_json(out_src)
+outbounds = out_cfg.get("outbounds")
+if not isinstance(outbounds, list):
+  raise SystemExit("Invalid outbounds config: outbounds bukan list")
+outbounds_by_tag = {}
+for o in outbounds:
+  if not isinstance(o, dict):
+    continue
+  t = norm_tag(o.get("tag"))
+  if not t:
+    continue
+  outbounds_by_tag[t] = o
+
+rt_cfg = load_json(rt_src)
+routing = rt_cfg.get("routing") or {}
+rules = routing.get("rules")
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing config: routing.rules bukan list")
+balancers = routing.get("balancers")
+if not isinstance(balancers, list):
+  balancers = []
+balancers_by_tag = {}
+for b in balancers:
+  if not isinstance(b, dict):
+    continue
+  t = norm_tag(b.get("tag"))
+  if not t:
+    continue
+  balancers_by_tag[t] = b
+
+default_rule = None
+for r in rules:
+  if is_default_rule(r):
+    default_rule = r
+
+base_mode = "outbound"
+base_selector = []
+base_strategy = {}
+base_balancer_tag = ""
+if isinstance(default_rule, dict):
+  bt = norm_tag(default_rule.get("balancerTag"))
+  ot = norm_tag(default_rule.get("outboundTag"))
+  if bt:
+    base_mode = "balancer"
+    base_balancer_tag = bt
+  elif ot:
+    base_selector = [ot]
+
+if base_mode == "balancer":
+  b0 = balancers_by_tag.get(base_balancer_tag)
+  if isinstance(b0, dict):
+    sel = b0.get("selector")
+    if isinstance(sel, list):
+      for t in sel:
+        t2 = norm_tag(t)
+        if t2:
+          base_selector.append(t2)
+    st = b0.get("strategy")
+    if isinstance(st, dict):
+      base_strategy = copy.deepcopy(st)
+  if not base_selector and isinstance(default_rule, dict):
+    ot = norm_tag(default_rule.get("outboundTag"))
+    if ot:
+      base_mode = "outbound"
+      base_selector = [ot]
+
+if not base_selector:
+  if "direct" in outbounds_by_tag:
+    base_selector = ["direct"]
+  else:
+    for t in outbounds_by_tag.keys():
+      if not t.startswith(out_prefix):
+        base_selector = [t]
+        break
+if not base_selector:
+  raise SystemExit("Outbound dasar untuk speed policy tidak ditemukan")
+
+effective_selector = []
+seen = set()
+for t in base_selector:
+  t2 = norm_tag(t)
+  if not t2:
+    continue
+  if t2 in ("api", "blocked"):
+    continue
+  if t2.startswith(out_prefix):
+    continue
+  if t2 not in outbounds_by_tag:
+    continue
+  if t2 in seen:
+    continue
+  seen.add(t2)
+  effective_selector.append(t2)
+if not effective_selector:
+  # Recovery path untuk konfigurasi legacy/invalid:
+  # jika selector dasar berisi tag speed/internal saja, fallback ke outbound non-speed.
+  if "direct" in outbounds_by_tag:
+    effective_selector = ["direct"]
+  else:
+    for t in outbounds_by_tag.keys():
+      t2 = norm_tag(t)
+      if not t2:
+        continue
+      if t2 in ("api", "blocked"):
+        continue
+      if t2.startswith(out_prefix):
+        continue
+      effective_selector = [t2]
+      break
+if not effective_selector:
+  raise SystemExit("Selector outbound dasar untuk speed policy kosong")
+
+clean_outbounds = []
+for o in outbounds:
+  if isinstance(o, dict):
+    tag = norm_tag(o.get("tag"))
+    if tag and tag.startswith(out_prefix):
+      continue
+  clean_outbounds.append(o)
+
+mark_out_tags = {}
+for mark in sorted(mark_users.keys()):
+  per_mark = {}
+  for base_tag in effective_selector:
+    src = outbounds_by_tag.get(base_tag)
+    if not isinstance(src, dict):
+      continue
+    clone_tag = f"{out_prefix}{mark}-{sanitize_tag(base_tag)}"
+    so = copy.deepcopy(src)
+    so["tag"] = clone_tag
+    ss = so.get("streamSettings")
+    if not isinstance(ss, dict):
+      ss = {}
+    sock = ss.get("sockopt")
+    if not isinstance(sock, dict):
+      sock = {}
+    sock["mark"] = int(mark)
+    ss["sockopt"] = sock
+    so["streamSettings"] = ss
+    clean_outbounds.append(so)
+    per_mark[base_tag] = clone_tag
+  mark_out_tags[mark] = per_mark
+
+out_cfg["outbounds"] = clean_outbounds
+dump_json(out_dst, out_cfg)
+
+clean_balancers = []
+for b in balancers:
+  if isinstance(b, dict):
+    t = norm_tag(b.get("tag"))
+    if t.startswith(speed_bal_prefix):
+      continue
+  clean_balancers.append(b)
+
+speed_balancers = {}
+if base_mode == "balancer":
+  for mark in sorted(mark_users.keys()):
+    sel = []
+    for base_tag in effective_selector:
+      mt = mark_out_tags.get(mark, {}).get(base_tag)
+      if mt:
+        sel.append(mt)
+    if not sel:
+      continue
+    btag = f"{speed_bal_prefix}{mark}"
+    nb = {"tag": btag, "selector": sel}
+    if isinstance(base_strategy, dict) and base_strategy:
+      nb["strategy"] = copy.deepcopy(base_strategy)
+    clean_balancers.append(nb)
+    speed_balancers[mark] = btag
+
+kept_rules = []
+for r in rules:
+  if not isinstance(r, dict):
+    kept_rules.append(r)
+    continue
+  if r.get("type") != "field":
+    kept_rules.append(r)
+    continue
+  users = r.get("user")
+  ot = norm_tag(r.get("outboundTag"))
+  bt = norm_tag(r.get("balancerTag"))
+  has_speed_marker = isinstance(users, list) and any(
+    isinstance(x, str) and x.startswith(marker_prefix) for x in users
+  )
+  if has_speed_marker and (ot.startswith(out_prefix) or bt.startswith(speed_bal_prefix)):
+    continue
+  kept_rules.append(r)
+
+insert_idx = len(kept_rules)
+for i, r in enumerate(kept_rules):
+  if is_protected_rule(r):
+    continue
+  insert_idx = i
+  break
+
+speed_rules = []
+for mark, users in sorted(mark_users.items()):
+  marker = f"{marker_prefix}{mark}"
+  rule = {
+    "type": "field",
+    "user": [marker] + users,
+  }
+  if base_mode == "balancer":
+    btag = speed_balancers.get(mark, "")
+    if not btag:
+      continue
+    rule["balancerTag"] = btag
+  else:
+    first_base = effective_selector[0]
+    ot = mark_out_tags.get(mark, {}).get(first_base, "")
+    if not ot:
+      continue
+    rule["outboundTag"] = ot
+  speed_rules.append(rule)
+
+merged_rules = kept_rules[:insert_idx] + speed_rules + kept_rules[insert_idx:]
+routing["rules"] = merged_rules
+routing["balancers"] = clean_balancers
+rt_cfg["routing"] = routing
+dump_json(rt_dst, rt_cfg)
+PY
+    xray_write_file_atomic "${XRAY_OUTBOUNDS_CONF}" "${tmp_out}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
+      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    return 1
+  }
+
+  svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
+      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    return 1
+  fi
+  return 0
+}
+
+rollback_new_user_after_speed_failure() {
+  # args: proto username
+  local proto="$1"
+  local username="$2"
+  local email="${username}@${proto}"
+
+  warn "Rollback akun ${email} karena setup speed-limit gagal."
+  speed_policy_remove "${proto}" "${username}"
+  speed_policy_sync_xray >/dev/null 2>&1 || true
+  speed_policy_apply_now >/dev/null 2>&1 || true
+  xray_delete_client "${proto}" "${username}" >/dev/null 2>&1 || true
+  delete_account_artifacts "${proto}" "${username}" >/dev/null 2>&1 || true
+}
+
 write_account_artifacts() {
-  # args: protocol username cred quota_bytes days ip_limit_enabled ip_limit_value
+  # args: protocol username cred quota_bytes days ip_limit_enabled ip_limit_value speed_enabled speed_down_mbit speed_up_mbit
   local proto="$1"
   local username="$2"
   local cred="$3"
@@ -1644,6 +2356,9 @@ write_account_artifacts() {
   local days="$5"
   local ip_enabled="$6"
   local ip_limit="$7"
+  local speed_enabled="$8"
+  local speed_down="$9"
+  local speed_up="${10}"
 
   ensure_account_quota_dirs
   need_python3
@@ -1658,16 +2373,29 @@ write_account_artifacts() {
   acc_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
   quota_file="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
 
-  python3 - <<'PY' "${acc_file}" "${quota_file}" "${domain}" "${ip}" "${username}" "${proto}" "${cred}" "${quota_bytes}" "${created}" "${expired}" "${days}" "${ip_enabled}" "${ip_limit}"
+  python3 - <<'PY' "${acc_file}" "${quota_file}" "${domain}" "${ip}" "${username}" "${proto}" "${cred}" "${quota_bytes}" "${created}" "${expired}" "${days}" "${ip_enabled}" "${ip_limit}" "${speed_enabled}" "${speed_down}" "${speed_up}"
 import sys, json, base64, urllib.parse, datetime
-acc_file, quota_file, domain, ip, username, proto, cred, quota_bytes, created_at, expired_at, days, ip_enabled, ip_limit = sys.argv[1:14]
+acc_file, quota_file, domain, ip, username, proto, cred, quota_bytes, created_at, expired_at, days, ip_enabled, ip_limit, speed_enabled, speed_down, speed_up = sys.argv[1:17]
 quota_bytes=int(quota_bytes)
 days=int(float(days)) if str(days).strip() else 0
 ip_enabled = str(ip_enabled).lower() in ("1","true","yes","y","on")
+speed_enabled = str(speed_enabled).lower() in ("1","true","yes","y","on")
 try:
   ip_limit_int=int(ip_limit)
 except Exception:
   ip_limit_int=0
+try:
+  speed_down_mbit=float(speed_down)
+except Exception:
+  speed_down_mbit=0.0
+try:
+  speed_up_mbit=float(speed_up)
+except Exception:
+  speed_up_mbit=0.0
+if not speed_enabled or speed_down_mbit <= 0 or speed_up_mbit <= 0:
+  speed_enabled=False
+  speed_down_mbit=0.0
+  speed_up_mbit=0.0
 
 def fmt_gb(v):
   try:
@@ -1681,6 +2409,18 @@ def fmt_gb(v):
   s=f"{v:.2f}"
   s=s.rstrip("0").rstrip(".")
   return s
+
+def fmt_mbit(v):
+  try:
+    n=float(v)
+  except Exception:
+    return "0"
+  if n <= 0:
+    return "0"
+  if abs(n-round(n)) < 1e-9:
+    return str(int(round(n)))
+  s=f"{n:.2f}"
+  return s.rstrip("0").rstrip(".")
 
 # Public endpoint harus selaras dengan nginx public path (setup.sh).
 PUBLIC_PATHS = {
@@ -1760,6 +2500,10 @@ lines.append(f"Expired     : {days} days")
 lines.append(f"Valid Until : {expired_at}")
 lines.append(f"Created     : {created_at}")
 lines.append(f"IP Limit    : {'ON' if ip_enabled else 'OFF'}" + (f" ({ip_limit_int})" if ip_enabled else ""))
+if speed_enabled:
+  lines.append(f"Speed Limit : ON (DOWN {fmt_mbit(speed_down_mbit)} Mbps | UP {fmt_mbit(speed_up_mbit)} Mbps)")
+else:
+  lines.append("Speed Limit : OFF")
 lines.append("")
 lines.append("Links Import:")
 lines.append(f"  WebSocket   : {links.get('ws','-')}")
@@ -1784,6 +2528,9 @@ meta={
     "quota_exhausted": False,
     "ip_limit_enabled": ip_enabled,
     "ip_limit": ip_limit_int if ip_enabled else 0,
+    "speed_limit_enabled": speed_enabled,
+    "speed_down_mbit": speed_down_mbit if speed_enabled else 0,
+    "speed_up_mbit": speed_up_mbit if speed_enabled else 0,
     "ip_limit_locked": False,
     "lock_reason": "",
     "locked_at": ""
@@ -1829,6 +2576,7 @@ delete_account_artifacts() {
   delete_one_file "${acc_file_legacy}"
   delete_one_file "${quota_file}"
   delete_one_file "${quota_file_legacy}"
+  speed_policy_remove "${proto}" "${username}"
 }
 
 
@@ -1968,6 +2716,40 @@ user_add_menu() {
     fi
   fi
 
+  echo "Limit speed per user? (on/off)"
+  read -r -p "Speed Limit (on/off) (atau kembali): " speed_toggle
+  if is_back_choice "${speed_toggle}"; then
+    return 0
+  fi
+  local speed_enabled="false"
+  local speed_down_mbit="0"
+  local speed_up_mbit="0"
+  if is_yes "${speed_toggle}"; then
+    speed_enabled="true"
+
+    read -r -p "Speed Download Mbps (contoh: 20 atau 20mbit) (atau kembali): " speed_down
+    if is_back_choice "${speed_down}"; then
+      return 0
+    fi
+    speed_down_mbit="$(normalize_speed_mbit_input "${speed_down}")"
+    if [[ -z "${speed_down_mbit}" ]] || ! speed_mbit_is_positive "${speed_down_mbit}"; then
+      warn "Speed download tidak valid. Gunakan angka > 0, contoh: 20 atau 20mbit"
+      pause
+      return 0
+    fi
+
+    read -r -p "Speed Upload Mbps (contoh: 10 atau 10mbit) (atau kembali): " speed_up
+    if is_back_choice "${speed_up}"; then
+      return 0
+    fi
+    speed_up_mbit="$(normalize_speed_mbit_input "${speed_up}")"
+    if [[ -z "${speed_up_mbit}" ]] || ! speed_mbit_is_positive "${speed_up_mbit}"; then
+      warn "Speed upload tidak valid. Gunakan angka > 0, contoh: 10 atau 10mbit"
+      pause
+      return 0
+    fi
+  fi
+
   hr
   echo "Ringkasan:"
   echo "  Username : ${username}"
@@ -1976,6 +2758,11 @@ user_add_menu() {
   echo "  Expired  : ${days} hari"
   echo "  Quota    : ${quota_gb} GB"
   echo "  IP Limit : ${ip_enabled} $( [[ "${ip_enabled}" == "true" ]] && echo "(${ip_limit})" )"
+  if [[ "${speed_enabled}" == "true" ]]; then
+    echo "  Speed    : true (DOWN ${speed_down_mbit} Mbps | UP ${speed_up_mbit} Mbps)"
+  else
+    echo "  Speed    : false"
+  fi
   hr
 
   local cred
@@ -1990,7 +2777,33 @@ PY
   fi
 
   xray_add_client "${proto}" "${username}" "${cred}"
-  write_account_artifacts "${proto}" "${username}" "${cred}" "${quota_bytes}" "${days}" "${ip_enabled}" "${ip_limit}"
+  write_account_artifacts "${proto}" "${username}" "${cred}" "${quota_bytes}" "${days}" "${ip_enabled}" "${ip_limit}" "${speed_enabled}" "${speed_down_mbit}" "${speed_up_mbit}"
+
+  if [[ "${speed_enabled}" == "true" ]]; then
+    local speed_mark="" speed_err=""
+    if ! speed_mark="$(speed_policy_upsert "${proto}" "${username}" "${speed_down_mbit}" "${speed_up_mbit}")"; then
+      speed_err="gagal menyimpan speed policy"
+    elif ! speed_policy_sync_xray; then
+      speed_err="gagal sinkronisasi speed policy ke routing/outbound xray"
+    elif ! speed_policy_apply_now; then
+      speed_err="policy speed tersimpan, tetapi apply runtime gagal (cek service xray-speed)"
+    fi
+
+    if [[ -n "${speed_err}" ]]; then
+      warn "Akun ${username}@${proto} dibatalkan: ${speed_err}."
+      rollback_new_user_after_speed_failure "${proto}" "${username}"
+      pause
+      return 0
+    fi
+
+    log "Speed policy aktif untuk ${username}@${proto} (mark=${speed_mark}, down=${speed_down_mbit}Mbps, up=${speed_up_mbit}Mbps)"
+  else
+    if speed_policy_exists "${proto}" "${username}"; then
+      speed_policy_remove "${proto}" "${username}"
+      speed_policy_sync_xray >/dev/null 2>&1 || true
+    fi
+    speed_policy_apply_now >/dev/null 2>&1 || true
+  fi
 
   title
   echo "Add user sukses ✅"
@@ -2080,11 +2893,23 @@ user_del_menu() {
   fi
 
   hr
+  local speed_sync_ok="true"
+
   xray_delete_client "${proto}" "${username}"
   delete_account_artifacts "${proto}" "${username}"
+  if ! speed_policy_sync_xray; then
+    speed_sync_ok="false"
+    warn "Delete user selesai, tetapi sinkronisasi speed policy gagal (cek log xray / konfigurasi routing)."
+  fi
+  speed_policy_apply_now >/dev/null 2>&1 || true
 
   title
-  echo "Delete user selesai ✅"
+  if [[ "${speed_sync_ok}" == "true" ]]; then
+    echo "Delete user selesai ✅"
+  else
+    echo "Delete user selesai dengan peringatan ⚠"
+    echo "Perubahan akun sudah diterapkan, namun sinkronisasi speed policy gagal."
+  fi
   hr
   pause
 }
@@ -3482,6 +4307,8 @@ PY
     systemctl restart xray || true
     die "xray tidak aktif setelah update routing default. Config di-rollback ke backup: ${backup}"
   fi
+
+  speed_policy_resync_after_egress_change || return 1
 }
 
 xray_routing_balancer_get() {
@@ -3580,6 +4407,8 @@ PY
     systemctl restart xray || true
     die "xray tidak aktif setelah update balancer strategy. Config di-rollback ke backup: ${backup}"
   fi
+
+  speed_policy_resync_after_egress_change || return 1
 }
 
 xray_routing_balancer_set_selector_from_outbounds() {
@@ -3597,9 +4426,9 @@ xray_routing_balancer_set_selector_from_outbounds() {
 
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}"
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${SPEED_OUTBOUND_TAG_PREFIX}"
 import json, sys
-rt_src, ob_src, dst, mode = sys.argv[1:5]
+rt_src, ob_src, dst, mode, speed_out_prefix = sys.argv[1:6]
 with open(rt_src,'r',encoding='utf-8') as f:
   cfg=json.load(f)
 with open(ob_src,'r',encoding='utf-8') as f:
@@ -3633,15 +4462,37 @@ if mode == 'auto':
   tags=list_outbound_tags()
   # Exclude internal/system tags
   deny={"api","blocked"}
+  seen=set()
   for t in tags:
     if t in deny:
       continue
+    if speed_out_prefix and t.startswith(speed_out_prefix):
+      continue
+    if t in seen:
+      continue
+    seen.add(t)
     sel.append(t)
 else:
-  sel=[x.strip() for x in mode.split(",") if x.strip()]
+  deny={"api","blocked"}
+  known=set(list_outbound_tags())
+  seen=set()
+  for x in mode.split(","):
+    t=x.strip()
+    if not t:
+      continue
+    if t in deny:
+      continue
+    if speed_out_prefix and t.startswith(speed_out_prefix):
+      continue
+    if t not in known:
+      continue
+    if t in seen:
+      continue
+    seen.add(t)
+    sel.append(t)
 
 if not sel:
-  raise SystemExit("Selector kosong. Gunakan auto atau isi tag dipisah koma.")
+  raise SystemExit("Selector kosong. Gunakan auto atau isi tag outbound valid non-speed dipisah koma.")
 
 b['selector']=sel
 routing['balancers']=balancers
@@ -3668,6 +4519,8 @@ PY
     systemctl restart xray || true
     die "xray tidak aktif setelah update balancer selector. Config di-rollback ke backup: ${backup}"
   fi
+
+  speed_policy_resync_after_egress_change || return 1
 }
 
 xray_observatory_get() {
