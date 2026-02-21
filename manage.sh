@@ -38,6 +38,12 @@ WORK_DIR="/var/lib/xray-manage"
 mkdir -p "${WORK_DIR}"
 chmod 700 "${WORK_DIR}"
 
+# File lock bersama untuk sinkronisasi write ke routing config dengan daemon Python
+# (xray-quota, limit-ip, user-block). Semua pihak harus acquire lock ini sebelum
+# memodifikasi 30-routing.json untuk menghindari race condition last-write-wins.
+ROUTING_LOCK_FILE="/var/lock/xray-routing.lock"
+mkdir -p "$(dirname "${ROUTING_LOCK_FILE}")" 2>/dev/null || true
+
 # Direktori laporan/export
 REPORT_DIR="/var/log/xray-manage"
 mkdir -p "${REPORT_DIR}"
@@ -59,6 +65,106 @@ ensure_account_quota_dirs() {
     mkdir -p "${QUOTA_ROOT}/${proto}"
     chmod 700 "${QUOTA_ROOT}/${proto}" || true
   done
+}
+
+quota_migrate_dates_to_dateonly() {
+  # Normalisasi created_at/expired_at menjadi YYYY-MM-DD untuk semua metadata quota.
+  # Idempotent: nilai yang sudah date-only tidak diubah.
+  need_python3
+  python3 - <<'PY' "${QUOTA_ROOT}" "${QUOTA_PROTO_DIRS[@]}"
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime
+
+quota_root = sys.argv[1]
+protos = tuple(sys.argv[2:])
+
+DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+def normalize_date(value):
+  if value is None:
+    return None
+  s = str(value).strip()
+  if not s:
+    return None
+  if DATE_ONLY_RE.match(s):
+    return s
+
+  candidates = [s]
+  if s.endswith("Z"):
+    candidates.append(s[:-1] + "+00:00")
+  if len(s) >= 10 and DATE_ONLY_RE.match(s[:10]):
+    candidates.append(s[:10])
+
+  for c in candidates:
+    try:
+      d = datetime.fromisoformat(c).date()
+      return d.strftime("%Y-%m-%d")
+    except Exception:
+      pass
+
+  for fmt in ("%Y-%m-%d %H:%M:%S",):
+    try:
+      d = datetime.strptime(s, fmt).date()
+      return d.strftime("%Y-%m-%d")
+    except Exception:
+      pass
+
+  return None
+
+for proto in protos:
+  d = os.path.join(quota_root, proto)
+  if not os.path.isdir(d):
+    continue
+  for name in os.listdir(d):
+    if not name.endswith(".json"):
+      continue
+    p = os.path.join(d, name)
+    try:
+      with open(p, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+      if not isinstance(meta, dict):
+        continue
+    except Exception:
+      print(f"[manage][WARN] Skip migrasi (JSON invalid): {p}", file=sys.stderr)
+      continue
+
+    changed = False
+    for key in ("created_at", "expired_at"):
+      if key not in meta:
+        continue
+      nd = normalize_date(meta.get(key))
+      if nd is None:
+        print(f"[manage][WARN] Skip field {key} (format tidak dikenali) di: {p}", file=sys.stderr)
+        continue
+      if meta.get(key) != nd:
+        meta[key] = nd
+        changed = True
+
+    if changed:
+      dirn = os.path.dirname(p) or "."
+      fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+      try:
+        with os.fdopen(fd, "w", encoding="utf-8") as wf:
+          json.dump(meta, wf, ensure_ascii=False, indent=2)
+          wf.write("\n")
+          wf.flush()
+          os.fsync(wf.fileno())
+        os.replace(tmp, p)
+        try:
+          os.chmod(p, 0o600)
+        except Exception:
+          pass
+      finally:
+        try:
+          if os.path.exists(tmp):
+            os.remove(tmp)
+        except Exception:
+          pass
+PY
 }
 
 # -------------------------
@@ -425,19 +531,40 @@ account_collect_files() {
   ACCOUNT_FILES=()
   ACCOUNT_FILE_PROTOS=()
 
-  local proto dir f u key
-  declare -A seen=()
+  local proto dir f base u key
+  declare -A pos=()
+  declare -A has_at=()
 
   for proto in "${ACCOUNT_PROTO_DIRS[@]}"; do
     dir="${ACCOUNT_ROOT}/${proto}"
     [[ -d "${dir}" ]] || continue
     while IFS= read -r -d '' f; do
-      u="$(account_parse_username_from_file "${f}" "${proto}")"
+      base="$(basename "${f}")"
+      base="${base%.txt}"
+      if [[ "${base}" == *"@"* ]]; then
+        u="${base%%@*}"
+      else
+        u="${base}"
+      fi
       key="${proto}:${u}"
-      if [[ -n "${seen[${key}]:-}" ]]; then
+
+      # Prefer file "username@proto.txt" over legacy "username.txt" if both exist.
+      if [[ -n "${pos[${key}]:-}" ]]; then
+        if [[ "${base}" == *"@"* && "${has_at[${key}]:-0}" != "1" ]]; then
+          ACCOUNT_FILES[${pos[${key}]}]="${f}"
+          ACCOUNT_FILE_PROTOS[${pos[${key}]}]="${proto}"
+          has_at["${key}"]=1
+        fi
         continue
       fi
-      seen["${key}"]=1
+
+      pos["${key}"]="${#ACCOUNT_FILES[@]}"
+      if [[ "${base}" == *"@"* ]]; then
+        has_at["${key}"]=1
+      else
+        has_at["${key}"]=0
+      fi
+
       ACCOUNT_FILES+=("${f}")
       ACCOUNT_FILE_PROTOS+=("${proto}")
     done < <(find "${dir}" -maxdepth 1 -type f -name '*.txt' -print0 2>/dev/null | sort -z)
@@ -492,14 +619,49 @@ try:
 except Exception:
   print("-|-|-|-|-")
   raise SystemExit(0)
+if not isinstance(d, dict):
+  print("-|-|-|-|-")
+  raise SystemExit(0)
 
-ql=int(d.get("quota_limit") or 0)
-quota_gb=int(round(ql/(1024**3))) if ql else 0
+def to_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s=str(v).strip()
+    if s == "":
+      return default
+    return int(float(s))
+  except Exception:
+    return default
+
+def fmt_gb(v):
+  try:
+    v=float(v)
+  except Exception:
+    return "0"
+  if v <= 0:
+    return "0"
+  if abs(v - round(v)) < 1e-9:
+    return str(int(round(v)))
+  s=f"{v:.2f}"
+  s=s.rstrip("0").rstrip(".")
+  return s
+
+ql=to_int(d.get("quota_limit"), 0)
+# Hormati quota_unit yang ditulis saat create user
+unit=str(d.get("quota_unit") or "binary").strip().lower()
+bpg=1000**3 if unit in ("decimal","gb","1000","gigabyte") else 1024**3
+quota_gb=fmt_gb(ql/bpg) if ql else "0"
 expired=d.get("expired_at") or "-"
 created=d.get("created_at") or "-"
-st=d.get("status") or {}
+st_raw=d.get("status")
+st=st_raw if isinstance(st_raw, dict) else {}
 ip_en=bool(st.get("ip_limit_enabled"))
-ip_lim=int(st.get("ip_limit") or 0)
+ip_lim=to_int(st.get("ip_limit"), 0)
 print(f"{quota_gb}|{expired}|{created}|{str(ip_en).lower()}|{ip_lim}")
 PY
 }
@@ -546,7 +708,10 @@ account_print_table_page() {
       ip_show="ON(${ip_lim})"
     fi
 
-    printf "%-4s %-8s %-18s %-10s %-19s %-7s\n" "$((i + 1))" "${proto}" "${username}" "${quota_gb} GB" "${expired}" "${ip_show}"
+    # BUG-17 fix: display page-relative row number (i - start + 1) so that
+    # page 2 starts at NO=1, not NO=11. This matches user expectation when
+    # entering a row number to select.
+    printf "%-4s %-8s %-18s %-10s %-19s %-7s\n" "$((i - start + 1))" "${proto}" "${username}" "${quota_gb} GB" "${expired}" "${ip_show}"
   done
 
   echo
@@ -606,19 +771,31 @@ account_view_flow() {
     return 0
   fi
 
-  local n f
+  local n f total page pages start end rows idx
   read -r -p "Masukkan NO untuk view (atau kembali): " n
   if is_back_choice "${n}"; then
     return 0
   fi
   [[ "${n}" =~ ^[0-9]+$ ]] || { warn "Input bukan angka"; pause; return 0; }
-  if (( n < 1 || n > ${#ACCOUNT_FILES[@]} )); then
+
+  total="${#ACCOUNT_FILES[@]}"
+  page="${ACCOUNT_PAGE:-0}"
+  pages=$(( (total + ACCOUNT_PAGE_SIZE - 1) / ACCOUNT_PAGE_SIZE ))
+  if (( page < 0 )); then page=0; fi
+  if (( pages > 0 && page >= pages )); then page=$((pages - 1)); fi
+  start=$((page * ACCOUNT_PAGE_SIZE))
+  end=$((start + ACCOUNT_PAGE_SIZE))
+  if (( end > total )); then end="${total}"; fi
+  rows=$((end - start))
+
+  if (( n < 1 || n > rows )); then
     warn "NO di luar range"
     pause
     return 0
   fi
 
-  f="${ACCOUNT_FILES[$((n - 1))]}"
+  idx=$((start + n - 1))
+  f="${ACCOUNT_FILES[$idx]}"
   title
   echo "View: ${f}"
   hr
@@ -649,7 +826,7 @@ account_search_flow() {
     return 0
   fi
 
-  local matches=() proto dir
+  local matches=() proto dir f
   for proto in "${ACCOUNT_PROTO_DIRS[@]}"; do
     dir="${ACCOUNT_ROOT}/${proto}"
     [[ -d "${dir}" ]] || continue
@@ -839,6 +1016,12 @@ sanity_check_now() {
   echo "$(svc_status_line nginx)"
   hr
 
+  echo "Daemon Status:"
+  echo "$(svc_status_line xray-expired)"
+  echo "$(svc_status_line xray-quota)"
+  echo "$(svc_status_line xray-limit-ip)"
+  hr
+
   check_files || true
   hr
   check_nginx_config
@@ -904,6 +1087,31 @@ xray_write_config_atomic() {
   xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "$1"
 }
 
+xray_restart_or_rollback_file() {
+  # args: target_file backup_file context_label
+  local target="$1"
+  local backup="$2"
+  local ctx="${3:-config}"
+  svc_restart xray || true
+  if ! svc_is_active xray; then
+    cp -a "${backup}" "${target}" 2>/dev/null || true
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update ${ctx}. Config di-rollback ke backup: ${backup}"
+  fi
+}
+
+xray_write_routing_locked() {
+  # Wrapper xray_write_file_atomic untuk ROUTING_CONF dengan flock.
+  # Gunakan ini untuk semua write ke 30-routing.json agar sinkron dengan
+  # daemon Python (xray-quota, limit-ip, user-block) yang pakai lock yang sama.
+  # args: tmp_json_path
+  local tmp="$1"
+  (
+    flock -x 200
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}"
+}
+
 
 
 xray_add_client() {
@@ -918,77 +1126,104 @@ xray_add_client() {
   [[ -f "${XRAY_INBOUNDS_CONF}" ]] || die "Xray inbounds conf tidak ditemukan: ${XRAY_INBOUNDS_CONF}"
   ensure_path_writable "${XRAY_INBOUNDS_CONF}"
 
-  local backup tmp
+  local backup out changed
   backup="$(xray_backup_config "${XRAY_INBOUNDS_CONF}")"
-  tmp="${WORK_DIR}/10-inbounds.json.tmp"
+  out="$(python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${ROUTING_LOCK_FILE}" "${proto}" "${email}" "${cred}"
+import json
+import os
+import sys
+import tempfile
+import fcntl
 
-  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${tmp}" "${proto}" "${email}" "${cred}"
-import json, sys, uuid
-src, dst, proto, email, cred = sys.argv[1:6]
+src, lock_file, proto, email, cred = sys.argv[1:6]
 
-with open(src, 'r', encoding='utf-8') as f:
-  cfg=json.load(f)
+def save_json_atomic(path, data):
+  dirn = os.path.dirname(path) or "."
+  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, ensure_ascii=False, indent=2)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    os.replace(tmp, path)
+  finally:
+    try:
+      if os.path.exists(tmp):
+        os.remove(tmp)
+    except Exception:
+      pass
 
-inbounds = cfg.get('inbounds', [])
-if not isinstance(inbounds, list):
-  raise SystemExit("Invalid config: inbounds is not a list")
+os.makedirs(os.path.dirname(lock_file) or "/var/lock", exist_ok=True)
+with open(lock_file, "w", encoding="utf-8") as lf:
+  fcntl.flock(lf, fcntl.LOCK_EX)
+  try:
+    with open(src, "r", encoding="utf-8") as f:
+      cfg = json.load(f)
 
-# Check existing username in matching protocol clients
-def iter_clients_for_protocol(p):
-  for ib in inbounds:
-    if ib.get('protocol') != p:
-      continue
-    st = ib.get('settings') or {}
-    clients = st.get('clients')
-    if isinstance(clients, list):
-      for c in clients:
-        yield c
+    inbounds = cfg.get("inbounds", [])
+    if not isinstance(inbounds, list):
+      raise SystemExit("Invalid config: inbounds is not a list")
 
-for c in iter_clients_for_protocol(proto):
-  if c.get('email') == email:
-    raise SystemExit(f"user sudah ada di config untuk {proto}: {email}")
+    def iter_clients_for_protocol(p):
+      for ib in inbounds:
+        if ib.get("protocol") != p:
+          continue
+        st = ib.get("settings") or {}
+        clients = st.get("clients")
+        if isinstance(clients, list):
+          for c in clients:
+            yield c
 
-# Build client object by protocol
-if proto == 'vless':
-  client = {'id': cred, 'email': email}
-elif proto == 'vmess':
-  client = {'id': cred, 'alterId': 0, 'email': email}
-elif proto == 'trojan':
-  client = {'password': cred, 'email': email}
-else:
-  raise SystemExit("Unsupported protocol: " + proto)
+    for c in iter_clients_for_protocol(proto):
+      if c.get("email") == email:
+        raise SystemExit(f"user sudah ada di config untuk {proto}: {email}")
 
-updated=False
-for ib in inbounds:
-  if ib.get('protocol') != proto:
-    continue
-  st = ib.setdefault('settings', {})
-  clients = st.get('clients')
-  if clients is None:
-    st['clients']=[]
-    clients = st['clients']
-  if not isinstance(clients, list):
-    continue
-  clients.append(client)
-  updated=True
+    if proto == "vless":
+      client = {"id": cred, "email": email}
+    elif proto == "vmess":
+      client = {"id": cred, "alterId": 0, "email": email}
+    elif proto == "trojan":
+      client = {"password": cred, "email": email}
+    else:
+      raise SystemExit("Unsupported protocol: " + proto)
 
-if not updated:
-  raise SystemExit(f"Tidak menemukan inbound protocol {proto} dengan settings.clients")
+    updated = False
+    for ib in inbounds:
+      if ib.get("protocol") != proto:
+        continue
+      st = ib.setdefault("settings", {})
+      clients = st.get("clients")
+      if clients is None:
+        st["clients"] = []
+        clients = st["clients"]
+      if not isinstance(clients, list):
+        continue
+      clients.append(client)
+      updated = True
 
-with open(dst, 'w', encoding='utf-8') as f:
-  json.dump(cfg, f, ensure_ascii=False, indent=2)
-  f.write("\n")
+    if not updated:
+      raise SystemExit(f"Tidak menemukan inbound protocol {proto} dengan settings.clients")
+
+    save_json_atomic(src, cfg)
+    print("changed=1")
+  finally:
+    fcntl.flock(lf, fcntl.LOCK_UN)
 PY
+)" || die "Gagal memproses inbounds untuk add user: ${email}"
 
-  xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
-    die "Gagal menulis config (rollback ke backup: ${backup})"
-  }
+  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+  if [[ "${changed}" != "1" ]]; then
+    return 0
+  fi
 
   # restart xray to apply
   svc_restart xray || true
   if ! svc_is_active xray; then
-    cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     systemctl restart xray || true
     die "xray tidak aktif setelah add user. Config di-rollback ke backup: ${backup}"
   fi
@@ -1007,171 +1242,219 @@ xray_delete_client() {
   ensure_path_writable "${XRAY_INBOUNDS_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  local backup_inb backup_rt tmp_inb tmp_rt
+  local backup_inb backup_rt out changed
   backup_inb="$(xray_backup_config "${XRAY_INBOUNDS_CONF}")"
   backup_rt="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
-  tmp_inb="${WORK_DIR}/10-inbounds.json.tmp"
-  tmp_rt="${WORK_DIR}/30-routing.json.tmp"
+  out="$(python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${XRAY_ROUTING_CONF}" "${ROUTING_LOCK_FILE}" "${proto}" "${email}"
+import json
+import os
+import sys
+import tempfile
+import fcntl
 
-  python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${XRAY_ROUTING_CONF}" "${tmp_inb}" "${tmp_rt}" "${proto}" "${email}"
-import json, os, sys
-inb_src, rt_src, inb_dst, rt_dst, proto, email = sys.argv[1:7]
+inb_src, rt_src, lock_file, proto, email = sys.argv[1:6]
 
-with open(inb_src, 'r', encoding='utf-8') as f:
-  inb_cfg = json.load(f)
-with open(rt_src, 'r', encoding='utf-8') as f:
-  rt_cfg = json.load(f)
+def save_json_atomic(path, data):
+  dirn = os.path.dirname(path) or "."
+  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, ensure_ascii=False, indent=2)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    os.replace(tmp, path)
+  finally:
+    try:
+      if os.path.exists(tmp):
+        os.remove(tmp)
+    except Exception:
+      pass
 
-inbounds = inb_cfg.get('inbounds', [])
-if not isinstance(inbounds, list):
-  raise SystemExit("Invalid inbounds config: inbounds is not a list")
+os.makedirs(os.path.dirname(lock_file) or "/var/lock", exist_ok=True)
+with open(lock_file, "w", encoding="utf-8") as lf:
+  fcntl.flock(lf, fcntl.LOCK_EX)
+  try:
+    with open(inb_src, "r", encoding="utf-8") as f:
+      inb_cfg = json.load(f)
+    with open(rt_src, "r", encoding="utf-8") as f:
+      rt_cfg = json.load(f)
 
-removed = 0
-for ib in inbounds:
-  if ib.get('protocol') != proto:
-    continue
-  st = ib.get('settings') or {}
-  clients = st.get('clients')
-  if not isinstance(clients, list):
-    continue
-  before = len(clients)
-  clients[:] = [c for c in clients if c.get('email') != email]
-  removed += (before - len(clients))
-  st['clients'] = clients
-  ib['settings'] = st
+    inbounds = inb_cfg.get("inbounds", [])
+    if not isinstance(inbounds, list):
+      raise SystemExit("Invalid inbounds config: inbounds is not a list")
 
-if removed == 0:
-  raise SystemExit(f"Tidak menemukan user untuk dihapus: {email} ({proto})")
+    removed = 0
+    for ib in inbounds:
+      if ib.get("protocol") != proto:
+        continue
+      st = ib.get("settings") or {}
+      clients = st.get("clients")
+      if not isinstance(clients, list):
+        continue
+      before = len(clients)
+      clients[:] = [c for c in clients if c.get("email") != email]
+      removed += (before - len(clients))
+      st["clients"] = clients
+      ib["settings"] = st
 
-routing = (rt_cfg.get('routing') or {})
-rules = routing.get('rules')
-if isinstance(rules, list):
-  # Semua marker yang digunakan oleh daemon/manage untuk block/route user.
-  # dummy-warp-user dan dummy-direct-user disertakan agar entry warp/direct override
-  # juga dibersihkan saat user dihapus.
-  markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user","dummy-warp-user","dummy-direct-user"}
-  for r in rules:
-    if not isinstance(r, dict):
-      continue
-    u = r.get('user')
-    if not isinstance(u, list):
-      continue
-    if not any(m in u for m in markers):
-      continue
-    r['user'] = [x for x in u if x != email]
-  routing['rules'] = rules
-  rt_cfg['routing'] = routing
+    if removed == 0:
+      raise SystemExit(f"Tidak menemukan user untuk dihapus: {email} ({proto})")
 
-with open(inb_dst, 'w', encoding='utf-8') as f:
-  json.dump(inb_cfg, f, ensure_ascii=False, indent=2)
-  f.write("\n")
-with open(rt_dst, 'w', encoding='utf-8') as f:
-  json.dump(rt_cfg, f, ensure_ascii=False, indent=2)
-  f.write("\n")
+    routing = (rt_cfg.get("routing") or {})
+    rules = routing.get("rules")
+    if isinstance(rules, list):
+      markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user","dummy-warp-user","dummy-direct-user"}
+      for r in rules:
+        if not isinstance(r, dict):
+          continue
+        u = r.get("user")
+        if not isinstance(u, list):
+          continue
+        if not any(m in u for m in markers):
+          continue
+        r["user"] = [x for x in u if x != email]
+      routing["rules"] = rules
+      rt_cfg["routing"] = routing
+
+    save_json_atomic(inb_src, inb_cfg)
+    save_json_atomic(rt_src, rt_cfg)
+    print("changed=1")
+  finally:
+    fcntl.flock(lf, fcntl.LOCK_UN)
 PY
-
-  xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp_inb}" || {
-    cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-    cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    die "Gagal menulis inbounds conf (rollback ke backup)."
+)" || {
+    (
+      flock -x 200
+      cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
+      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    die "Gagal memproses delete user (rollback ke backup): ${email}"
   }
 
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}" || {
-    cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-    cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    die "Gagal menulis routing conf (rollback ke backup)."
-  }
+  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+  if [[ "${changed}" != "1" ]]; then
+    return 0
+  fi
 
   svc_restart xray || true
   if ! svc_is_active xray; then
-    cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-    cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
+    (
+      flock -x 200
+      cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
+      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     systemctl restart xray || true
     die "xray tidak aktif setelah delete user. Config di-rollback ke backup."
   fi
 }
 
 xray_routing_set_user_in_marker() {
-  # args: marker email on|off
+  # args: marker email on|off [outbound_tag]
+  # outbound_tag defaults to 'blocked' for backward compatibility
   local marker="$1"
   local email="$2"
   local state="$3"
+  # BUG-08 fix: outboundTag is now a parameter instead of hardcoded 'blocked'.
+  # Previously this function silently failed for any marker whose rule used a
+  # different outboundTag (e.g. dummy-warp-user → 'warp', dummy-direct-user → 'direct').
+  local outbound_tag="${4:-blocked}"
 
   need_python3
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  local backup tmp
+  local backup
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
-  tmp="${WORK_DIR}/30-routing.json.tmp"
 
   local out changed
-  out="$(python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${email}" "${state}"
-import json, sys
-src, dst, marker, email, state = sys.argv[1:6]
+  # Load + modify + save dijalankan di lock yang sama agar tidak menimpa perubahan daemon.
+  out="$(python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${ROUTING_LOCK_FILE}" "${marker}" "${email}" "${state}" "${outbound_tag}"
+import json, sys, os, tempfile, fcntl
+src, lock_file, marker, email, state, outbound_tag = sys.argv[1:7]
 
-with open(src, 'r', encoding='utf-8') as f:
-  cfg = json.load(f)
+os.makedirs(os.path.dirname(lock_file) or "/var/lock", exist_ok=True)
+with open(lock_file, "w", encoding="utf-8") as lf:
+  fcntl.flock(lf, fcntl.LOCK_EX)
+  try:
+    with open(src, "r", encoding="utf-8") as f:
+      cfg = json.load(f)
 
-routing = cfg.get('routing') or {}
-rules = routing.get('rules')
-if not isinstance(rules, list):
-  raise SystemExit("Invalid routing config: routing.rules is not a list")
+    routing = cfg.get("routing") or {}
+    rules = routing.get("rules")
+    if not isinstance(rules, list):
+      raise SystemExit("Invalid routing config: routing.rules is not a list")
 
-target = None
-for r in rules:
-  if not isinstance(r, dict):
-    continue
-  if r.get('type') != 'field':
-    continue
-  if r.get('outboundTag') != 'blocked':
-    continue
-  u = r.get('user')
-  if not isinstance(u, list):
-    continue
-  if marker in u:
-    target = r
-    break
+    target = None
+    for r in rules:
+      if not isinstance(r, dict):
+        continue
+      if r.get("type") != "field":
+        continue
+      if r.get("outboundTag") != outbound_tag:
+        continue
+      u = r.get("user")
+      if not isinstance(u, list):
+        continue
+      if marker in u:
+        target = r
+        break
 
-if target is None:
-  raise SystemExit(f"Tidak menemukan routing rule outboundTag=blocked dengan marker: {marker}")
+    if target is None:
+      raise SystemExit(f"Tidak menemukan routing rule outboundTag={outbound_tag} dengan marker: {marker}")
 
-users = target.get('user') or []
-if not isinstance(users, list):
-  users = []
+    users = target.get("user") or []
+    if not isinstance(users, list):
+      users = []
 
-# pastikan marker selalu ada dan di posisi awal
-if marker not in users:
-  users.insert(0, marker)
-else:
-  users = [marker] + [x for x in users if x != marker]
+    if marker not in users:
+      users.insert(0, marker)
+    else:
+      users = [marker] + [x for x in users if x != marker]
 
-changed = False
-if state == 'on':
-  if email not in users:
-    users.append(email)
-    changed = True
-elif state == 'off':
-  new_users = [x for x in users if x != email]
-  if new_users != users:
-    users = new_users
-    changed = True
-else:
-  raise SystemExit("state harus 'on' atau 'off'")
+    changed = False
+    if state == "on":
+      if email not in users:
+        users.append(email)
+        changed = True
+    elif state == "off":
+      new_users = [x for x in users if x != email]
+      if new_users != users:
+        users = new_users
+        changed = True
+    else:
+      raise SystemExit("state harus 'on' atau 'off'")
 
-target['user'] = users
-routing['rules'] = rules
-cfg['routing'] = routing
+    target["user"] = users
+    routing["rules"] = rules
+    cfg["routing"] = routing
 
-if changed:
-  with open(dst, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-    f.write("\n")
+    if changed:
+      dirn = os.path.dirname(src) or "."
+      fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+      try:
+        with os.fdopen(fd, "w", encoding="utf-8") as wf:
+          json.dump(cfg, wf, ensure_ascii=False, indent=2)
+          wf.write("\n")
+          wf.flush()
+          os.fsync(wf.fileno())
+        os.replace(tmp, src)
+      finally:
+        try:
+          if os.path.exists(tmp):
+            os.remove(tmp)
+        except Exception:
+          pass
 
-print("changed=1" if changed else "changed=0")
+    print("changed=1" if changed else "changed=0")
+  finally:
+    fcntl.flock(lf, fcntl.LOCK_UN)
 PY
 )" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal memproses routing: ${XRAY_ROUTING_CONF}"
   }
 
@@ -1180,14 +1463,12 @@ PY
     return 0
   fi
 
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    die "Gagal menulis routing (rollback ke backup: ${backup})"
-  }
-
   svc_restart xray || true
   if ! svc_is_active xray; then
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     systemctl restart xray || true
     die "xray tidak aktif setelah update routing. Routing di-rollback ke backup: ${backup}"
   fi
@@ -1246,20 +1527,16 @@ write_account_artifacts() {
   local domain ip created expired
   domain="$(detect_domain)"
   ip="$(detect_public_ip_ipapi)"
-  created="$(now_ts)"
-  expired="$(date -u -d "+${days} days" '+%Y-%m-%dT00:00:00Z' 2>/dev/null || date -u '+%Y-%m-%dT00:00:00Z')"
+  created="$(date -u '+%Y-%m-%d')"
+  expired="$(date -u -d "+${days} days" '+%Y-%m-%d' 2>/dev/null || date -u '+%Y-%m-%d')"
 
   local acc_file quota_file
   acc_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
   quota_file="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
 
-  # Extract endpoints from xray config
-  local endpoints
-  endpoints="$(xray_extract_endpoints "${proto}" || true)"
-
-  python3 - <<'PY' "${acc_file}" "${quota_file}" "${domain}" "${ip}" "${username}" "${proto}" "${cred}" "${quota_bytes}" "${created}" "${expired}" "${days}" "${ip_enabled}" "${ip_limit}" "${endpoints}"
+  python3 - <<'PY' "${acc_file}" "${quota_file}" "${domain}" "${ip}" "${username}" "${proto}" "${cred}" "${quota_bytes}" "${created}" "${expired}" "${days}" "${ip_enabled}" "${ip_limit}"
 import sys, json, base64, urllib.parse, datetime
-acc_file, quota_file, domain, ip, username, proto, cred, quota_bytes, created_at, expired_at, days, ip_enabled, ip_limit, endpoints = sys.argv[1:15]
+acc_file, quota_file, domain, ip, username, proto, cred, quota_bytes, created_at, expired_at, days, ip_enabled, ip_limit = sys.argv[1:14]
 quota_bytes=int(quota_bytes)
 days=int(float(days)) if str(days).strip() else 0
 ip_enabled = str(ip_enabled).lower() in ("1","true","yes","y","on")
@@ -1268,24 +1545,25 @@ try:
 except Exception:
   ip_limit_int=0
 
-# Parse endpoints lines: network|value
-ep={}
-for line in (endpoints or "").splitlines():
-  if "|" not in line:
-    continue
-  net,val=line.split("|",1)
-  if net and net not in ep:
-    ep[net]=val
+def fmt_gb(v):
+  try:
+    v=float(v)
+  except Exception:
+    return "0"
+  if v <= 0:
+    return "0"
+  if abs(v - round(v)) < 1e-9:
+    return str(int(round(v)))
+  s=f"{v:.2f}"
+  s=s.rstrip("0").rstrip(".")
+  return s
 
-
-# Override endpoints dengan path publik standar
-PUBLIC = {
+# Public endpoint harus selaras dengan nginx public path (setup.sh).
+PUBLIC_PATHS = {
   "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
   "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
   "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
 }
-for k,v in (PUBLIC.get(proto) or {}).items():
-  ep[k]=v
 
 
 def vless_link(net, val):
@@ -1329,10 +1607,9 @@ def vmess_link(net, val):
   return "vmess://" + base64.b64encode(raw.encode()).decode()
 
 links={}
+public_proto = PUBLIC_PATHS.get(proto, {})
 for net in ("ws","httpupgrade","grpc"):
-  if net not in ep:
-    continue
-  val=ep.get(net,"")
+  val = public_proto.get(net, "")
   if proto=="vless":
     links[net]=vless_link(net,val)
   elif proto=="vmess":
@@ -1341,6 +1618,7 @@ for net in ("ws","httpupgrade","grpc"):
     links[net]=trojan_link(net,val)
 
 quota_gb = quota_bytes/(1024**3) if quota_bytes else 0
+quota_gb_disp = fmt_gb(quota_gb)
 
 # Write account txt
 lines=[]
@@ -1353,7 +1631,7 @@ if proto in ("vless","vmess"):
   lines.append(f"UUID        : {cred}")
 else:
   lines.append(f"Password    : {cred}")
-lines.append(f"Quota Limit : {quota_gb:.0f} GB")
+lines.append(f"Quota Limit : {quota_gb_disp} GB")
 lines.append(f"Expired     : {days} days")
 lines.append(f"Valid Until : {expired_at}")
 lines.append(f"Created     : {created_at}")
@@ -1396,6 +1674,22 @@ PY
 }
 
 
+delete_one_file() {
+  local f="$1"
+  [[ -n "${f}" ]] || return 0
+  if [[ -f "${f}" ]]; then
+    if have_cmd lsattr && lsattr -d "${f}" 2>/dev/null | awk '{print $1}' | grep -q 'i'; then
+      warn "File immutable, lepas dulu: chattr -i '${f}'"
+    fi
+    chmod u+w "${f}" 2>/dev/null || true
+    if rm -f "${f}" 2>/dev/null; then
+      log "Hapus: ${f}"
+    else
+      warn "Gagal hapus: ${f} (permission denied/immutable)"
+    fi
+  fi
+}
+
 delete_account_artifacts() {
   # args: protocol username
   local proto="$1"
@@ -1406,22 +1700,6 @@ delete_account_artifacts() {
   acc_file_legacy="${ACCOUNT_ROOT}/${proto}/${username}.txt"
   quota_file="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
   quota_file_legacy="${QUOTA_ROOT}/${proto}/${username}.json"
-
-  delete_one_file() {
-    local f="$1"
-    [[ -n "${f}" ]] || return 0
-    if [[ -f "${f}" ]]; then
-      if have_cmd lsattr && lsattr -d "${f}" 2>/dev/null | awk '{print $1}' | grep -q 'i'; then
-        warn "File immutable, lepas dulu: chattr -i '${f}'"
-      fi
-      chmod u+w "${f}" 2>/dev/null || true
-      if rm -f "${f}" 2>/dev/null; then
-        log "Hapus: ${f}"
-      else
-        warn "Gagal hapus: ${f} (permission denied/immutable)"
-      fi
-    fi
-  }
 
   delete_one_file "${acc_file}"
   delete_one_file "${acc_file_legacy}"
@@ -1536,8 +1814,15 @@ user_add_menu() {
     pause
     return 0
   fi
-  local quota_bytes
-  quota_bytes="$(bytes_from_gb "${quota_gb}")"
+  local quota_gb_num quota_bytes
+  quota_gb_num="$(normalize_gb_input "${quota_gb}")"
+  if [[ -z "${quota_gb_num}" ]]; then
+    warn "Format quota tidak valid. Contoh: 10 atau 10GB"
+    pause
+    return 0
+  fi
+  quota_gb="${quota_gb_num}"
+  quota_bytes="$(bytes_from_gb "${quota_gb_num}")"
 
   echo "Limit IP? (on/off)"
   read -r -p "IP Limit (on/off) (atau kembali): " ip_toggle
@@ -1807,7 +2092,7 @@ PY
         return 0
       fi
       # Hitung dari expiry saat ini, jika sudah lewat hitung dari hari ini
-      new_expiry="$(python3 - <<PY "${current_expiry}" "${add_days}"
+      new_expiry="$(python3 - <<'PY' "${current_expiry}" "${add_days}"
 import sys
 from datetime import datetime, timedelta, timezone
 exp_str = sys.argv[1].strip()
@@ -1821,7 +2106,7 @@ try:
 except Exception:
   base = today
 result = base + timedelta(days=add)
-print(result.strftime('%Y-%m-%dT00:00:00Z'))
+print(result.strftime('%Y-%m-%d'))
 PY
 )"
       ;;
@@ -1831,7 +2116,7 @@ PY
         return 0
       fi
       # Validasi format tanggal
-      if ! python3 - <<PY "${input_date}" 2>/dev/null; then
+      if ! python3 - <<'PY' "${input_date}" 2>/dev/null; then
 import sys
 from datetime import datetime
 s = sys.argv[1].strip()
@@ -1845,12 +2130,12 @@ PY
         pause
         return 0
       fi
-      new_expiry="$(python3 - <<PY "${input_date}"
+      new_expiry="$(python3 - <<'PY' "${input_date}"
 import sys
 from datetime import datetime
 s = sys.argv[1].strip()
 datetime.strptime(s, '%Y-%m-%d')
-print(s + 'T00:00:00Z')
+print(s)
 PY
 )"
       ;;
@@ -1887,8 +2172,77 @@ PY
   quota_atomic_update_file "${quota_file}" "d['expired_at'] = '${new_expiry}'"
 
   # Update account txt (baris Valid Until)
+  # BUG-18 fix: use atomic write via tmp file instead of sed -i (which is not atomic)
   if [[ -f "${acc_file}" ]]; then
-    sed -i "s|^Valid Until :.*|Valid Until : ${new_expiry}|" "${acc_file}" 2>/dev/null || true
+    local acc_tmp
+    acc_tmp="${WORK_DIR}/account_update.$$.tmp"
+    if sed "s|^Valid Until :.*|Valid Until : ${new_expiry}|" "${acc_file}" > "${acc_tmp}" 2>/dev/null; then
+      mv -f "${acc_tmp}" "${acc_file}" || sed -i "s|^Valid Until :.*|Valid Until : ${new_expiry}|" "${acc_file}" 2>/dev/null || true
+    else
+      rm -f "${acc_tmp}" 2>/dev/null || true
+    fi
+    chmod 600 "${acc_file}" 2>/dev/null || true
+  fi
+
+  # Re-add user ke xray inbounds jika sudah dihapus oleh xray-expired daemon
+  # BUG-09 fix: fetch existing_protos immediately before attempting re-add to reduce
+  # the race window with xray-expired daemon (which runs every 2 seconds).
+  # We cannot fully eliminate the race without a distributed lock across bash+python,
+  # but minimising the gap between check and add is the best we can do here.
+  local existing_protos
+  existing_protos="$(xray_username_find_protos "${username}" 2>/dev/null || true)"
+  if ! echo " ${existing_protos} " | grep -q " ${proto} "; then
+    # User tidak ada di inbounds - baca credential dari account txt lalu re-add
+    if [[ -f "${acc_file}" ]]; then
+      local cred=""
+      if [[ "${proto}" == "trojan" ]]; then
+        cred="$(grep -E '^Password\s*:' "${acc_file}" | head -n1 | sed 's/^Password\s*:\s*//' | tr -d '[:space:]')"
+      else
+        cred="$(grep -E '^UUID\s*:' "${acc_file}" | head -n1 | sed 's/^UUID\s*:\s*//' | tr -d '[:space:]')"
+      fi
+      if [[ -n "${cred}" ]]; then
+        xray_add_client "${proto}" "${username}" "${cred}" 2>/dev/null && \
+          log "User ${username}@${proto} di-restore ke inbounds (expired lalu di-extend)." || \
+          warn "Gagal me-restore ${username}@${proto} ke inbounds. Cek credential di: ${acc_file}"
+      else
+        warn "Credential tidak ditemukan di ${acc_file}. Re-add user manual jika diperlukan."
+      fi
+    else
+      warn "Account file tidak ada: ${acc_file}. User mungkin perlu di-add ulang secara manual."
+    fi
+  fi
+
+  # BUG-03 fix: after extending expiry (and possibly restoring user to inbounds),
+  # BUG-FIX #3: xray-expired menghapus user dari SEMUA routing rules (termasuk
+  # dummy-block-user dan dummy-limit-user) saat user expired. Setelah extend expiry,
+  # kita HARUS me-restore routing marker yang masih aktif secara eksplisit.
+  # Komentar lama "those markers remain intact" TIDAK benar — xray-expired sudah
+  # membersihkannya. Fix: restore dummy-block-user jika manual_block=True,
+  # dan dummy-limit-user jika ip_limit_locked=True.
+  local st_quota st_manual st_iplocked
+  st_quota="$(quota_get_status_bool "${quota_file}" "quota_exhausted" 2>/dev/null || echo "false")"
+  st_manual="$(quota_get_status_bool "${quota_file}" "manual_block" 2>/dev/null || echo "false")"
+  st_iplocked="$(quota_get_status_bool "${quota_file}" "ip_limit_locked" 2>/dev/null || echo "false")"
+
+  if [[ "${st_quota}" == "true" ]]; then
+    # Reset quota_exhausted flag and remove from dummy-quota-user routing rule
+    quota_atomic_update_file "${quota_file}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); il=bool(st.get('ip_limit_locked')); st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('ip_limit' if il else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+    xray_routing_set_user_in_marker "dummy-quota-user" "${username}@${proto}" off
+    log "Quota exhausted flag di-reset setelah extend expiry."
+  fi
+
+  # BUG-FIX #3: Restore manual block routing jika masih aktif.
+  # xray-expired sudah menghapus user dari dummy-block-user saat expired,
+  # sehingga perlu di-restore eksplisit agar block tetap berlaku.
+  if [[ "${st_manual}" == "true" ]]; then
+    xray_routing_set_user_in_marker "dummy-block-user" "${username}@${proto}" on
+    log "Manual block routing di-restore setelah extend expiry (manual_block=true)."
+  fi
+
+  # BUG-FIX #3: Restore ip_limit routing jika masih terkunci.
+  if [[ "${st_iplocked}" == "true" ]]; then
+    xray_routing_set_user_in_marker "dummy-limit-user" "${username}@${proto}" on
+    log "IP limit routing di-restore setelah extend expiry (ip_limit_locked=true)."
   fi
 
   title
@@ -1911,7 +2265,7 @@ user_list_menu() {
     account_print_table_page "${ACCOUNT_PAGE}"
     hr
 
-    echo "  view) View file"
+    echo "  view) View file detail"
     echo "  search) Search"
     echo "  next) Next page"
     echo "  previous) Previous page"
@@ -1940,116 +2294,10 @@ user_list_menu() {
         fi
         ;;
       refresh|3) : ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ; return 0 ;;
-    esac
-  done
-}
-
-
-
-
-user_export_links_menu() {
-  ensure_account_quota_dirs
-
-  local page=0
-  while true; do
-    title
-    echo "User Management > Export client links"
-    hr
-
-    account_collect_files
-    ACCOUNT_PAGE="${page}"
-    account_print_table_page "${ACCOUNT_PAGE}"
-    hr
-
-    echo "Masukkan NO untuk export/view, atau ketik next/previous/kembali"
-    read -r -p "Pilih: " c
-
-    if is_back_choice "${c}"; then
-      return 0
-    fi
-
-    case "${c}" in
-      next|n)
-        local pages
-        pages="$(account_total_pages)"
-        if (( pages > 0 && page < pages - 1 )); then page=$((page + 1)); fi
-        continue
-        ;;
-      previous|p|prev)
-        if (( page > 0 )); then page=$((page - 1)); fi
-        continue
-        ;;
-    esac
-
-    if [[ ! "${c}" =~ ^[0-9]+$ ]]; then
-      warn "Input tidak valid"
-      sleep 1
-      continue
-    fi
-
-    local idx
-    idx=$((c - 1))
-    if (( idx < 0 || idx >= ${#ACCOUNT_FILES[@]} )); then
-      warn "NO di luar range"
-      sleep 1
-      continue
-    fi
-
-    local f base ts outdir out
-    f="${ACCOUNT_FILES[$idx]}"
-    base="$(basename "${f}")"
-    ts="$(date +%Y%m%d-%H%M%S)"
-    outdir="${REPORT_DIR}/export-${ts}"
-    out="${outdir}/${base}"
-
-    title
-    echo "Export: ${f}"
-    hr
-    echo "  1) Tampilkan di layar"
-    echo "  2) Simpan salinan ke ${out}"
-    echo "  3) Tampilkan + simpan"
-    echo "  kembali) Back"
-    hr
-    read -r -p "Pilih: " a
-    if is_back_choice "${a}"; then
-      continue
-    fi
-
-    case "${a}" in
-      1)
-        if have_cmd less; then
-          less -R "${f}"
-        else
-          cat "${f}"
-        fi
-        ;;
-      2)
-        mkdir -p "${outdir}"
-        chmod 700 "${outdir}" || true
-        cp -a "${f}" "${out}"
-        chmod 600 "${out}" || true
-        log "Disimpan: ${out}"
-        ;;
-      3)
-        if have_cmd less; then
-          less -R "${f}"
-        else
-          cat "${f}"
-        fi
-        mkdir -p "${outdir}"
-        chmod 700 "${outdir}" || true
-        cp -a "${f}" "${out}"
-        chmod 600 "${out}" || true
-        log "Disimpan: ${out}"
-        ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
-
-    pause
   done
 }
-
 
 user_menu() {
   while true; do
@@ -2060,7 +2308,6 @@ user_menu() {
     echo "  2. Delete user"
     echo "  3. Extend/Set Expiry"
     echo "  4. List users (read-only)"
-    echo "  5. Export client links"
     echo "  0. Back (kembali)"
     hr
     read -r -p "Pilih: " c
@@ -2069,9 +2316,8 @@ user_menu() {
       2) user_del_menu ;;
       3) user_extend_expiry_menu ;;
       4) user_list_menu ;;
-      5) user_export_links_menu ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ; return 0 ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
   done
 }
@@ -2169,7 +2415,7 @@ quota_build_view_indexes() {
     else
       u="${base}"
     fi
-    if echo "${u}" | tr '[:upper:]' '[:lower:]' | grep -qi -- "${q}"; then
+    if echo "${u}" | tr '[:upper:]' '[:lower:]' | grep -qF -- "${q}"; then
       QUOTA_VIEW_INDEXES+=("${i}")
       continue
     fi
@@ -2189,14 +2435,33 @@ try:
 except Exception:
   print("-|0 GB|0 B|-|BROKEN")
   raise SystemExit(0)
+if not isinstance(d, dict):
+  print("-|0 GB|0 B|-|BROKEN")
+  raise SystemExit(0)
+
+def to_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s=str(v).strip()
+    if s == "":
+      return default
+    return int(float(s))
+  except Exception:
+    return default
 
 u=str(d.get("username") or "-")
-ql=int(d.get("quota_limit") or 0)
-qu=int(d.get("quota_used") or 0)
+ql=to_int(d.get("quota_limit"), 0)
+qu=to_int(d.get("quota_used"), 0)
 
-# Limit tampil integer GB (GiB).
-ql_gb=int(round(ql/(1024**3))) if ql else 0
-ql_disp=f"{ql_gb} GB" if ql_gb else "0 GB"
+# Hormati quota_unit yang tersimpan di file (binary=GiB, decimal=GB)
+unit=str(d.get("quota_unit") or "binary").strip().lower()
+bpg=1000**3 if unit in ("decimal","gb","1000","gigabyte") else 1024**3
+ql_disp=f"{fmt_gb(ql/bpg)} GB"
 
 def used_disp(b):
   try:
@@ -2216,10 +2481,11 @@ qu_disp=used_disp(qu)
 exp=str(d.get("expired_at") or "-")
 exp_date=exp[:10] if exp and exp != "-" else "-"
 
-st=d.get("status") or {}
+st_raw=d.get("status")
+st=st_raw if isinstance(st_raw, dict) else {}
 ip_en=bool(st.get("ip_limit_enabled"))
 try:
-  ip_lim=int(st.get("ip_limit") or 0)
+  ip_lim=to_int(st.get("ip_limit"), 0)
 except Exception:
   ip_lim=0
 
@@ -2254,13 +2520,33 @@ try:
 except Exception:
   print("-|0 GB|0 B|-|OFF|0|-")
   raise SystemExit(0)
+if not isinstance(d, dict):
+  print("-|0 GB|0 B|-|OFF|0|-")
+  raise SystemExit(0)
+
+def to_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s=str(v).strip()
+    if s == "":
+      return default
+    return int(float(s))
+  except Exception:
+    return default
 
 u=str(d.get("username") or "-")
-ql=int(d.get("quota_limit") or 0)
-qu=int(d.get("quota_used") or 0)
+ql=to_int(d.get("quota_limit"), 0)
+qu=to_int(d.get("quota_used"), 0)
 
-ql_gb=int(round(ql/(1024**3))) if ql else 0
-ql_disp=f"{ql_gb} GB" if ql_gb else "0 GB"
+# Hormati quota_unit yang tersimpan di file
+unit=str(d.get("quota_unit") or "binary").strip().lower()
+bpg=1000**3 if unit in ("decimal","gb","1000","gigabyte") else 1024**3
+ql_disp=f"{fmt_gb(ql/bpg)} GB"
 
 def used_disp(b):
   try:
@@ -2280,10 +2566,11 @@ qu_disp=used_disp(qu)
 exp=str(d.get("expired_at") or "-")
 exp_date=exp[:10] if exp and exp != "-" else "-"
 
-st=d.get("status") or {}
+st_raw=d.get("status")
+st=st_raw if isinstance(st_raw, dict) else {}
 ip_en=bool(st.get("ip_limit_enabled"))
 try:
-  ip_lim=int(st.get("ip_limit") or 0)
+  ip_lim=to_int(st.get("ip_limit"), 0)
 except Exception:
   ip_lim=0
 ip_lim = ip_lim if ip_en else 0
@@ -2314,7 +2601,12 @@ try:
 except Exception:
   print("false")
   raise SystemExit(0)
+if not isinstance(d, dict):
+  print("false")
+  raise SystemExit(0)
 st = d.get("status") or {}
+if not isinstance(st, dict):
+  st = {}
 v = st.get(k, False)
 print("true" if bool(v) else "false")
 PY
@@ -2333,7 +2625,12 @@ try:
 except Exception:
   print("0")
   raise SystemExit(0)
+if not isinstance(d, dict):
+  print("0")
+  raise SystemExit(0)
 st = d.get("status") or {}
+if not isinstance(st, dict):
+  st = {}
 v = st.get(k, 0)
 try:
   print(int(v))
@@ -2354,7 +2651,12 @@ try:
 except Exception:
   print("")
   raise SystemExit(0)
+if not isinstance(d, dict):
+  print("")
+  raise SystemExit(0)
 st = d.get("status") or {}
+if not isinstance(st, dict):
+  st = {}
 v = st.get("lock_reason") or ""
 print(str(v))
 PY
@@ -2405,7 +2707,8 @@ quota_print_table_page() {
     qu_disp="${fields%%|*}"
     fields="${fields#*|}"
     exp_date="${fields%%|*}"
-    printf "%-4s %-8s %-18s %-10s %-12s %-10s\n" "$((i + 1))" "${proto}" "${username}" "${ql_disp}" "${qu_disp}" "${exp_date}"
+    # BUG-17 fix: display page-relative row number (i - start + 1)
+    printf "%-4s %-8s %-18s %-10s %-12s %-10s\n" "$((i - start + 1))" "${proto}" "${username}" "${ql_disp}" "${qu_disp}" "${exp_date}"
 
   done
 
@@ -2419,24 +2722,28 @@ quota_print_table_page() {
 quota_atomic_update_file() {
   # args: json_file python_code
   # python_code dijalankan untuk memodifikasi dict 'd'
+  # BUG-02 fix: code is passed as sys.argv[2] (NOT via heredoc string interpolation).
+  # Previously the heredoc used <<PY (unquoted) which caused bash to expand ${code}
+  # before passing it to Python — creating a code injection risk if the code string
+  # contained shell metacharacters or triple-quotes.
   local qf="$1"
   local code="$2"
   need_python3
 
-  python3 - <<PY "${qf}"
+  python3 - "${qf}" "${code}" <<'PY'
 import json, sys, os, tempfile
-p=sys.argv[1]
-code = """${code}"""
+p = sys.argv[1]
+code = sys.argv[2]
 
 with open(p, 'r', encoding='utf-8') as f:
-  d=json.load(f)
+  d = json.load(f)
 
-ns={"d": d}
+ns = {"d": d}
 exec(code, ns, ns)
 
-out=json.dumps(ns["d"], ensure_ascii=False, indent=2) + "\n"
+out = json.dumps(ns["d"], ensure_ascii=False, indent=2) + "\n"
 
-dirn=os.path.dirname(p) or "."
+dirn = os.path.dirname(p) or "."
 fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
 try:
   with os.fdopen(fd, "w", encoding="utf-8") as wf:
@@ -2473,6 +2780,9 @@ except Exception:
 exp=d.get("expired_at")
 if isinstance(exp, str) and exp:
   d["expired_at"]=exp[:10]
+crt=d.get("created_at")
+if isinstance(crt, str) and crt:
+  d["created_at"]=crt[:10]
 print(json.dumps(d, ensure_ascii=False, indent=2))
 PY
   else
@@ -2487,6 +2797,9 @@ except Exception:
 exp=d.get("expired_at")
 if isinstance(exp, str) and exp:
   d["expired_at"]=exp[:10]
+crt=d.get("created_at")
+if isinstance(crt, str) and crt:
+  d["created_at"]=crt[:10]
 print(json.dumps(d, ensure_ascii=False, indent=2))
 PY
   fi
@@ -2495,19 +2808,34 @@ PY
 }
 
 quota_edit_flow() {
-  # args: view_no (1-based within filtered list)
+  # args: view_no (1-based pada halaman aktif)
   local view_no="$1"
 
   [[ "${view_no}" =~ ^[0-9]+$ ]] || { warn "Input bukan angka"; pause; return 0; }
-  local total="${#QUOTA_VIEW_INDEXES[@]}"
-  if (( view_no < 1 || view_no > total )); then
+  local total page pages start end rows
+  total="${#QUOTA_VIEW_INDEXES[@]}"
+  if (( total <= 0 )); then
+    warn "Tidak ada data"
+    pause
+    return 0
+  fi
+  page="${QUOTA_PAGE:-0}"
+  pages=$(( (total + QUOTA_PAGE_SIZE - 1) / QUOTA_PAGE_SIZE ))
+  if (( page < 0 )); then page=0; fi
+  if (( pages > 0 && page >= pages )); then page=$((pages - 1)); fi
+  start=$((page * QUOTA_PAGE_SIZE))
+  end=$((start + QUOTA_PAGE_SIZE))
+  if (( end > total )); then end="${total}"; fi
+  rows=$((end - start))
+
+  if (( view_no < 1 || view_no > rows )); then
     warn "NO di luar range"
     pause
     return 0
   fi
 
   local list_pos real_idx qf proto
-  list_pos=$((view_no - 1))
+  list_pos=$((start + view_no - 1))
   real_idx="${QUOTA_VIEW_INDEXES[$list_pos]}"
   qf="${QUOTA_FILES[$real_idx]}"
   proto="${QUOTA_FILE_PROTOS[$real_idx]}"
@@ -2534,6 +2862,13 @@ quota_edit_flow() {
     fields="${fields#*|}"
     ip_lim="${fields%%|*}"
     block_reason="${fields##*|}"
+
+    # Normalisasi username ke format email (username@proto) untuk routing calls.
+    # Metadata lama mungkin hanya menyimpan "alice", bukan "alice@vless".
+    local email_for_routing="${username}"
+    if [[ "${email_for_routing}" != *"@"* ]]; then
+      email_for_routing="${email_for_routing}@${proto}"
+    fi
 
     echo "Username     : ${username}"
     echo "Quota Limit  : ${ql_disp}"
@@ -2580,14 +2915,15 @@ quota_edit_flow() {
           continue
         fi
         qb="$(bytes_from_gb "${gb_num}")"
-        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); d['quota_limit']=int(${qb}); d['quota_used']=0; st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
-        xray_routing_set_user_in_marker "dummy-quota-user" "${username}" off
-        log "Quota limit diubah: ${gb_num} GB (quota_used di-reset: 0)"
+        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); d['quota_limit']=int(${qb}); now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+        log "Quota limit diubah: ${gb_num} GB"
         pause
         ;;
       3)
-        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); d['quota_used']=0; st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
-        xray_routing_set_user_in_marker "dummy-quota-user" "${username}" off
+        # BUG-06 fix: read mb/il BEFORE resetting qe so lock_reason is computed correctly.
+        # BUG-05 fix: correct priority quota > ip_limit.
+        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); il=bool(st.get('ip_limit_locked')); d['quota_used']=0; st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('ip_limit' if il else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+        xray_routing_set_user_in_marker "dummy-quota-user" "${email_for_routing}" off
         log "Quota used di-reset: 0 (status quota dibersihkan)"
         pause
         ;;
@@ -2595,12 +2931,16 @@ quota_edit_flow() {
         local st_mb
         st_mb="$(quota_get_status_bool "${qf}" "manual_block")"
         if [[ "${st_mb}" == "true" ]]; then
-          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['manual_block']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
-          xray_routing_set_user_in_marker "dummy-block-user" "${username}" off
+          # BUG-06 fix: evaluate qe/il BEFORE setting manual_block=False.
+          # Previously mb was read AFTER being set to False, so it was always False
+          # and lock_reason could never be 'manual' in this branch.
+          # BUG-05 fix applied here too: correct priority is quota > ip_limit (not reversed).
+          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); st['manual_block']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('quota' if qe else ('ip_limit' if il else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+          xray_routing_set_user_in_marker "dummy-block-user" "${email_for_routing}" off
           log "Manual block: OFF"
         else
           quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['manual_block']=True; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); st['lock_reason']='manual'; st['locked_at']=st.get('locked_at') or now"
-          xray_routing_set_user_in_marker "dummy-block-user" "${username}" on
+          xray_routing_set_user_in_marker "dummy-block-user" "${email_for_routing}" on
           log "Manual block: ON"
         fi
         pause
@@ -2609,8 +2949,10 @@ quota_edit_flow() {
         local ip_on
         ip_on="$(quota_get_status_bool "${qf}" "ip_limit_enabled")"
         if [[ "${ip_on}" == "true" ]]; then
-          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['ip_limit_enabled']=False; st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
-          xray_routing_set_user_in_marker "dummy-limit-user" "${username}" off
+          # BUG-06 fix: read il BEFORE resetting ip_limit_locked, then determine lock_reason.
+          # BUG-05 fix: correct priority is quota > ip_limit.
+          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); st['ip_limit_enabled']=False; st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+          xray_routing_set_user_in_marker "dummy-limit-user" "${email_for_routing}" off
           svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
           log "IP limit: OFF"
         else
@@ -2636,8 +2978,10 @@ quota_edit_flow() {
         pause
         ;;
       7)
-        /usr/local/bin/limit-ip unlock "${username}" >/dev/null 2>&1 || true
-        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; (st.__setitem__('locked_at', st.get('locked_at') or now) if lr else st.pop('locked_at', None))"
+        /usr/local/bin/limit-ip unlock "${email_for_routing}" >/dev/null 2>&1 || true
+        # BUG-06 fix: read il BEFORE resetting, evaluate lock_reason correctly after.
+        # BUG-05 fix: correct priority quota > ip_limit.
+        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
         svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP lock di-unlock"
         pause
@@ -2939,7 +3283,9 @@ xray_routing_default_rule_set() {
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}"
+  (
+    flock -x 200
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}"
 import json, sys
 src, dst, mode = sys.argv[1:4]
 with open(src,'r',encoding='utf-8') as f:
@@ -2951,12 +3297,18 @@ if not isinstance(rules, list):
   raise SystemExit("Invalid routing config: routing.rules bukan list")
 
 def is_default_rule(r):
-  if not isinstance(r, dict):
-    return False
-  if r.get('type') != 'field':
-    return False
+  # BUG-14 fix: added additional checks to reduce false positives.
+  # A rule with port='1-65535' alone is ambiguous; we also require that
+  # it has no 'user', 'domain', 'ip', or 'protocol' filters (which would
+  # indicate a more specific rule rather than the catch-all default).
+  if not isinstance(r, dict): return False
+  if r.get('type') != 'field': return False
   port=str(r.get('port','')).strip()
-  return port in ('1-65535','0-65535')
+  if port not in ('1-65535','0-65535'): return False
+  # A genuine catch-all default rule should not have specific user/domain/ip/protocol filters
+  if r.get('user') or r.get('domain') or r.get('ip') or r.get('protocol'):
+    return False
+  return True
 
 idx=None
 for i,r in enumerate(rules):
@@ -2987,13 +3339,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update routing (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update routing default. Config di-rollback ke backup: ${backup}"
+  fi
 }
 
 xray_routing_balancer_get() {
@@ -3038,7 +3401,9 @@ xray_routing_balancer_set_strategy() {
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${stype}"
+  (
+    flock -x 200
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${stype}"
 import json, sys
 src, dst, stype = sys.argv[1:4]
 allowed={"random","roundRobin","leastPing","leastLoad"}
@@ -3072,13 +3437,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update balancer (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update balancer strategy. Config di-rollback ke backup: ${backup}"
+  fi
 }
 
 xray_routing_balancer_set_selector_from_outbounds() {
@@ -3094,7 +3470,9 @@ xray_routing_balancer_set_selector_from_outbounds() {
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}"
+  (
+    flock -x 200
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}"
 import json, sys
 rt_src, ob_src, dst, mode = sys.argv[1:5]
 with open(rt_src,'r',encoding='utf-8') as f:
@@ -3147,13 +3525,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update selector balancer (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update balancer selector. Config di-rollback ke backup: ${backup}"
+  fi
 }
 
 xray_observatory_get() {
@@ -3236,7 +3625,7 @@ PY
     die "Gagal update observatory (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory"
 }
 
 
@@ -3288,7 +3677,7 @@ PY
     die "Gagal update probeURL (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory probeURL"
 }
 
 xray_observatory_set_interval() {
@@ -3339,7 +3728,7 @@ PY
     die "Gagal update interval (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory interval"
 }
 
 xray_observatory_toggle_concurrency() {
@@ -3386,7 +3775,7 @@ PY
     die "Gagal toggle concurrency (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory concurrency"
 }
 
 xray_observatory_sync_subject_selector_from_balancer() {
@@ -3437,7 +3826,7 @@ PY
     die "Gagal sync subjectSelector (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory subjectSelector"
 }
 
 xray_routing_rule_toggle_user_outbound() {
@@ -3454,7 +3843,9 @@ xray_routing_rule_toggle_user_outbound() {
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${email}" "${onoff}"
+  (
+    flock -x 200
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${email}" "${onoff}"
 import json, sys
 src, dst, marker, outbound, email, onoff = sys.argv[1:7]
 enable = (onoff.lower() == 'on')
@@ -3467,10 +3858,18 @@ if not isinstance(rules, list):
   raise SystemExit("Invalid routing config: routing.rules bukan list")
 
 def is_default_rule(r):
+  # BUG-14 fix: added additional checks to reduce false positives.
+  # A rule with port='1-65535' alone is ambiguous; we also require that
+  # it has no 'user', 'domain', 'ip', or 'protocol' filters (which would
+  # indicate a more specific rule rather than the catch-all default).
   if not isinstance(r, dict): return False
   if r.get('type') != 'field': return False
   port=str(r.get('port','')).strip()
-  return port in ('1-65535','0-65535')
+  if port not in ('1-65535','0-65535'): return False
+  # A genuine catch-all default rule should not have specific user/domain/ip/protocol filters
+  if r.get('user') or r.get('domain') or r.get('ip') or r.get('protocol'):
+    return False
+  return True
 
 default_idx=None
 for i,r in enumerate(rules):
@@ -3486,7 +3885,12 @@ for i,r in enumerate(rules):
   if r.get('type') != 'field': continue
   if r.get('outboundTag') != outbound: continue
   u=r.get('user') or []
-  if isinstance(u, list) and marker in u:
+  # BUG-13 fix: explicitly require rule has a 'user' field (not 'inboundTag').
+  # Without this check, a per-inbound rule with the same outboundTag could be
+  # mistakenly matched and modified when looking for a per-user rule.
+  if not isinstance(u, list) or 'inboundTag' in r:
+    continue
+  if marker in u:
     rule_idx=i
     break
 
@@ -3520,13 +3924,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update routing (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update routing per-user warp/direct. Config di-rollback ke backup: ${backup}"
+  fi
 }
 
 xray_routing_rule_toggle_inbounds_outbound() {
@@ -3543,7 +3958,9 @@ xray_routing_rule_toggle_inbounds_outbound() {
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${tags_csv}" "${onoff}"
+  (
+    flock -x 200
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${tags_csv}" "${onoff}"
 import json, sys
 src, dst, marker, outbound, tags_csv, onoff = sys.argv[1:7]
 enable = (onoff.lower() == 'on')
@@ -3557,10 +3974,18 @@ if not isinstance(rules, list):
   raise SystemExit("Invalid routing config: routing.rules bukan list")
 
 def is_default_rule(r):
+  # BUG-14 fix: added additional checks to reduce false positives.
+  # A rule with port='1-65535' alone is ambiguous; we also require that
+  # it has no 'user', 'domain', 'ip', or 'protocol' filters (which would
+  # indicate a more specific rule rather than the catch-all default).
   if not isinstance(r, dict): return False
   if r.get('type') != 'field': return False
   port=str(r.get('port','')).strip()
-  return port in ('1-65535','0-65535')
+  if port not in ('1-65535','0-65535'): return False
+  # A genuine catch-all default rule should not have specific user/domain/ip/protocol filters
+  if r.get('user') or r.get('domain') or r.get('ip') or r.get('protocol'):
+    return False
+  return True
 
 default_idx=None
 for i,r in enumerate(rules):
@@ -3609,13 +4034,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update routing (rollback ke backup: ${backup})"
   }
 
   svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update routing per-inbound warp/direct. Config di-rollback ke backup: ${backup}"
+  fi
 }
 
 xray_list_inbounds_tags_by_protocol() {
@@ -4179,10 +4615,18 @@ rt=load_json(routing_path)
 rules=((rt.get('routing') or {}).get('rules') or [])
 
 def is_default_rule(r):
+  # BUG-14 fix: added additional checks to reduce false positives.
+  # A rule with port='1-65535' alone is ambiguous; we also require that
+  # it has no 'user', 'domain', 'ip', or 'protocol' filters (which would
+  # indicate a more specific rule rather than the catch-all default).
   if not isinstance(r, dict): return False
   if r.get('type') != 'field': return False
   port=str(r.get('port','')).strip()
-  return port in ('1-65535','0-65535')
+  if port not in ('1-65535','0-65535'): return False
+  # A genuine catch-all default rule should not have specific user/domain/ip/protocol filters
+  if r.get('user') or r.get('domain') or r.get('ip') or r.get('protocol'):
+    return False
+  return True
 
 def get_default_mode():
   target=None
@@ -4369,7 +4813,9 @@ xray_routing_custom_domain_entry_set_mode() {
   backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}" "${ent}"
+  (
+    flock -x 200
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}" "${ent}"
 import json, sys
 src, dst, mode, ent = sys.argv[1:5]
 mode=mode.lower().strip()
@@ -4384,10 +4830,18 @@ if not isinstance(rules, list):
   raise SystemExit("Invalid routing.rules")
 
 def is_default_rule(r):
+  # BUG-14 fix: added additional checks to reduce false positives.
+  # A rule with port='1-65535' alone is ambiguous; we also require that
+  # it has no 'user', 'domain', 'ip', or 'protocol' filters (which would
+  # indicate a more specific rule rather than the catch-all default).
   if not isinstance(r, dict): return False
   if r.get('type') != 'field': return False
   port=str(r.get('port','')).strip()
-  return port in ('1-65535','0-65535')
+  if port not in ('1-65535','0-65535'): return False
+  # A genuine catch-all default rule should not have specific user/domain/ip/protocol filters
+  if r.get('user') or r.get('domain') or r.get('ip') or r.get('protocol'):
+    return False
+  return True
 
 def find_default_idx():
   idx=None
@@ -4503,12 +4957,23 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-
-  xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+  ) 200>"${ROUTING_LOCK_FILE}" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
     die "Gagal update routing (rollback ke backup: ${backup})"
   }
   svc_restart xray || true
+  if ! svc_is_active xray; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update custom domain mode. Config di-rollback ke backup: ${backup}"
+  fi
 }
 
 warp_global_menu() {
@@ -4625,10 +5090,12 @@ warp_per_user_menu() {
 
     local global_mode default_mode
     global_mode="$(warp_global_mode_get || true)"
-    default_mode="direct"
-    if [[ "${global_mode}" == "warp" ]]; then
-      default_mode="warp"
-    fi
+    case "${global_mode}" in
+      warp) default_mode="warp" ;;
+      direct) default_mode="direct" ;;
+      balancer) default_mode="balancer" ;;
+      *) default_mode="unknown" ;;
+    esac
 
     local total pages start end i row email status
     total="${#all_users[@]}"
@@ -4835,10 +5302,12 @@ warp_per_inbounds_menu() {
 
     local global_mode default_mode
     global_mode="$(warp_global_mode_get || true)"
-    default_mode="direct"
-    if [[ "${global_mode}" == "warp" ]]; then
-      default_mode="warp"
-    fi
+    case "${global_mode}" in
+      warp) default_mode="warp" ;;
+      direct) default_mode="direct" ;;
+      balancer) default_mode="balancer" ;;
+      *) default_mode="unknown" ;;
+    esac
 
     title
     echo "WARP Controls > WARP per-protocol inbounds"
@@ -5192,7 +5661,9 @@ PY
         local backup tmp
         backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
         tmp="${WORK_DIR}/30-routing.json.tmp"
-        python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${ent}"
+        (
+          flock -x 200
+          python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${ent}"
 import json, sys
 src, dst, ent = sys.argv[1:4]
 with open(src,'r',encoding='utf-8') as f:
@@ -5247,11 +5718,23 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-        xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-          cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+        ) 200>"${ROUTING_LOCK_FILE}" || {
+          (
+            flock -x 200
+            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          ) 200>"${ROUTING_LOCK_FILE}"
           die "Gagal update routing (rollback ke backup: ${backup})"
         }
         svc_restart xray || true
+        if ! svc_is_active xray; then
+          (
+            flock -x 200
+            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          ) 200>"${ROUTING_LOCK_FILE}"
+          systemctl restart xray || true
+          die "xray tidak aktif setelah tambah custom domain direct. Config di-rollback ke backup: ${backup}"
+        fi
         log "Entry ditambahkan: ${ent}"
         pause
         ;;
@@ -5270,7 +5753,9 @@ PY
         local backup tmp
         backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
         tmp="${WORK_DIR}/30-routing.json.tmp"
-        python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${no}"
+        (
+          flock -x 200
+          python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${no}"
 import json, sys
 src, dst, no = sys.argv[1:4]
 no=int(no)
@@ -5315,11 +5800,23 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-        xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-          cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+        ) 200>"${ROUTING_LOCK_FILE}" || {
+          (
+            flock -x 200
+            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          ) 200>"${ROUTING_LOCK_FILE}"
           die "Gagal update routing (rollback ke backup: ${backup})"
         }
         svc_restart xray || true
+        if ! svc_is_active xray; then
+          (
+            flock -x 200
+            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+          ) 200>"${ROUTING_LOCK_FILE}"
+          systemctl restart xray || true
+          die "xray tidak aktif setelah hapus custom domain direct. Config di-rollback ke backup: ${backup}"
+        fi
         log "Entry dihapus"
         pause
         ;;
@@ -5454,7 +5951,7 @@ PY
     die "Gagal update Primary DNS (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns primary"
 }
 
 xray_dns_set_secondary() {
@@ -5522,7 +6019,7 @@ PY
     die "Gagal update Secondary DNS (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns secondary"
 }
 
 xray_dns_set_query_strategy() {
@@ -5573,7 +6070,7 @@ PY
     die "Gagal update Query Strategy (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns queryStrategy"
 }
 
 xray_dns_toggle_cache() {
@@ -5620,7 +6117,7 @@ PY
     die "Gagal toggle DNS cache (rollback ke backup: ${backup})"
   }
 
-  svc_restart xray || true
+  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns cache"
 }
 
 dns_show_status() {
@@ -5743,6 +6240,10 @@ dns_addons_menu() {
         if have_cmd nano; then
           nano "${XRAY_DNS_CONF}"
           svc_restart xray || true
+          if ! svc_is_active xray; then
+            warn "xray tidak aktif setelah edit manual DNS config."
+            systemctl status xray --no-pager 2>/dev/null || true
+          fi
           pause
         else
           warn "nano tidak tersedia"
@@ -5788,7 +6289,8 @@ network_diagnostics_menu() {
         fi
         hr
         pause
-        ;;      4)
+        ;;
+      4)
         title
         echo "Service status (wireproxy, xray, nginx)"
         hr
@@ -5818,7 +6320,8 @@ network_menu() {
     echo "  1) Egress Mode & Balancer"
     echo "  2) WARP Controls"
     echo "  3) DNS Settings"
-    echo "  4) Diagnostics"
+    echo "  4) DNS Advanced (Editor)"
+    echo "  5) Diagnostics"
     echo "  0) Back (kembali)"
     hr
     read -r -p "Pilih: " c
@@ -5826,7 +6329,8 @@ network_menu() {
       1) egress_menu_simple ;;
       2) warp_controls_menu ;;
       3) dns_settings_menu ;;
-      4) network_diagnostics_menu ;;
+      4) dns_addons_menu ;;
+      5) network_diagnostics_menu ;;
       0|kembali|k|back|b) break ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
@@ -5864,7 +6368,7 @@ cert_expiry_days_left() {
     return 0
   fi
 
-  local end end_ts now_ts diff
+  local end end_ts cur_ts diff
   end="$(openssl x509 -in "${CERT_FULLCHAIN}" -noout -enddate 2>/dev/null | sed -e 's/^notAfter=//')"
   if [[ -z "${end}" ]]; then
     echo ""
@@ -5872,12 +6376,12 @@ cert_expiry_days_left() {
   fi
 
   end_ts="$(date -d "${end}" +%s 2>/dev/null || true)"
-  now_ts="$(date +%s 2>/dev/null || true)"
-  if [[ -z "${end_ts}" || -z "${now_ts}" ]]; then
+  cur_ts="$(date +%s 2>/dev/null || true)"
+  if [[ -z "${end_ts}" || -z "${cur_ts}" ]]; then
     echo ""
     return 0
   fi
-  diff=$(( (end_ts - now_ts) / 86400 ))
+  diff=$(( (end_ts - cur_ts) / 86400 ))
   echo "${diff}"
 }
 
@@ -6479,6 +6983,150 @@ fail2ban_menu() {
   done
 }
 # -------------------------
+# Wireproxy helpers
+# -------------------------
+wireproxy_status_menu() {
+  title
+  echo "6) Maintenance > Wireproxy (WARP) Status"
+  hr
+
+  if ! svc_exists wireproxy; then
+    warn "wireproxy.service tidak ditemukan. Pastikan setup.sh sudah dijalankan."
+    hr
+    pause
+    return 0
+  fi
+
+  # Status service
+  if svc_is_active wireproxy; then
+    log "wireproxy : active ✅"
+  else
+    warn "wireproxy : INACTIVE ❌"
+  fi
+
+  # PID & uptime (best-effort)
+  local pid uptime_str
+  pid="$(systemctl show -p MainPID --value wireproxy 2>/dev/null || true)"
+  if [[ -n "${pid}" && "${pid}" != "0" ]]; then
+    log "PID       : ${pid}"
+    uptime_str="$(ps -o etime= -p "${pid}" 2>/dev/null | tr -d ' ' || true)"
+    [[ -n "${uptime_str}" ]] && log "Uptime    : ${uptime_str}"
+  fi
+
+  # Cek SOCKS5 port 40000 (wireproxy bind address)
+  hr
+  if have_cmd ss; then
+    if ss -lntp 2>/dev/null | grep -q ':40000'; then
+      log "Port 40000 (SOCKS5) : LISTENING ✅"
+    else
+      warn "Port 40000 (SOCKS5) : NOT listening ❌"
+    fi
+  else
+    warn "ss tidak tersedia, tidak bisa cek port 40000"
+  fi
+
+  # Cek konektivitas WARP via wireproxy (opsional, timeout singkat)
+  hr
+  log "Test koneksi via WARP proxy (curl --socks5 127.0.0.1:40000, timeout 5s)..."
+  if have_cmd curl; then
+    local warp_ip
+    warp_ip="$(curl -fsSL --socks5 127.0.0.1:40000 --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [[ -n "${warp_ip}" ]]; then
+      log "WARP outbound IP : ${warp_ip} ✅"
+    else
+      warn "WARP outbound IP : gagal (wireproxy mungkin tidak terhubung ke WARP)"
+    fi
+  else
+    warn "curl tidak tersedia, skip test koneksi WARP"
+  fi
+
+  hr
+  echo "Konfigurasi : /etc/wireproxy/config.conf"
+  echo "Log service :"
+  journalctl -u wireproxy --no-pager -n 30 2>/dev/null || true
+  hr
+  pause
+}
+
+wireproxy_restart_menu() {
+  title
+  echo "6) Maintenance > Restart Wireproxy (WARP)"
+  hr
+
+  if ! svc_exists wireproxy; then
+    warn "wireproxy.service tidak ditemukan."
+    hr
+    pause
+    return 0
+  fi
+
+  svc_restart wireproxy
+  hr
+  pause
+}
+
+daemon_status_menu() {
+  title
+  echo "6) Maintenance > Daemon Status"
+  hr
+
+  local daemons=("xray" "nginx" "xray-expired" "xray-quota" "xray-limit-ip" "wireproxy")
+  local d
+  for d in "${daemons[@]}"; do
+    if svc_exists "${d}"; then
+      echo "$(svc_status_line "${d}")"
+    else
+      echo "N/A  - ${d} (not installed)"
+    fi
+  done
+  hr
+
+  echo "Log terakhir daemon:"
+  hr
+  for d in "xray-expired" "xray-quota" "xray-limit-ip"; do
+    if svc_exists "${d}"; then
+      echo "--- ${d} (5 baris terakhir) ---"
+      journalctl -u "${d}" --no-pager -n 5 2>/dev/null || true
+    fi
+  done
+  hr
+
+  echo "  1) Restart xray-expired"
+  echo "  2) Restart xray-quota"
+  echo "  3) Restart xray-limit-ip"
+  echo "  4) Restart semua daemon (xray-expired + xray-quota + xray-limit-ip)"
+  echo "  0) Back"
+  hr
+  read -r -p "Pilih: " c
+  case "${c}" in
+    1)
+      if svc_exists xray-expired; then svc_restart xray-expired ; else warn "xray-expired tidak terpasang" ; fi
+      pause
+      ;;
+    2)
+      if svc_exists xray-quota; then svc_restart xray-quota ; else warn "xray-quota tidak terpasang" ; fi
+      pause
+      ;;
+    3)
+      if svc_exists xray-limit-ip; then svc_restart xray-limit-ip ; else warn "xray-limit-ip tidak terpasang" ; fi
+      pause
+      ;;
+    4)
+      for d in xray-expired xray-quota xray-limit-ip; do
+        if svc_exists "${d}"; then
+          svc_restart "${d}"
+        else
+          warn "${d} tidak terpasang, skip"
+        fi
+      done
+      pause
+      ;;
+    0|kembali|k|back|b) return 0 ;;
+    *) warn "Pilihan tidak valid" ; sleep 1 ;;
+  esac
+}
+
+# -------------------------
 # Maintenance
 # -------------------------
 maintenance_menu() {
@@ -6491,6 +7139,9 @@ maintenance_menu() {
     echo "  3. Restart all (xray+nginx)"
     echo "  4. View xray logs (tail)"
     echo "  5. View nginx logs (tail)"
+    echo "  6. Wireproxy (WARP) Status & Monitor"
+    echo "  7. Restart wireproxy (WARP)"
+    echo "  8. Daemon Status & Restart (xray-expired / xray-quota / xray-limit-ip)"
     echo "  0. Back (kembali)"
     hr
     read -r -p "Pilih: " c
@@ -6500,8 +7151,11 @@ maintenance_menu() {
       3) svc_restart xray ; svc_restart nginx ; pause ;;
       4) title ; tail_logs xray 160 ; hr ; pause ;;
       5) title ; tail_logs nginx 160 ; hr ; pause ;;
+      6) wireproxy_status_menu ;;
+      7) wireproxy_restart_menu ;;
+      8) daemon_status_menu ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ; return 0 ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
   done
 }
@@ -6539,6 +7193,7 @@ main_menu() {
 main() {
   need_root
   ensure_account_quota_dirs
+  quota_migrate_dates_to_dateonly
   main_menu
 }
 

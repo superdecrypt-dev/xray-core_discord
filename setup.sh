@@ -23,8 +23,7 @@ NGINX_CONF="/etc/nginx/conf.d/xray.conf"
 CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
 CERT_PRIVKEY="${CERT_DIR}/privkey.pem"
-CLOUDFLARE_API_TOKEN="ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ"
-
+CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ}"
 # Daftar domain induk yang disediakan (private)
 PROVIDED_ROOT_DOMAINS=(
 "vyxara1.web.id"
@@ -39,8 +38,8 @@ PROVIDED_ROOT_DOMAINS=(
 # - dns_cf_wildcard: issue wildcard cert for ACME_ROOT_DOMAIN via dns_cf
 ACME_CERT_MODE="standalone"
 ACME_ROOT_DOMAIN=""
-ACME_WILDCARD_DOMAIN=""
 CF_ZONE_ID=""
+CF_ACCOUNT_ID=""
 VPS_IPV4=""
 CF_PROXIED="false"
 
@@ -70,25 +69,20 @@ check_os() {
   local ver="${VERSION_ID:-}"
   local codename="${VERSION_CODENAME:-}"
 
+  # Gunakan awk (selalu tersedia, tidak butuh python3) agar check_os bisa
+  # dipanggil sebelum install_base_deps menginstall python3.
   if [[ "$id" == "ubuntu" ]]; then
-    python3 - <<PY
-import sys
-v=float("$ver")
-sys.exit(0 if v>=20.04 else 1)
-PY
-    [[ $? -eq 0 ]] || die "Ubuntu minimal 20.04. Versi terdeteksi: $ver"
+    local ok_ver
+    ok_ver="$(awk "BEGIN { print (\"${ver}\" + 0 >= 20.04) ? 1 : 0 }")"
+    [[ "$ok_ver" == "1" ]] || die "Ubuntu minimal 20.04. Versi terdeteksi: $ver"
     ok "OS: Ubuntu $ver ($codename)"
   elif [[ "$id" == "debian" ]]; then
-    python3 - <<PY
-import sys
-v=int("$ver".split('.')[0])
-sys.exit(0 if v>=11 else 1)
-PY
-    [[ $? -eq 0 ]] || die "Debian minimal 11. Versi terdeteksi: $ver"
+    local major="${ver%%.*}"
+    [[ "${major:-0}" -ge 11 ]] 2>/dev/null || die "Debian minimal 11. Versi terdeteksi: $ver"
     ok "OS: Debian $ver ($codename)"
   else
-  die "OS tidak didukung: $id. Hanya Ubuntu >=20.04 atau Debian >=11."
-fi
+    die "OS tidak didukung: $id. Hanya Ubuntu >=20.04 atau Debian >=11."
+  fi
 }
 
 install_base_deps() {
@@ -109,32 +103,6 @@ need_python3() {
   apt-get install -y python3 || die "Gagal memasang python3."
 }
 
-domain_menu() {
-  echo "============================================"
-  echo "   INPUT DOMAIN (wajib untuk TLS) 🌐"
-  echo "============================================"
-  echo "Contoh domain valid: example.com / sub.example.com"
-  echo
-
-  local re='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$'
-
-  while true; do
-    read -r -p "Masukkan domain: " DOMAIN
-    DOMAIN="${DOMAIN,,}"
-
-    [[ -n "${DOMAIN:-}" ]] || {
-      echo "Domain tidak boleh kosong."
-      continue
-    }
-
-    if [[ "$DOMAIN" =~ $re ]]; then
-      ok "Domain valid: $DOMAIN"
-      break
-    else
-    echo "Domain tidak valid. Coba lagi."
-  fi
-done
-}
 
 # =========================
 # Domain menu v2 (Cloudflare)
@@ -157,7 +125,7 @@ get_public_ipv4() {
   local ip=""
   ip="$(curl -4fsSL https://api.ipify.org 2>/dev/null || true)"
   [[ -n "$ip" ]] || ip="$(curl -4fsSL https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)"
-  [[ -n "$ip" ]] || ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}' || true)"
+  [[ -n "$ip" ]] || ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
   [[ -n "$ip" ]] || die "Gagal mendapatkan public IPv4 VPS."
   echo "$ip"
 }
@@ -175,31 +143,31 @@ cf_api() {
   if [[ -n "$data" ]]; then
     resp="$(curl -sS -L -X "$method" "$url"       -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"       -H "Content-Type: application/json"       --connect-timeout 10       --max-time 30       --data "$data"       -w $'\n%{http_code}' || true)"
   else
-  resp="$(curl -sS -L -X "$method" "$url"       -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"       -H "Content-Type: application/json"       --connect-timeout 10       --max-time 30       -w $'\n%{http_code}' || true)"
-fi
+    resp="$(curl -sS -L -X "$method" "$url"       -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"       -H "Content-Type: application/json"       --connect-timeout 10       --max-time 30       -w $'\n%{http_code}' || true)"
+  fi
 
-code="${resp##*$'\n'}"
-body="${resp%$'\n'*}"
+  code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
 
-if [[ -z "${body:-}" ]]; then
-  echo "[Cloudflare] Empty response (HTTP ${code:-?}) for ${endpoint}" >&2
-  return 1
-fi
+  if [[ -z "${body:-}" ]]; then
+    echo "[Cloudflare] Empty response (HTTP ${code:-?}) for ${endpoint}" >&2
+    return 1
+  fi
 
-trimmed="${body#"${body%%[![:space:]]*}"}"
-if [[ ! "$trimmed" =~ ^[\{\[] ]]; then
-  echo "[Cloudflare] Non-JSON response (HTTP ${code:-?}) for ${endpoint}:" >&2
-  echo "$body" >&2
-  return 1
-fi
+  trimmed="${body#"${body%%[![:space:]]*}"}"
+  if [[ ! "$trimmed" =~ ^[\{\[] ]]; then
+    echo "[Cloudflare] Non-JSON response (HTTP ${code:-?}) for ${endpoint}:" >&2
+    echo "$body" >&2
+    return 1
+  fi
 
-if [[ ! "${code:-}" =~ ^2 ]]; then
-  echo "[Cloudflare] HTTP ${code:-?} for ${endpoint}:" >&2
-  echo "$body" >&2
-  return 1
-fi
+  if [[ ! "${code:-}" =~ ^2 ]]; then
+    echo "[Cloudflare] HTTP ${code:-?} for ${endpoint}:" >&2
+    echo "$body" >&2
+    return 1
+  fi
 
-printf '%s' "$body"
+  printf '%s' "$body"
 }
 
 
@@ -230,6 +198,20 @@ cf_get_zone_id_by_name() {
   zid="$(echo "$json" | jq -r '.result[0].id // empty' 2>/dev/null || true)"
   [[ -n "$zid" ]] || return 1
   echo "$zid"
+}
+
+cf_get_account_id_by_zone() {
+  local zone_id="$1"
+  local json aid
+
+  json="$(cf_api GET "/zones/${zone_id}" || true)"
+  if [[ -z "${json:-}" ]]; then
+    return 1
+  fi
+
+  aid="$(echo "$json" | jq -r '.result.account.id // empty' 2>/dev/null || true)"
+  [[ -n "$aid" ]] || return 1
+  echo "$aid"
 }
 cf_get_a_record_by_name() {
   local zone_id="$1"
@@ -322,24 +304,24 @@ cf_prepare_subdomain_a_record() {
         if [[ "$cip" == "$ip" ]]; then
           any_same="1"
         else
-        any_diff="1"
-      fi
-    done
+          any_diff="1"
+        fi
+      done
 
-    if [[ "$any_same" == "1" ]]; then
-      warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
-      if confirm_yn "Lanjut menggunakan domain ini?"; then
-        ok "Lanjut."
-        return 0
+      if [[ "$any_same" == "1" ]]; then
+        warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
+        if confirm_yn "Lanjut menggunakan domain ini?"; then
+          ok "Lanjut."
+          return 0
+        fi
+        die "Dibatalkan oleh user."
       fi
-      die "Dibatalkan oleh user."
-    fi
 
-    if [[ "$any_diff" == "1" ]]; then
-      die "Subdomain $fqdn sudah ada di Cloudflare tetapi IP berbeda (${rec_ips[*]}). Gunakan nama subdomain lain."
+      if [[ "$any_diff" == "1" ]]; then
+        die "Subdomain $fqdn sudah ada di Cloudflare tetapi IP berbeda (${rec_ips[*]}). Gunakan nama subdomain lain."
+      fi
     fi
   fi
-fi
 
 # 2) Sesuai desain sebelumnya: hapus A record lain di zone yang IP-nya sama (kecuali fqdn target)
 local same_ip=()
@@ -393,15 +375,14 @@ domain_menu_v2() {
         ok "Domain valid: $DOMAIN"
         ACME_CERT_MODE="standalone"
         ACME_ROOT_DOMAIN=""
-        ACME_WILDCARD_DOMAIN=""
         CF_ZONE_ID=""
         break
       else
-      echo "Domain tidak valid. Coba lagi."
-    fi
-  done
-  return 0
-fi
+        echo "Domain tidak valid. Coba lagi."
+      fi
+    done
+    return 0
+  fi
 
 # Gunakan domain yang disediakan (Cloudflare)
 VPS_IPV4="$(get_public_ipv4)"
@@ -431,6 +412,9 @@ ok "Domain induk terpilih: $ACME_ROOT_DOMAIN"
 
 CF_ZONE_ID="$(cf_get_zone_id_by_name "$ACME_ROOT_DOMAIN" || true)"
 [[ -n "${CF_ZONE_ID:-}" ]] || die "Zone Cloudflare untuk $ACME_ROOT_DOMAIN tidak ditemukan / token tidak punya akses (butuh Zone:Read + DNS:Edit)."
+CF_ACCOUNT_ID="$(cf_get_account_id_by_zone "$CF_ZONE_ID" || true)"
+[[ -n "${CF_ACCOUNT_ID:-}" ]] || warn "Tidak bisa ambil CF_ACCOUNT_ID dari zone (acme.sh dns_cf mungkin tetap bisa jalan tanpa ini)."
+
 
 echo
 echo "Pilih metode pembuatan subdomain"
@@ -472,7 +456,6 @@ CF_PROXIED="false"
 ok "Cloudflare proxy: OFF (proxied=false)"
 fi
 DOMAIN="${sub}.${ACME_ROOT_DOMAIN}"
-ACME_WILDCARD_DOMAIN="$DOMAIN"
 ok "Domain final: $DOMAIN"
 
 cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"
@@ -503,11 +486,24 @@ is_port_free() {
   ! ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
 }
 
+# Registry port yang sudah dipesan dalam sesi ini, disimpan di temp file.
+# Wajib pakai temp file (bukan array) karena pick_port dipanggil via $(pick_port)
+# yang menjalankan subshell — perubahan array di dalam subshell TIDAK kembali ke
+# parent shell, sehingga array biasa tidak bisa dipakai untuk dedup lintas panggilan.
+# Temp file di filesystem bersifat shared dan persisten lintas subshell.
+_PICK_PORT_REGISTRY="$(mktemp)"
+# Bersihkan temp file saat script selesai (normal maupun error).
+# SC2064: intentional — ekspansi dilakukan saat trap didefinisikan (bukan saat dieksekusi).
+# shellcheck disable=SC2064
+trap "rm -f '${_PICK_PORT_REGISTRY}' 2>/dev/null || true" EXIT
+
 pick_port() {
   local p
   while true; do
     p=$(( 20000 + RANDOM % 40000 ))
-    if is_port_free "$p"; then
+    # Cek: tidak sedang LISTEN dan belum pernah dipesan di sesi ini
+    if is_port_free "$p" && ! grep -qxF "$p" "${_PICK_PORT_REGISTRY}" 2>/dev/null; then
+      echo "$p" >> "${_PICK_PORT_REGISTRY}"
       echo "$p"
       return 0
     fi
@@ -549,11 +545,11 @@ install_nginx_official_repo() {
   elif [[ "$ID" == "debian" ]]; then
     distro="debian"
   else
-  die "OS tidak didukung untuk repo nginx.org"
-fi
+    die "OS tidak didukung untuk repo nginx.org"
+  fi
 
 cat > /etc/apt/sources.list.d/nginx.list <<EOF
-deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${distro}/ ${codename} nginx
+deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/mainline/${distro}/ ${codename} nginx
 EOF
 
 cat > /etc/apt/preferences.d/99nginx <<'EOF'
@@ -587,6 +583,8 @@ install_acme_and_issue_cert() {
     ok "Issue sertifikat wildcard untuk ${DOMAIN} via acme.sh (dns_cf)..."
 
     export CF_Token="$CLOUDFLARE_API_TOKEN"
+    [[ -n "${CF_ACCOUNT_ID:-}" ]] && export CF_Account_ID="$CF_ACCOUNT_ID"
+    [[ -n "${CF_ZONE_ID:-}" ]] && export CF_Zone_ID="$CF_ZONE_ID"
 
     /root/.acme.sh/acme.sh --issue --force --dns dns_cf \
     -d "$DOMAIN" -d "*.$DOMAIN" \
@@ -597,21 +595,21 @@ install_acme_and_issue_cert() {
     --fullchain-file "$CERT_FULLCHAIN" \
     --reloadcmd "systemctl restart nginx || true" >/dev/null
   else
-  ok "Issue sertifikat untuk $DOMAIN via acme.sh (standalone port 80)..."
-  /root/.acme.sh/acme.sh --issue --force --standalone -d "$DOMAIN" --httpport 80 \
-  || die "Gagal issue sertifikat (pastikan port 80 terbuka & DNS domain mengarah ke VPS)."
+    ok "Issue sertifikat untuk $DOMAIN via acme.sh (standalone port 80)..."
+    /root/.acme.sh/acme.sh --issue --force --standalone -d "$DOMAIN" --httpport 80 \
+    || die "Gagal issue sertifikat (pastikan port 80 terbuka & DNS domain mengarah ke VPS)."
 
-  /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
-  --key-file "$CERT_PRIVKEY" \
-  --fullchain-file "$CERT_FULLCHAIN" \
-  --reloadcmd "systemctl restart nginx || true" >/dev/null
-fi
+    /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+    --key-file "$CERT_PRIVKEY" \
+    --fullchain-file "$CERT_FULLCHAIN" \
+    --reloadcmd "systemctl restart nginx || true" >/dev/null
+  fi
 
-chmod 600 "$CERT_PRIVKEY" "$CERT_FULLCHAIN"
+  chmod 600 "$CERT_PRIVKEY" "$CERT_FULLCHAIN"
 
-ok "Sertifikat tersimpan:"
-ok "  - $CERT_FULLCHAIN"
-ok "  - $CERT_PRIVKEY"
+  ok "Sertifikat tersimpan:"
+  ok "  - $CERT_FULLCHAIN"
+  ok "  - $CERT_PRIVKEY"
 }
 
 install_xray() {
@@ -737,6 +735,13 @@ write_xray_config() {
           "dummy-warp-inbounds"
         ],
         "outboundTag": "warp"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "dummy-direct-inbounds"
+        ],
+        "outboundTag": "direct"
       },
       {
         "type": "field",
@@ -1064,10 +1069,6 @@ write_xray_config() {
       "tag": "direct"
     },
     {
-      "protocol": "freedom",
-      "tag": "api"
-    },
-    {
       "protocol": "blackhole",
       "tag": "blocked"
     },
@@ -1106,16 +1107,17 @@ EOF
   chmod 640 /var/log/xray/access.log /var/log/xray/error.log
 
 
-  # Validasi config sebelum restart service (hindari exit "diam-diam")
+  # Validasi config sebelum dipakai (hindari exit "diam-diam").
   local test_log="/tmp/xray-config-test.log"
   if ! xray run -test -config "$XRAY_CONFIG" >"$test_log" 2>&1; then
     tail -n 200 "$test_log" >&2 || true
     die "Xray config test gagal. Lihat: $test_log"
   fi
 
-  systemctl enable xray --now || { systemctl status xray --no-pager >&2 || true; die "Gagal enable/start xray"; }
-  systemctl restart xray || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
-  ok "Config Xray dibuat & service direstart."
+  # Tidak perlu enable/restart xray di sini.
+  # configure_xray_service_confdir (dipanggil setelah write_xray_modular_configs)
+  # akan meng-install unit file yang benar (-confdir) dan merestart xray satu kali.
+  ok "Config Xray (monolitik) dibuat & divalidasi. Service akan dimulai setelah dipecah ke conf.d."
   declare -gx XR_UUID="$UUID"
   declare -gx XR_TROJAN_PASS="$TROJAN_PASS"
   declare -gx XR_API_PORT="$P_API"
@@ -1156,24 +1158,6 @@ with open(src, "r", encoding="utf-8") as f:
   cfg = json.load(f)
 
 routing = cfg.get("routing") or {}
-balancers = routing.get("balancers")
-if not isinstance(balancers, list):
-  balancers = []
-# Add default balancer if missing (do not overwrite existing)
-if not any(isinstance(b, dict) and b.get("tag") == "egress-balance" for b in balancers):
-  balancers.append({
-    "tag": "egress-balance",
-    "selector": ["direct", "warp"],
-    "strategy": {"type": "random"}
-  })
-routing["balancers"] = balancers
-
-observatory = {
-  "subjectSelector": ["direct", "warp"],
-  "probeURL": "https://www.google.com/generate_204",
-  "probeInterval": "10m",
-  "enableConcurrency": True
-}
 
 parts = [
   ("00-log.json", {"log": cfg.get("log") or {}}),
@@ -1184,7 +1168,9 @@ parts = [
   ("30-routing.json", {"routing": routing}),
   ("40-policy.json", {"policy": cfg.get("policy") or {}}),
   ("50-stats.json", {"stats": cfg.get("stats") or {}}),
-  ("60-observatory.json", {"observatory": observatory}),
+  # 60-observatory.json dibutuhkan manage.sh (XRAY_OBSERVATORY_CONF).
+  # Dibuat kosong dulu; manage.sh akan mengisinya saat fitur observatory diaktifkan.
+  ("60-observatory.json", {"observatory": cfg.get("observatory") or {}}),
 ]
 
 os.makedirs(outdir, exist_ok=True)
@@ -1198,7 +1184,7 @@ for name, obj in parts:
   os.replace(tmp, path)
 PY
 
-  chmod 600 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
+  chmod 640 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true
   ok "Konfigurasi modular siap:"
   ok "  - ${XRAY_CONFDIR}/00-log.json"
   ok "  - ${XRAY_CONFDIR}/01-api.json"
@@ -1211,93 +1197,69 @@ PY
   ok "  - ${XRAY_CONFDIR}/60-observatory.json"
 }
 
+ensure_xray_service_user() {
+  # Dedicated non-root service account for xray runtime.
+  getent group xray >/dev/null 2>&1 || groupadd --system xray
+  if ! id -u xray >/dev/null 2>&1; then
+    local nologin_bin
+    nologin_bin="$(command -v nologin 2>/dev/null || true)"
+    [[ -n "${nologin_bin:-}" ]] || nologin_bin="/usr/sbin/nologin"
+    useradd --system --gid xray --home-dir /var/lib/xray --create-home --shell "${nologin_bin}" xray
+  fi
+}
+
 configure_xray_service_confdir() {
-  ok "Mengatur xray.service agar memakai -confdir ..."
+  ok "Mengatur xray.service agar memakai -confdir (systemd drop-in) ..."
 
-  # Wajib bersih dari drop-in agar tidak ada ExecStart/User yang menimpa.
-  if [[ -d /etc/systemd/system/xray.service.d ]]; then
-    rm -rf /etc/systemd/system/xray.service.d/* 2>/dev/null || true
-    rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
-  fi
-  if [[ -d /etc/systemd/system/xray@.service.d ]]; then
-    rm -rf /etc/systemd/system/xray@.service.d/* 2>/dev/null || true
-    rmdir /etc/systemd/system/xray@.service.d 2>/dev/null || true
-  fi
-
-  local xray_bin unit_dst frag
+  local xray_bin
   xray_bin="$(command -v xray || true)"
-  [[ -n "${xray_bin}" ]] || xray_bin="/usr/local/bin/xray"
+  [[ -n "${xray_bin:-}" ]] || xray_bin="/usr/local/bin/xray"
+  ensure_xray_service_user
 
-  unit_dst="/etc/systemd/system/xray.service"
+  # Hilangkan warning systemd "Special user nobody configured" dari unit utama.
+  local frag
   frag="$(systemctl show -p FragmentPath --value xray 2>/dev/null || true)"
-  if [[ -z "${frag:-}" || "${frag:-}" == "n/a" ]]; then
-    if [[ -f /lib/systemd/system/xray.service ]]; then
-      frag="/lib/systemd/system/xray.service"
-    elif [[ -f /usr/lib/systemd/system/xray.service ]]; then
-      frag="/usr/lib/systemd/system/xray.service"
-    fi
+  if [[ -n "${frag:-}" && -f "${frag}" ]]; then
+    sed -i 's/^User=nobody$/User=xray/' "${frag}" 2>/dev/null || true
   fi
 
-  # Jika unit asli berada di /lib atau /usr/lib, copy ke /etc agar bisa kita modifikasi.
-  if [[ ! -f "${unit_dst}" && -f "${frag:-}" ]]; then
-    cp -f "${frag}" "${unit_dst}"
-  fi
-  [[ -f "${unit_dst}" ]] || die "Tidak menemukan unit file xray.service untuk diubah."
+  # Bersihkan drop-in yang mungkin konflik
+  mkdir -p /etc/systemd/system/xray.service.d
+  rm -f /etc/systemd/system/xray.service.d/*.conf 2>/dev/null || true
 
-  # Bersihkan ExecStart / ExecStartPre agar tidak ada duplikasi.
-  sed -i -E '/^[[:space:]]*ExecStart=/d; /^[[:space:]]*ExecStartPre=/d' "${unit_dst}"
-
-  # Pastikan service jalan sebagai root (hindari User=nobody/DynamicUser yang memicu permission denied).
-  sed -i -E '/^[[:space:]]*User=/d; /^[[:space:]]*Group=/d; /^[[:space:]]*DynamicUser=/d' "${unit_dst}"
-
-  # Sisipkan ExecStart baru tepat setelah [Service].
-  if grep -qE '^\[Service\]' "${unit_dst}"; then
-    sed -i -E "/^\[Service\]/a ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}" "${unit_dst}"
-    sed -i -E "/^\[Service\]/a ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}" "${unit_dst}"
-  else
-    cat >> "${unit_dst}" <<EOF
-
+  cat > /etc/systemd/system/xray.service.d/10-confdir.conf <<EOF
 [Service]
+# Reset agar tidak ada duplikasi ExecStart dari unit utama
+ExecStart=
+ExecStartPre=
 ExecStartPre=${xray_bin} run -test -confdir ${XRAY_CONFDIR}
 ExecStart=${xray_bin} run -confdir ${XRAY_CONFDIR}
+
+# Jalankan sebagai user dedicated xray (non-root).
+User=xray
+Group=xray
+DynamicUser=no
+
+ReadWritePaths=/var/log/xray
+LogsDirectory=xray
+LogsDirectoryMode=0755
 EOF
-  fi
-
-  # Izinkan write log walaupun ada hardening (ProtectSystem=strict/full).
-  if grep -qE '^[[:space:]]*ReadWritePaths=' "${unit_dst}"; then
-    if ! grep -qE '^[[:space:]]*ReadWritePaths=.*\b/var/log/xray\b' "${unit_dst}"; then
-      sed -i -E 's|^[[:space:]]*ReadWritePaths=(.*)$|ReadWritePaths=\1 /var/log/xray|g' "${unit_dst}"
-    fi
-  else
-    sed -i -E "/^\[Service\]/a ReadWritePaths=/var/log/xray" "${unit_dst}"
-  fi
-
-  # Minta systemd membuat log directory yang benar.
-  if ! grep -qE '^[[:space:]]*LogsDirectory=' "${unit_dst}"; then
-    sed -i -E "/^\[Service\]/a LogsDirectory=xray" "${unit_dst}"
-  fi
-  if ! grep -qE '^[[:space:]]*LogsDirectoryMode=' "${unit_dst}"; then
-    sed -i -E "/^\[Service\]/a LogsDirectoryMode=0755" "${unit_dst}"
-  fi
 
   systemctl daemon-reload
 
-  # Pastikan direktori & file log dapat dibuat/ditulis oleh user service yang aktif.
-  local xr_user xr_group
-  xr_user="$(systemctl show -p User --value xray 2>/dev/null || true)"
-  if [[ -z "${xr_user:-}" || "${xr_user}" == "n/a" ]]; then
-    xr_user="root"
-  fi
-  xr_group="$(systemctl show -p Group --value xray 2>/dev/null || true)"
-  if [[ -z "${xr_group:-}" || "${xr_group}" == "n/a" ]]; then
-    xr_group="$(id -gn "$xr_user" 2>/dev/null || echo "$xr_user")"
-  fi
+  # Pastikan permission conf.d bisa dibaca oleh user xray
+  mkdir -p /usr/local/etc/xray "${XRAY_CONFDIR}"
+  chown root:xray /usr/local/etc/xray "${XRAY_CONFDIR}" >/dev/null 2>&1 || true
+  chmod 750 /usr/local/etc/xray "${XRAY_CONFDIR}" >/dev/null 2>&1 || true
+  chown root:xray "${XRAY_CONFDIR}"/*.json >/dev/null 2>&1 || true
+  chmod 640 "${XRAY_CONFDIR}"/*.json >/dev/null 2>&1 || true
 
+  # Pastikan direktori & file log ada
   mkdir -p /var/log/xray
-  chmod 755 /var/log/xray
   touch /var/log/xray/access.log /var/log/xray/error.log
-  chmod 644 /var/log/xray/access.log /var/log/xray/error.log
-  chown "$xr_user:$xr_group" /var/log/xray /var/log/xray/access.log /var/log/xray/error.log >/dev/null 2>&1 || true
+  chown xray:xray /var/log/xray /var/log/xray/access.log /var/log/xray/error.log >/dev/null 2>&1 || true
+  chmod 750 /var/log/xray
+  chmod 640 /var/log/xray/access.log /var/log/xray/error.log
 
   # Test konfigurasi confdir sebelum restart
   if ! "${xray_bin}" run -test -confdir "${XRAY_CONFDIR}" >/dev/null 2>&1; then
@@ -1305,8 +1267,9 @@ EOF
     die "Konfigurasi confdir Xray invalid."
   fi
 
+  systemctl enable xray >/dev/null 2>&1 || true
   systemctl restart xray >/dev/null 2>&1 || { journalctl -u xray -n 200 --no-pager >&2 || true; die "Gagal restart xray"; }
-  ok "xray.service sudah memakai -confdir dan berhasil direstart."
+  ok "xray.service di-enable dan berhasil direstart dengan -confdir."
 
   # Setelah Xray berjalan menggunakan conf.d, config.json tidak diperlukan lagi.
   if [[ -f "${XRAY_CONFIG}" ]]; then
@@ -1436,7 +1399,7 @@ server {
   listen [::]:80;
   listen 443 ssl;
   listen [::]:443 ssl;
-  http2 on;
+	http2 on;
   server_name ${DOMAIN};
 
   if (\$scheme = http) { return 301 https://\$host\$request_uri; }
@@ -1466,6 +1429,12 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+    # Tanpa timeout ini, nginx menutup koneksi idle setelah 60 detik (default).
+    # Koneksi VPN/tunnel umumnya idle saat tidak ada traffic aktif, sehingga
+    # client akan terus-menerus reconnect. 7 hari cukup untuk koneksi persisten.
+    proxy_read_timeout 7d;
+    proxy_send_timeout 7d;
   }
 
   # --- HTTPUpgrade ---
@@ -1486,6 +1455,9 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+    proxy_read_timeout 7d;
+    proxy_send_timeout 7d;
   }
 
   # --- gRPC ---
@@ -1503,6 +1475,11 @@ server {
     grpc_set_header Host \$host;
     grpc_set_header X-Real-IP \$remote_addr;
     grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+    # Default grpc_read_timeout nginx = 60 detik. gRPC streaming (multiplexed)
+    # juga idle saat tidak ada traffic aktif — tanpa ini koneksi akan ter-reset.
+    grpc_read_timeout 7d;
+    grpc_send_timeout 7d;
   }
 
   # Default: hide everything else
@@ -1593,13 +1570,20 @@ configure_fail2ban_aggressive_jails() {
 bantime  = 1d
 findtime = 10m
 maxretry = 3
-backend  = systemd
+# backend = auto: deteksi otomatis terbaik untuk file-based logs (nginx, fail2ban.log).
+# Jangan pakai backend=systemd di [DEFAULT] karena nginx (dari nginx.org repo) log ke
+# /var/log/nginx/*.log (file), BUKAN ke systemd journal. Dengan backend=systemd,
+# fail2ban mengabaikan logpath dan baca dari journal sehingga nginx jails dan
+# recidive tidak berfungsi sama sekali.
+backend  = auto
 ignoreip = 127.0.0.1/8 ::1
 
 [sshd]
 enabled  = true
 port     = ssh
 mode     = aggressive
+# sshd log ke systemd journal di distro modern, override backend khusus untuk jail ini.
+backend  = systemd
 logpath  = %(sshd_log)s
 maxretry = 3
 findtime = 10m
@@ -1608,7 +1592,6 @@ bantime  = 1d
 [nginx-bad-request-access]
 enabled  = true
 port     = http,https
-mode     = aggressive
 filter   = nginx-bad-request
 logpath  = /var/log/nginx/access.log
 maxretry = 20
@@ -1618,7 +1601,6 @@ bantime  = 1h
 [nginx-bad-request-error]
 enabled  = true
 port     = http,https
-mode     = aggressive
 filter   = nginx-bad-request
 logpath  = /var/log/nginx/error.log
 maxretry = 10
@@ -1627,6 +1609,7 @@ bantime  = 2h
 
 [recidive]
 enabled  = true
+# recidive membaca fail2ban.log (file), backend=auto sudah tepat dari [DEFAULT].
 logpath  = /var/log/fail2ban.log
 bantime  = 7d
 findtime = 1d
@@ -1811,50 +1794,45 @@ setup_wgcf() {
 
     # wgcf versi baru kadang pakai prompt berbasis TTY (arrow-keys). `yes |` sering tidak efektif.
     if command -v expect >/dev/null 2>&1; then
-      expect <<'EOF' >"$reg_log" 2>&1
+      expect <<'EOF' >"$reg_log" 2>&1 || true
 set timeout 180
 log_user 1
 spawn wgcf register
 # Coba accept prompt dengan Enter / y
 expect {
-  -re {Use the arrow keys.*} { send "
-"; exp_continue }
-  -re {Do you agree.*} { send "
-"; exp_continue }
-  -re {\(y/n\)} { send "y
-"; exp_continue }
-  -re {Yes/No} { send "
-"; exp_continue }
-  -re {accept} { send "
-"; exp_continue }
+  -re {Use the arrow keys.*} { send "\r"; exp_continue }
+  -re {Do you agree.*} { send "\r"; exp_continue }
+  -re {\(y/n\)} { send "y\r"; exp_continue }
+  -re {Yes/No} { send "\r"; exp_continue }
+  -re {accept} { send "\r"; exp_continue }
   eof
 }
 EOF
     else
-    # Fallback legacy (lebih rentan), tapi tetap kita log.
-    set +o pipefail
-    yes | wgcf register >"$reg_log" 2>&1
-    set -o pipefail
+      # Fallback legacy (lebih rentan), tapi tetap kita log.
+      set +o pipefail
+      yes | wgcf register >"$reg_log" 2>&1 || true
+      set -o pipefail
+    fi
+
+    [[ -f wgcf-account.toml ]] || {
+      tail -n 120 "$reg_log" >&2 || true
+      die "wgcf register gagal. Lihat log: $reg_log"
+    }
   fi
 
-  [[ -f wgcf-account.toml ]] || {
-    tail -n 120 "$reg_log" >&2 || true
-    die "wgcf register gagal. Lihat log: $reg_log"
+  local gen_log="/tmp/wgcf-generate.log"
+  wgcf generate >"$gen_log" 2>&1 || {
+    tail -n 120 "$gen_log" >&2 || true
+    die "wgcf generate gagal. Lihat log: $gen_log"
   }
-fi
+  [[ -f wgcf-profile.conf ]] || {
+    tail -n 120 "$gen_log" >&2 || true
+    die "wgcf-profile.conf tidak ditemukan setelah generate."
+  }
 
-local gen_log="/tmp/wgcf-generate.log"
-wgcf generate >"$gen_log" 2>&1 || {
-  tail -n 120 "$gen_log" >&2 || true
-  die "wgcf generate gagal. Lihat log: $gen_log"
-}
-[[ -f wgcf-profile.conf ]] || {
-  tail -n 120 "$gen_log" >&2 || true
-  die "wgcf-profile.conf tidak ditemukan setelah generate."
-}
-
-popd >/dev/null || die "Gagal kembali dari /etc/wgcf."
-ok "wgcf selesai."
+  popd >/dev/null || die "Gagal kembali dari /etc/wgcf."
+  ok "wgcf selesai."
 }
 
 setup_wireproxy() {
@@ -1863,15 +1841,25 @@ setup_wireproxy() {
   mkdir -p /etc/wireproxy
   cp -f /etc/wgcf/wgcf-profile.conf /etc/wireproxy/config.conf
 
-  # Tambahkan socks bind sesuai requirement:
-  # [Socks] BindAddress = 127.0.0.1:40000
-  if ! grep -q '^\[Socks\]' /etc/wireproxy/config.conf; then
-    cat >> /etc/wireproxy/config.conf <<'EOF'
+  # wireproxy v1.0.9 memakai section [Socks5], bukan [Socks].
+  # Rebuild section SOCKS agar idempotent dan menghindari salah format lama.
+  local wp_conf="/etc/wireproxy/config.conf"
+  local wp_tmp
+  wp_tmp="$(mktemp)"
+  awk '
+    BEGIN { drop=0 }
+    /^\[(Socks|Socks5)\]$/ { drop=1; next }
+    /^\[.*\]$/ { drop=0 }
+    drop { next }
+    { print }
+  ' "$wp_conf" > "$wp_tmp"
+  cat >> "$wp_tmp" <<'EOF'
 
-[Socks]
+[Socks5]
 BindAddress = 127.0.0.1:40000
 EOF
-  fi
+  install -m 600 "$wp_tmp" "$wp_conf"
+  rm -f "$wp_tmp"
 
   cat > /etc/systemd/system/wireproxy.service <<'EOF'
 [Unit]
@@ -1921,7 +1909,7 @@ setup_xray_geodata_updater() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1
+bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1
 EOF
 
   chmod +x /usr/local/bin/xray-update-geodata
@@ -1941,8 +1929,6 @@ EOF
   ok "Update geodata pertama kali selesai."
 
 }
-
-
 
 setup_logrotate() {
   ok "Setup logrotate (nginx & xray)..."
@@ -1970,6 +1956,8 @@ install_management_scripts() {
 
   mkdir -p /opt/account/vless /opt/account/vmess /opt/account/trojan
   mkdir -p /opt/quota/vless /opt/quota/vmess /opt/quota/trojan
+  chmod 700 /opt/account /opt/account/vless /opt/account/vmess /opt/account/trojan
+  chmod 700 /opt/quota  /opt/quota/vless  /opt/quota/vmess  /opt/quota/trojan
 
   cat > /usr/local/bin/xray-expired <<'EOF'
 #!/usr/bin/env python3
@@ -2009,11 +1997,61 @@ def load_json(path):
     return json.load(f)
 
 def save_json_atomic(path, data):
-  tmp = f"{path}.tmp"
-  with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-  os.replace(tmp, path)
+  # BUG-10 fix: use mkstemp (unique name) instead of fixed "{path}.tmp"
+  # to prevent concurrent writers from corrupting each other's tmp file.
+  import tempfile
+  dirn = os.path.dirname(path) or "."
+  st_mode = None
+  st_uid = None
+  st_gid = None
+  try:
+    st = os.stat(path)
+    st_mode = st.st_mode & 0o777
+    st_uid = st.st_uid
+    st_gid = st.st_gid
+  except FileNotFoundError:
+    pass
+  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, indent=2)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    if st_mode is not None:
+      os.chmod(tmp, st_mode)
+    if st_uid is not None and st_gid is not None:
+      try:
+        os.chown(tmp, st_uid, st_gid)
+      except PermissionError:
+        pass
+    os.replace(tmp, path)
+  except Exception:
+    try:
+      if os.path.exists(tmp):
+        os.remove(tmp)
+    except Exception:
+      pass
+    raise
+
+ROUTING_LOCK_PATH = "/var/lock/xray-routing.lock"
+
+def save_routing_atomic_locked(inbounds_path, inb_data, routing_path, rt_data):
+  """BUG-15 note: xray-expired has a 4-argument signature (inbounds + routing) because
+  it writes BOTH files atomically in one lock. The other daemons (user-block, xray-quota,
+  limit-ip) use a 2-argument signature (config_path, cfg) because they only write routing.
+  These signatures are intentionally different — do NOT unify without careful review.
+  Tulis kedua file config secara atomik dengan file lock untuk cegah race condition
+  dengan daemon lain (xray-quota, limit-ip) yang juga bisa menulis routing config."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      save_json_atomic(inbounds_path, inb_data)
+      save_json_atomic(routing_path, rt_data)
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
 
 def restart_xray():
   subprocess.run(
@@ -2042,11 +2080,21 @@ def remove_user_from_inbounds(cfg, username):
   return changed
 
 def remove_user_from_rules(cfg, username):
+  # Hanya bersihkan dari rule yang mengandung dummy markers (manajemen user).
+  # Konsisten dengan manage.sh xray_delete_client — custom rules non-marker
+  # tidak disentuh agar tidak kehilangan konfigurasi routing lain.
   changed = False
+  markers = {
+    "dummy-block-user", "dummy-quota-user", "dummy-limit-user",
+    "dummy-warp-user", "dummy-direct-user",
+  }
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for rule in rules:
     users = rule.get("user")
     if not isinstance(users, list):
+      continue
+    # Lewati rule yang bukan milik sistem manajemen user
+    if not any(m in users for m in markers):
       continue
     if username in users:
       rule["user"] = [u for u in users if u != username]
@@ -2065,27 +2113,45 @@ def iter_quota_files():
 def quota_key_from_path(path):
   return os.path.splitext(os.path.basename(path))[0]
 
+def canonical_email(proto, user_key):
+  # Legacy quota file bisa bernama "username.json" (tanpa @proto).
+  # Untuk operasi config Xray, normalisasikan ke format email "username@proto".
+  if not user_key:
+    return user_key
+  if "@" in user_key:
+    return user_key
+  return f"{user_key}@{proto}"
+
 def is_expired(meta, ts):
   exp = parse_iso8601(meta.get("expired_at") if isinstance(meta, dict) else None)
   if exp is None:
     return False
   return exp <= ts
 
-def delete_user_artifacts(proto, user_key, quota_path):
-  # 1) quota json: /opt/quota/<proto>/<username@protocol>.json
+def _remove_file(path):
   try:
-    if os.path.exists(quota_path):
-      os.remove(quota_path)
+    if os.path.exists(path):
+      os.remove(path)
   except Exception:
     pass
 
-  # 2) account txt: /opt/account/<proto>/<username@protocol>.txt
-  acc = os.path.join(ACCOUNT_ROOT, proto, f"{user_key}.txt")
-  try:
-    if os.path.exists(acc):
-      os.remove(acc)
-  except Exception:
-    pass
+def delete_user_artifacts(proto, user_key, quota_path):
+  # 1) quota json: /opt/quota/<proto>/<username@proto>.json
+  _remove_file(quota_path)
+
+  # 2) account txt (format baru): /opt/account/<proto>/<username@proto>.txt
+  _remove_file(os.path.join(ACCOUNT_ROOT, proto, f"{user_key}.txt"))
+
+  # 3) account txt (format lama/legacy): /opt/account/<proto>/<username>.txt
+  # Konsisten dengan manage.sh delete_account_artifacts yang juga hapus keduanya.
+  bare = user_key.split("@")[0] if "@" in user_key else user_key
+  if bare != user_key:
+    _remove_file(os.path.join(ACCOUNT_ROOT, proto, f"{bare}.txt"))
+
+  # 4) quota json legacy: /opt/quota/<proto>/<username>.json
+  # Jika ada sisa file lama, bersihkan juga.
+  if bare != user_key:
+    _remove_file(os.path.join(QUOTA_ROOT, proto, f"{bare}.json"))
 
 def run_once(inbounds_path, routing_path, dry_run=False):
   ts = now_utc()
@@ -2100,7 +2166,9 @@ def run_once(inbounds_path, routing_path, dry_run=False):
     user_key = quota_key_from_path(path)
     if isinstance(meta, dict):
       u2 = meta.get("username")
-      if isinstance(u2, str) and "@" in u2:
+      # Prioritaskan meta["username"] jika ada dan tidak kosong.
+      # Field ini selalu ditulis manage.sh sebagai "username@proto".
+      if isinstance(u2, str) and u2.strip():
         user_key = u2.strip()
     if not user_key:
       continue
@@ -2111,6 +2179,42 @@ def run_once(inbounds_path, routing_path, dry_run=False):
   if not expired:
     return 0
 
+  if dry_run:
+    for _, user_key, _ in expired:
+      print(user_key)
+    return 0
+
+  # PENTING: reload inbounds dan routing dari disk sebelum modifikasi+save
+  # untuk menghindari overwrite perubahan concurrent dari manage.sh atau daemon lain.
+  try:
+    inb_cfg = load_json(inbounds_path)
+    rt_cfg = load_json(routing_path)
+  except Exception:
+    return 0
+
+  # Re-check expiry setelah reload disk: cegah race condition dengan
+  # manage.sh extend-expiry yang mungkin sudah update quota file
+  # antara scan awal dan reload config ini.
+  ts2 = now_utc()
+  confirmed = []
+  for proto, user_key, qpath in expired:
+    try:
+      meta_fresh = load_json(qpath)
+    except FileNotFoundError:
+      # File sudah dihapus pihak lain — tetap lanjut bersihkan dari config.
+      confirmed.append((proto, user_key, qpath))
+      continue
+    except Exception:
+      continue
+    if is_expired(meta_fresh, ts2):
+      confirmed.append((proto, user_key, qpath))
+    # Jika tidak lagi expired (sudah di-extend), lewati.
+
+  if not confirmed:
+    return 0
+
+  # PENTING: reload inbounds dan routing dari disk sebelum modifikasi+save
+  # untuk menghindari overwrite perubahan concurrent dari manage.sh atau daemon lain.
   try:
     inb_cfg = load_json(inbounds_path)
     rt_cfg = load_json(routing_path)
@@ -2119,23 +2223,28 @@ def run_once(inbounds_path, routing_path, dry_run=False):
 
   changed_inb = False
   changed_rt = False
-  for _, user_key, _ in expired:
-    changed_inb = remove_user_from_inbounds(inb_cfg, user_key) or changed_inb
-    changed_rt = remove_user_from_rules(rt_cfg, user_key) or changed_rt
+  for proto, user_key, _ in confirmed:
+    email_key = canonical_email(proto, user_key)
+    changed_inb = remove_user_from_inbounds(inb_cfg, email_key) or changed_inb
+    changed_rt = remove_user_from_rules(rt_cfg, email_key) or changed_rt
 
-  if dry_run:
-    for _, user_key, _ in expired:
-      print(user_key)
-    return 0
-
-  for proto, user_key, qpath in expired:
-    delete_user_artifacts(proto, user_key, qpath)
-
-  changed_any = changed_inb or changed_rt
-  if changed_any and not dry_run:
-    save_json_atomic(inbounds_path, inb_cfg)
-    save_json_atomic(routing_path, rt_cfg)
+  # BUG-04 fix: save config FIRST, delete artifacts only on success.
+  # Previously artifacts were deleted before save, causing permanent inconsistency
+  # if save failed (disk full, xray crash, etc.): files gone but user still in config.
+  config_saved = False
+  if changed_inb or changed_rt:
+    try:
+      save_routing_atomic_locked(inbounds_path, inb_cfg, routing_path, rt_cfg)
+      config_saved = True
+    except Exception:
+      # Config save failed — do NOT delete artifacts to avoid orphan state.
+      return 0
     restart_xray()
+
+  # Delete artifacts only after config has been saved successfully.
+  # If nothing changed in config (user wasn't in inbounds/routing), still clean up.
+  for proto, user_key, qpath in confirmed:
+    delete_user_artifacts(proto, user_key, qpath)
 
   return 0
 
@@ -2164,14 +2273,6 @@ if __name__ == "__main__":
 EOF
   chmod +x /usr/local/bin/xray-expired
 
-  # Legacy wrapper for backward compatibility
-  cat > /usr/local/bin/user-expired <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-exec /usr/local/bin/xray-expired "$@"
-EOF
-  chmod +x /usr/local/bin/user-expired
-
   cat > /usr/local/bin/limit-ip <<'EOF'
 #!/usr/bin/env python3
 import argparse
@@ -2189,7 +2290,40 @@ PROTO_DIRS = ("vless", "vmess", "trojan")
 XRAY_ACCESS_LOG = "/var/log/xray/access.log"
 
 EMAIL_RE = re.compile(r"(?:email|user)\s*[:=]\s*([A-Za-z0-9._%+-]{1,128}@[A-Za-z0-9._-]{1,128})")
-IP_RE = re.compile(r"\bfrom\s+(\d{1,3}(?:\.\d{1,3}){3})\:\d{1,5}\b")
+# BUG-07 fix: added IPv6 support. Previously only IPv4 was matched, so clients
+# connecting via IPv6 were never detected and ip-limit never triggered for them.
+# New pattern matches:
+#   IPv4:  "from 1.2.3.4:12345"
+#   IPv6:  "from [::1]:12345" or "from 2001:db8::1:12345" (bare, without brackets)
+IP_RE = re.compile(
+  r"\bfrom\s+"
+  r"(?:"
+    r"\[([0-9a-fA-F:]{2,39})\]:\d{1,5}"       # [IPv6]:port
+    r"|(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}"      # IPv4:port
+    r"|([0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,7}):\d{1,5}"  # bare IPv6:port
+  r")"
+)
+
+def extract_ip_from_match(m):
+  """Extract IP string from IP_RE match (handles IPv4 and IPv6 groups)."""
+  if m is None:
+    return None
+  return m.group(1) or m.group(2) or m.group(3)
+
+def safe_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s = str(v).strip()
+    if s == "":
+      return default
+    return int(float(s))
+  except Exception:
+    return default
 
 def now_iso():
   return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2199,16 +2333,75 @@ def load_json(path):
     return json.load(f)
 
 def save_json_atomic(path, data):
-  tmp = f"{path}.tmp"
-  with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-  os.replace(tmp, path)
+  # BUG-10 fix: use mkstemp (unique name) instead of fixed "{path}.tmp"
+  # to prevent concurrent writers from corrupting each other's tmp file.
+  import tempfile
+  dirn = os.path.dirname(path) or "."
+  st_mode = None
+  st_uid = None
+  st_gid = None
+  try:
+    st = os.stat(path)
+    st_mode = st.st_mode & 0o777
+    st_uid = st.st_uid
+    st_gid = st.st_gid
+  except FileNotFoundError:
+    pass
+  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, indent=2)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    if st_mode is not None:
+      os.chmod(tmp, st_mode)
+    if st_uid is not None and st_gid is not None:
+      try:
+        os.chown(tmp, st_uid, st_gid)
+      except PermissionError:
+        pass
+    os.replace(tmp, path)
+  except Exception:
+    try:
+      if os.path.exists(tmp):
+        os.remove(tmp)
+    except Exception:
+      pass
+    raise
 
-def restart_xray():
-  subprocess.run(["systemctl", "restart", "xray"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+ROUTING_LOCK_PATH = "/var/lock/xray-routing.lock"
+
+def save_routing_atomic_locked(config_path, cfg):
+  """Tulis routing config secara atomik dengan file lock bersama."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      save_json_atomic(config_path, cfg)
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
+
+def load_and_modify_routing_locked(config_path, modify_fn):
+  """BUG-01 fix: acquire lock FIRST, then reload config from disk, apply modify_fn, save.
+  Prevents last-write-wins race condition with other daemons."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      cfg = load_json(config_path)
+      changed = modify_fn(cfg)
+      if changed:
+        save_json_atomic(config_path, cfg)
+      return changed, cfg
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
 
 def find_marker_rule(cfg, marker, outbound_tag):
+  # BUG-FIX: fungsi ini wajib ada di limit-ip — sebelumnya hanya terdefinisi
+  # di xray-quota sehingga limit-ip crash NameError saat startup/watch/unlock.
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for r in rules:
     if r.get("type") != "field":
@@ -2220,14 +2413,20 @@ def find_marker_rule(cfg, marker, outbound_tag):
       return r
   return None
 
-def ensure_user(rule, username):
+def restart_xray():
+  subprocess.run(["systemctl", "restart", "xray"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def ensure_user(rule, username, marker=None):
   users = rule.get("user") or []
   if not isinstance(users, list):
     users = []
+  if marker is not None and marker not in users:
+    users.insert(0, marker)
   if username not in users:
     users.append(username)
     rule["user"] = users
     return True
+  rule["user"] = users
   return False
 
 def remove_user(rule, username):
@@ -2238,11 +2437,40 @@ def remove_user(rule, username):
   return True
 
 def quota_paths(username):
+  """Kembalikan semua path quota JSON yang cocok untuk username.
+  Mendukung format baru (username@proto.json) dan lama (username.json).
+  Jika username berisi '@', hanya cari di proto yang sesuai (bukan semua proto).
+  Jika bare username, coba username@proto.json dulu di semua proto lalu fallback legacy."""
   paths = []
-  for proto in PROTO_DIRS:
-    p = os.path.join(QUOTA_ROOT, proto, f"{username}.json")
-    if os.path.isfile(p):
-      paths.append(p)
+  if "@" in username:
+    # Full email (mis. "alice@vless"): ekstrak proto dari email, cari hanya di proto itu.
+    # Ini menghindari false-positive lookup ke proto yang salah (mis. alice@vless.json
+    # dicari di /opt/quota/vmess/ dan /opt/quota/trojan/ yang pasti tidak ada).
+    parts = username.split("@", 1)
+    email_proto = parts[1] if len(parts) == 2 else ""
+    # Cari di proto yang cocok dengan email terlebih dulu
+    if email_proto in PROTO_DIRS:
+      p = os.path.join(QUOTA_ROOT, email_proto, f"{username}.json")
+      if os.path.isfile(p):
+        paths.append(p)
+    # Fallback: iterasi semua proto (antisipasi file di tempat yang tidak terduga)
+    if not paths:
+      for proto in PROTO_DIRS:
+        if proto == email_proto:
+          continue  # sudah dicek di atas
+        p = os.path.join(QUOTA_ROOT, proto, f"{username}.json")
+        if os.path.isfile(p) and p not in paths:
+          paths.append(p)
+  else:
+    # Bare username: coba username@proto.json (format baru manage.sh) lalu fallback legacy
+    for proto in PROTO_DIRS:
+      candidates = [
+        os.path.join(QUOTA_ROOT, proto, f"{username}@{proto}.json"),
+        os.path.join(QUOTA_ROOT, proto, f"{username}.json"),
+      ]
+      for p in candidates:
+        if os.path.isfile(p) and p not in paths:
+          paths.append(p)
   return paths
 
 def get_status(username):
@@ -2251,7 +2479,11 @@ def get_status(username):
       meta = load_json(p)
     except Exception:
       continue
-    return meta.get("status") or {}
+    if not isinstance(meta, dict):
+      continue
+    st_raw = meta.get("status") if isinstance(meta, dict) else {}
+    st = st_raw if isinstance(st_raw, dict) else {}
+    return st
   return {}
 
 def set_status(username, enabled=None, limit=None):
@@ -2260,7 +2492,10 @@ def set_status(username, enabled=None, limit=None):
       meta = load_json(p)
     except Exception:
       continue
-    st = meta.get("status") or {}
+    if not isinstance(meta, dict):
+      continue
+    st_raw = meta.get("status") if isinstance(meta, dict) else {}
+    st = st_raw if isinstance(st_raw, dict) else {}
     if enabled is not None:
       st["ip_limit_enabled"] = bool(enabled)
     if limit is not None:
@@ -2275,10 +2510,20 @@ def lock_user(username):
       meta = load_json(p)
     except Exception:
       continue
-    st = meta.get("status") or {}
+    if not isinstance(meta, dict):
+      continue
+    st_raw = meta.get("status") if isinstance(meta, dict) else {}
+    st = st_raw if isinstance(st_raw, dict) else {}
     st["ip_limit_locked"] = True
-    st["lock_reason"] = "ip_limit"
-    st["locked_at"] = now_iso()
+    # Hanya set lock_reason='ip_limit' jika tidak ada lock prioritas lebih tinggi
+    # BUG-FIX #5: prioritas seragam: manual > quota > ip_limit (komentar lama salah).
+    # lock_user hanya cek manual_block karena saat ip_limit trigger, quota belum tentu exhausted;
+    # xray-quota akan set lock_reason=quota jika memang quota exhausted juga.
+    if not bool(st.get("manual_block", False)):
+      st["lock_reason"] = "ip_limit"
+      st["locked_at"] = now_iso()
+    elif not st.get("locked_at"):
+      st["locked_at"] = now_iso()
     meta["status"] = st
     save_json_atomic(p, meta)
 
@@ -2288,11 +2533,21 @@ def unlock_user(username):
       meta = load_json(p)
     except Exception:
       continue
-    st = meta.get("status") or {}
+    if not isinstance(meta, dict):
+      continue
+    st_raw = meta.get("status") if isinstance(meta, dict) else {}
+    st = st_raw if isinstance(st_raw, dict) else {}
     st["ip_limit_locked"] = False
     if st.get("lock_reason") == "ip_limit":
-      st["lock_reason"] = None
-      st["locked_at"] = ""
+      # Turunkan lock_reason ke lock lain yang masih aktif (jika ada),
+      # agar status display di manage.sh tetap akurat.
+      if bool(st.get("manual_block", False)):
+        st["lock_reason"] = "manual"
+      elif bool(st.get("quota_exhausted", False)):
+        st["lock_reason"] = "quota"
+      else:
+        st["lock_reason"] = ""
+        st["locked_at"] = ""
     meta["status"] = st
     save_json_atomic(p, meta)
 
@@ -2301,7 +2556,11 @@ def parse_line(line):
   m2 = IP_RE.search(line)
   if not m1 or not m2:
     return None, None
-  return m1.group(1), m2.group(1)
+  # BUG-07 fix: use helper to extract IP from whichever group matched (IPv4/IPv6)
+  ip = extract_ip_from_match(m2)
+  if not ip:
+    return None, None
+  return m1.group(1), ip
 
 def tail_follow(path):
   p = subprocess.Popen(["tail", "-n", "0", "-F", path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -2315,15 +2574,23 @@ def tail_follow(path):
       pass
 
 def watch(config_path, marker, window_seconds):
-  cfg = load_json(config_path)
-  rule = find_marker_rule(cfg, marker, "blocked")
-  if rule is None:
-    print(f"Marker rule not found: {marker}", file=sys.stderr)
+  # Verifikasi marker tersedia saat startup
+  try:
+    _cfg_init = load_json(config_path)
+  except Exception as e:
+    print(f"[limit-ip] Gagal load config: {e}", file=sys.stderr)
+    return 1
+  if find_marker_rule(_cfg_init, marker, "blocked") is None:
+    print(f"[limit-ip] Marker rule tidak ditemukan: {marker}", file=sys.stderr)
     return 1
 
   seen = {}  # user -> ip -> last_seen_epoch
   last_restart = 0.0
   min_restart_interval = 15.0
+  event_count = 0
+  # Cleanup seluruh seen dict dilakukan setiap N event, bukan setiap event,
+  # untuk menghindari O(users*ips) overhead pada traffic tinggi.
+  CLEANUP_INTERVAL = 200
 
   for line in tail_follow(XRAY_ACCESS_LOG):
     user, ip = parse_line(line)
@@ -2335,7 +2602,7 @@ def watch(config_path, marker, window_seconds):
       continue
     if not bool(st.get("ip_limit_enabled", False)):
       continue
-    lim = int(st.get("ip_limit", 0) or 0)
+    lim = safe_int(st.get("ip_limit", 0), 0)
     if lim <= 0:
       continue
     if bool(st.get("ip_limit_locked", False)):
@@ -2345,19 +2612,33 @@ def watch(config_path, marker, window_seconds):
     bucket = seen.setdefault(user, {})
     bucket[ip] = now
 
-    cutoff = now - float(window_seconds)
-    for u, ips in list(seen.items()):
-      for ip2, ts in list(ips.items()):
-        if ts < cutoff:
-          ips.pop(ip2, None)
-      if not ips:
-        seen.pop(u, None)
+    event_count += 1
+    if event_count >= CLEANUP_INTERVAL:
+      # Periodik cleanup: hapus entry kadaluarsa dari semua user sekaligus
+      event_count = 0
+      cutoff = now - float(window_seconds)
+      for u in list(seen.keys()):
+        ips = seen[u]
+        for ip2 in [k for k, ts in ips.items() if ts < cutoff]:
+          del ips[ip2]
+        if not ips:
+          del seen[u]
 
     if len(seen.get(user, {})) > lim:
       lock_user(user)
-      changed = ensure_user(rule, user)
+      # Setelah lock, hapus entry user dari seen agar tidak lock berulang
+      # sebelum xray-limit-ip service di-restart.
+      seen.pop(user, None)
+      # PENTING: reload config dari disk sebelum save untuk menghindari
+      # overwrite perubahan concurrent dari manage.sh atau daemon lain.
+      # BUG-01 fix: use load_and_modify_routing_locked (read inside lock)
+      def do_lock(cfg):
+        rule = find_marker_rule(cfg, marker, "blocked")
+        if rule is None:
+          return False
+        return ensure_user(rule, user, marker)
+      changed, _ = load_and_modify_routing_locked(config_path, do_lock)
       if changed:
-        save_json_atomic(config_path, cfg)
         if now - last_restart >= min_restart_interval:
           restart_xray()
           last_restart = now
@@ -2398,10 +2679,14 @@ def cli():
 
   if args.cmd == "unlock":
     unlock_user(args.username)
-    cfg = load_json(XRAY_CONFIG_DEFAULT)
-    rule = find_marker_rule(cfg, "dummy-limit-user", "blocked")
-    if rule is not None and remove_user(rule, args.username):
-      save_json_atomic(XRAY_CONFIG_DEFAULT, cfg)
+    # BUG-01 fix: read routing config INSIDE lock, same pattern as other daemons
+    def do_unlock(cfg):
+      rule = find_marker_rule(cfg, "dummy-limit-user", "blocked")
+      if rule is None:
+        return False
+      return remove_user(rule, args.username)
+    changed, _ = load_and_modify_routing_locked(XRAY_CONFIG_DEFAULT, do_unlock)
+    if changed:
       restart_xray()
     print("OK")
     return 0
@@ -2436,16 +2721,82 @@ def load_json(path):
     return json.load(f)
 
 def save_json_atomic(path, data):
-  tmp = f"{path}.tmp"
-  with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-  os.replace(tmp, path)
+  # BUG-10 fix: use mkstemp (unique name) instead of fixed "{path}.tmp"
+  # to prevent concurrent writers from corrupting each other's tmp file.
+  import tempfile
+  dirn = os.path.dirname(path) or "."
+  st_mode = None
+  st_uid = None
+  st_gid = None
+  try:
+    st = os.stat(path)
+    st_mode = st.st_mode & 0o777
+    st_uid = st.st_uid
+    st_gid = st.st_gid
+  except FileNotFoundError:
+    pass
+  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, indent=2)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    if st_mode is not None:
+      os.chmod(tmp, st_mode)
+    if st_uid is not None and st_gid is not None:
+      try:
+        os.chown(tmp, st_uid, st_gid)
+      except PermissionError:
+        pass
+    os.replace(tmp, path)
+  except Exception:
+    try:
+      if os.path.exists(tmp):
+        os.remove(tmp)
+    except Exception:
+      pass
+    raise
+
+ROUTING_LOCK_PATH = "/var/lock/xray-routing.lock"
+
+def save_routing_atomic_locked(config_path, cfg):
+  """Tulis routing config secara atomik dengan file lock bersama."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      save_json_atomic(config_path, cfg)
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
+
+def load_and_modify_routing_locked(config_path, modify_fn):
+  """BUG-01 fix: acquire lock, reload config from disk, apply modify_fn, save.
+  This prevents last-write-wins race condition when multiple daemons write routing.
+  Returns (changed: bool, cfg: dict)."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      # Reload from disk while holding the lock — picks up any concurrent changes
+      cfg = load_json(config_path)
+      changed = modify_fn(cfg)
+      if changed:
+        save_json_atomic(config_path, cfg)
+      return changed, cfg
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
 
 def restart_xray():
+  # BUG-FIX: fungsi ini wajib ada di user-block — sebelumnya tidak terdefinisi
+  # sehingga user-block crash NameError saat block/unblock dipanggil.
   subprocess.run(["systemctl", "restart", "xray"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def find_marker_rule(cfg, marker, outbound_tag):
+  # BUG-FIX: fungsi ini wajib ada di user-block — sebelumnya hanya terdefinisi
+  # di xray-quota sehingga user-block crash NameError saat modify() dijalankan.
   rules = ((cfg.get("routing") or {}).get("rules")) or []
   for r in rules:
     if r.get("type") != "field":
@@ -2458,6 +2809,7 @@ def find_marker_rule(cfg, marker, outbound_tag):
   return None
 
 def ensure_user(rule, username, marker):
+  # BUG-FIX: fungsi ini wajib ada di user-block — sebelumnya tidak terdefinisi.
   users = rule.get("user") or []
   if not isinstance(users, list):
     users = []
@@ -2471,30 +2823,68 @@ def ensure_user(rule, username, marker):
   return False
 
 def remove_user(rule, username):
+  # BUG-FIX: fungsi ini wajib ada di user-block — sebelumnya tidak terdefinisi.
   users = rule.get("user") or []
   if not isinstance(users, list) or username not in users:
     return False
   rule["user"] = [u for u in users if u != username]
   return True
 
+def quota_paths_for_user(username):
+  """Kembalikan path quota JSON untuk username.
+  Mendukung format baru (username@proto.json) dan lama (username.json).
+  Jika username berisi '@', prioritaskan proto yang sesuai sebelum fallback ke semua proto."""
+  paths = []
+  if "@" in username:
+    parts = username.split("@", 1)
+    email_proto = parts[1] if len(parts) == 2 else ""
+    if email_proto in PROTO_DIRS:
+      p = os.path.join(QUOTA_ROOT, email_proto, f"{username}.json")
+      if os.path.isfile(p):
+        paths.append(p)
+    if not paths:
+      for proto in PROTO_DIRS:
+        if proto == email_proto:
+          continue
+        p = os.path.join(QUOTA_ROOT, proto, f"{username}.json")
+        if os.path.isfile(p) and p not in paths:
+          paths.append(p)
+  else:
+    for proto in PROTO_DIRS:
+      candidates = [
+        os.path.join(QUOTA_ROOT, proto, f"{username}@{proto}.json"),
+        os.path.join(QUOTA_ROOT, proto, f"{username}.json"),
+      ]
+      for p in candidates:
+        if os.path.isfile(p) and p not in paths:
+          paths.append(p)
+  return paths
+
 def update_quota_status(username, manual_block):
-  for proto in PROTO_DIRS:
-    p = os.path.join(QUOTA_ROOT, proto, f"{username}.json")
-    if not os.path.isfile(p):
-      continue
+  for p in quota_paths_for_user(username):
     try:
       meta = load_json(p)
     except Exception:
       continue
-    st = meta.get("status") or {}
+    if not isinstance(meta, dict):
+      continue
+    st_raw = meta.get("status") if isinstance(meta, dict) else {}
+    st = st_raw if isinstance(st_raw, dict) else {}
     st["manual_block"] = bool(manual_block)
     if manual_block:
       st["lock_reason"] = "manual"
       st["locked_at"] = now_iso()
     else:
       if st.get("lock_reason") == "manual":
-        st["lock_reason"] = None
-        st["locked_at"] = ""
+        # BUG-05 fix: correct priority order is manual > quota > ip_limit.
+        # Previously ip_limit was checked before quota (wrong order).
+        if bool(st.get("quota_exhausted", False)):
+          st["lock_reason"] = "quota"
+        elif bool(st.get("ip_limit_locked", False)):
+          st["lock_reason"] = "ip_limit"
+        else:
+          st["lock_reason"] = ""
+          st["locked_at"] = ""
     meta["status"] = st
     save_json_atomic(p, meta)
 
@@ -2506,21 +2896,31 @@ def main():
   ap.add_argument("--marker", default="dummy-block-user")
   args = ap.parse_args()
 
-  cfg = load_json(args.config)
-  rule = find_marker_rule(cfg, args.marker, "blocked")
-  if rule is None:
-    raise SystemExit(f"Marker rule not found: {args.marker}")
+  # BUG-01 fix: use load_and_modify_routing_locked so config is read INSIDE the
+  # exclusive lock. Previously cfg was loaded before acquiring the lock, allowing
+  # concurrent daemons (xray-quota, limit-ip) to overwrite changes made here.
+  marker = args.marker
+  username = args.username
+  action = args.action
 
-  changed = False
-  if args.action == "block":
-    changed = ensure_user(rule, args.username, args.marker)
-    update_quota_status(args.username, True)
+  def modify(cfg):
+    rule = find_marker_rule(cfg, marker, "blocked")
+    if rule is None:
+      raise SystemExit(f"Marker rule not found: {marker}")
+    if action == "block":
+      return ensure_user(rule, username, marker)
+    else:
+      return remove_user(rule, username)
+
+  changed, _ = load_and_modify_routing_locked(args.config, modify)
+
+  # Update quota file status (outside lock — quota files have their own atomicity)
+  if action == "block":
+    update_quota_status(username, True)
   else:
-    changed = remove_user(rule, args.username)
-    update_quota_status(args.username, False)
+    update_quota_status(username, False)
 
   if changed:
-    save_json_atomic(args.config, cfg)
     restart_xray()
 
   print("OK")
@@ -2556,11 +2956,71 @@ def load_json(path):
     return json.load(f)
 
 def save_json_atomic(path, data):
-  tmp = f"{path}.tmp"
-  with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-  os.replace(tmp, path)
+  # BUG-10 fix: use mkstemp (unique name) instead of fixed "{path}.tmp"
+  # to prevent concurrent writers from corrupting each other's tmp file.
+  import tempfile
+  dirn = os.path.dirname(path) or "."
+  st_mode = None
+  st_uid = None
+  st_gid = None
+  try:
+    st = os.stat(path)
+    st_mode = st.st_mode & 0o777
+    st_uid = st.st_uid
+    st_gid = st.st_gid
+  except FileNotFoundError:
+    pass
+  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, indent=2)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    if st_mode is not None:
+      os.chmod(tmp, st_mode)
+    if st_uid is not None and st_gid is not None:
+      try:
+        os.chown(tmp, st_uid, st_gid)
+      except PermissionError:
+        pass
+    os.replace(tmp, path)
+  except Exception:
+    try:
+      if os.path.exists(tmp):
+        os.remove(tmp)
+    except Exception:
+      pass
+    raise
+
+ROUTING_LOCK_PATH = "/var/lock/xray-routing.lock"
+
+def save_routing_atomic_locked(config_path, cfg):
+  """Tulis routing config secara atomik dengan file lock bersama."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      save_json_atomic(config_path, cfg)
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
+
+def load_and_modify_routing_locked(config_path, modify_fn):
+  """Acquire lock, reload config from disk, apply modify_fn, then save atomically.
+  Mencegah race condition last-write-wins antar daemon yang menulis routing."""
+  import fcntl
+  os.makedirs(os.path.dirname(ROUTING_LOCK_PATH) or "/var/lock", exist_ok=True)
+  with open(ROUTING_LOCK_PATH, "w") as lf:
+    try:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      cfg = load_json(config_path)
+      changed = modify_fn(cfg)
+      if changed:
+        save_json_atomic(config_path, cfg)
+      return changed, cfg
+    finally:
+      fcntl.flock(lf, fcntl.LOCK_UN)
 
 def restart_xray():
   subprocess.run(["systemctl", "restart", "xray"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2584,13 +3044,18 @@ def normalize_quota_limit(meta, raw_limit):
   unit_raw = (meta.get("quota_unit") if isinstance(meta, dict) else "") or ""
   unit = str(unit_raw).strip().lower()
 
-  # Explicit binary unit (GiB)
-  if unit in ("gib", "binary", "1024", "gibibyte"):
-    return raw_limit, "gib", GB_BINARY
+  # Preserve unit string asli agar tidak overwrite 'binary' -> 'gib' di file JSON.
+  # Kembalikan (raw_limit, unit_string_asli, bytes_per_gb).
+  # manage.sh menulis "binary"; daemon ini tidak boleh mengubahnya menjadi "gib"
+  # karena keduanya berarti hal yang sama (1024**3) tapi label jadi tidak konsisten.
 
-  # Explicit decimal unit (GB, 1000^3)
+  # Binary unit group (GiB = 1024^3)
+  if unit in ("gib", "binary", "1024", "gibibyte"):
+    return raw_limit, unit, GB_BINARY
+
+  # Decimal unit group (GB = 1000^3)
   if unit in ("decimal", "gb", "1000", "gigabyte"):
-    return raw_limit, "decimal", GB_DECIMAL
+    return raw_limit, unit, GB_DECIMAL
 
   # Heuristic (backward compat):
   # If limit is an exact multiple of decimal GB but not GiB, keep decimal.
@@ -2598,7 +3063,7 @@ def normalize_quota_limit(meta, raw_limit):
     return raw_limit, "decimal", GB_DECIMAL
 
   # Default: treat as GiB bytes (1 GB = 1073741824 B)
-  return raw_limit, "gib", GB_BINARY
+  return raw_limit, "binary", GB_BINARY
 
 def find_marker_rule(cfg, marker, outbound_tag):
   rules = ((cfg.get("routing") or {}).get("rules")) or []
@@ -2625,6 +3090,13 @@ def ensure_user(rule, username, marker):
   rule["user"] = users
   return False
 
+def remove_user(rule, username):
+  users = rule.get("user") or []
+  if not isinstance(users, list) or username not in users:
+    return False
+  rule["user"] = [u for u in users if u != username]
+  return True
+
 def iter_quota_files():
   for proto in PROTO_DIRS:
     d = os.path.join(QUOTA_ROOT, proto)
@@ -2645,7 +3117,22 @@ def fetch_all_user_traffic(api_server):
       stderr=subprocess.DEVNULL,
     )
     data = json.loads(out)
-  except Exception:
+  except subprocess.CalledProcessError as e:
+    import sys
+    print(f"[xray-quota] WARN: xray api statsquery gagal (exit {e.returncode}). "
+          f"Pastikan Xray API aktif di {api_server}. Quota tidak diupdate siklus ini.", file=sys.stderr)
+    return {}
+  except FileNotFoundError:
+    import sys
+    print(f"[xray-quota] WARN: perintah 'xray' tidak ditemukan. Quota tidak diupdate.", file=sys.stderr)
+    return {}
+  except json.JSONDecodeError as e:
+    import sys
+    print(f"[xray-quota] WARN: output xray api bukan JSON valid: {e}. Quota tidak diupdate.", file=sys.stderr)
+    return {}
+  except Exception as e:
+    import sys
+    print(f"[xray-quota] WARN: fetch_all_user_traffic error: {e}. Quota tidak diupdate.", file=sys.stderr)
     return {}
 
   traffic = {}  # email -> {"uplink": int, "downlink": int}
@@ -2673,11 +3160,25 @@ def fetch_all_user_traffic(api_server):
   return totals
 
 def ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg):
-  st = meta.get("status") or {}
+  st_raw = meta.get("status") if isinstance(meta, dict) else {}
+  st = st_raw if isinstance(st_raw, dict) else {}
   changed = False
 
   prev_used = parse_int(meta.get("quota_used"))
-  q_used_eff = max(prev_used, parse_int(q_used))
+  # BUG-11 fix: removed unconditional max(prev_used, api_used).
+  # Previously quota_used could never decrease, so a manual reset to 0 from
+  # Menu 3 would be immediately overwritten by the daemon with the old high value.
+  # New logic: trust api_used when it is positive (xray stats are live).
+  # Only fall back to prev_used if api_used is 0, which likely means xray was
+  # restarted and stats were reset — in that case keep prev_used to avoid
+  # losing accumulated usage data. If admin has explicitly reset quota_used via
+  # Menu 3, they should also restart xray so stats reset to 0 simultaneously.
+  api_used_int = parse_int(q_used)
+  if api_used_int > 0:
+    q_used_eff = api_used_int
+  else:
+    # api returns 0: xray just restarted or no traffic. Keep accumulated value.
+    q_used_eff = prev_used
 
   if meta.get("quota_limit") != q_limit:
     meta["quota_limit"] = q_limit
@@ -2699,11 +3200,38 @@ def ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg):
     changed = True
 
   if exhausted:
-    if st.get("lock_reason") != "quota":
-      st["lock_reason"] = "quota"
-      changed = True
+    # Hanya set lock_reason = "quota" jika tidak ada lock lain yang lebih prioritas.
+    # BUG-FIX #5: Seragamkan urutan prioritas dengan manage.sh dan user-block:
+    # manual > quota > ip_limit  (bukan: manual > ip_limit > quota seperti sebelumnya)
+    # Jangan overwrite lock_reason "manual" yang sedang aktif.
+    cur_reason    = st.get("lock_reason") or ""
+    manual_active = bool(st.get("manual_block", False))
+    iplimit_active = bool(st.get("ip_limit_locked", False))
+    if manual_active:
+      if cur_reason != "manual":
+        st["lock_reason"] = "manual"
+        changed = True
+    else:
+      # quota lebih prioritas dari ip_limit (konsisten dengan manage.sh BUG-05 fix)
+      if cur_reason != "quota":
+        st["lock_reason"] = "quota"
+        changed = True
     if not st.get("locked_at"):
       st["locked_at"] = now_iso()
+      changed = True
+  else:
+    # Quota tidak exhausted: bersihkan flag quota jika sebelumnya dikunci karena quota.
+    # Jangan sentuh lock_reason lain (manual, ip_limit) — hanya bersihkan milik quota.
+    if st.get("lock_reason") == "quota":
+      # BUG-FIX #5: Turunkan ke lock_reason berikutnya dengan urutan yang seragam:
+      # manual > quota > ip_limit
+      if bool(st.get("manual_block", False)):
+        st["lock_reason"] = "manual"
+      elif bool(st.get("ip_limit_locked", False)):
+        st["lock_reason"] = "ip_limit"
+      else:
+        st["lock_reason"] = ""
+        st["locked_at"] = ""
       changed = True
 
   meta["status"] = st
@@ -2722,6 +3250,9 @@ def run_once(config_path, marker, api_server, dry_run=False):
   totals = fetch_all_user_traffic(api_server)
 
   changed_cfg = False
+  exhausted_users = []
+  ok_users = []
+
   for _, path in iter_quota_files():
     try:
       meta = load_json(path)
@@ -2740,7 +3271,9 @@ def run_once(config_path, marker, api_server, dry_run=False):
     q_limit, q_unit, bpg = normalize_quota_limit(meta, raw_limit) if isinstance(meta, dict) else (raw_limit, "decimal", GB_DECIMAL)
     prev_used = parse_int(meta.get("quota_used") if isinstance(meta, dict) else 0)
     api_used = parse_int(totals.get(username, 0))
-    q_used = max(prev_used, api_used)
+    # Sinkron dengan ensure_quota_status: gunakan nilai API saat >0,
+    # fallback ke nilai lama saat API 0 (mis. setelah restart xray).
+    q_used = api_used if api_used > 0 else prev_used
 
     exhausted = (q_limit > 0 and q_used >= q_limit)
     meta_changed = ensure_quota_status(meta, exhausted, q_limit, q_used, q_unit, bpg) if isinstance(meta, dict) else False
@@ -2752,14 +3285,44 @@ def run_once(config_path, marker, api_server, dry_run=False):
         pass
 
     if exhausted:
-      if ensure_user(rule, username, marker):
-        changed_cfg = True
+      exhausted_users.append(username)
+    else:
+      ok_users.append(username)
 
-  if changed_cfg and not dry_run:
-    try:
-      save_json_atomic(config_path, cfg)
-    except Exception:
-      return 0
+  if not exhausted_users and not ok_users:
+    return 0
+
+  if dry_run:
+    return 0
+
+  # BUG-FIX #4: Gunakan load_and_modify_routing_locked agar load + modify + save
+  # semua terjadi di dalam satu exclusive lock yang sama. Pola sebelumnya
+  # (load di luar lock, save di dalam lock) membuka race condition: daemon lain
+  # bisa menulis routing config antara load cfg_fresh dan akuisisi lock save,
+  # sehingga perubahan mereka ter-overwrite. Dengan load_and_modify_routing_locked,
+  # reload dari disk terjadi setelah lock acquired — perubahan concurrent aman.
+  captured_exhausted = list(dict.fromkeys(exhausted_users))  # stable unique
+  captured_ok = list(dict.fromkeys(ok_users))  # stable unique
+
+  def do_block(cfg_live):
+    rule_live = find_marker_rule(cfg_live, marker, "blocked")
+    if rule_live is None:
+      return False
+    changed = False
+    for username in captured_exhausted:
+      if ensure_user(rule_live, username, marker):
+        changed = True
+    for username in captured_ok:
+      if remove_user(rule_live, username):
+        changed = True
+    return changed
+
+  try:
+    changed_cfg, _ = load_and_modify_routing_locked(config_path, do_block)
+  except Exception:
+    return 0
+
+  if changed_cfg:
     restart_xray()
 
   return 0
@@ -2857,7 +3420,7 @@ EOF
   systemctl restart xray-quota >/dev/null 2>&1 || true
 
   ok "Script manajemen siap:"
-  ok "  - /usr/local/bin/user-expired (service: xray-expired)"
+  ok "  - /usr/local/bin/xray-expired (service: xray-expired)"
   ok "  - /usr/local/bin/limit-ip     (service: xray-limit-ip)"
   ok "  - /usr/local/bin/user-block   (CLI)"
   ok "  - /usr/local/bin/xray-quota    (service: xray-quota)"
@@ -2870,64 +3433,64 @@ sanity_check() {
   if systemctl is-active --quiet xray; then
     ok "sanity: xray active"
   else
-  warn "sanity: xray NOT active"
-  systemctl status xray --no-pager >&2 || true
-  journalctl -u xray -n 200 --no-pager >&2 || true
-  failed=1
-fi
+    warn "sanity: xray NOT active"
+    systemctl status xray --no-pager >&2 || true
+    journalctl -u xray -n 200 --no-pager >&2 || true
+    failed=1
+  fi
 
-if systemctl is-active --quiet nginx; then
-  ok "sanity: nginx active"
-else
-warn "sanity: nginx NOT active"
-systemctl status nginx --no-pager >&2 || true
-journalctl -u nginx -n 200 --no-pager >&2 || true
-failed=1
-fi
-
-# Config sanity (non-fatal if tools missing)
-if command -v nginx >/dev/null 2>&1; then
-  if nginx -t >/dev/null 2>&1; then
-    ok "sanity: nginx -t OK"
+  if systemctl is-active --quiet nginx; then
+    ok "sanity: nginx active"
   else
-  warn "sanity: nginx -t FAILED"
-  nginx -t >&2 || true
-  failed=1
-fi
-fi
+    warn "sanity: nginx NOT active"
+    systemctl status nginx --no-pager >&2 || true
+    journalctl -u nginx -n 200 --no-pager >&2 || true
+    failed=1
+  fi
 
-if command -v jq >/dev/null 2>&1 && [[ -f "${XRAY_CONFDIR}/10-inbounds.json" ]]; then
-  if jq -e . "${XRAY_CONFDIR}/10-inbounds.json" >/dev/null 2>&1; then
-    ok "sanity: xray config JSON OK"
+  # Config sanity (non-fatal if tools missing)
+  if command -v nginx >/dev/null 2>&1; then
+    if nginx -t >/dev/null 2>&1; then
+      ok "sanity: nginx -t OK"
+    else
+      warn "sanity: nginx -t FAILED"
+      nginx -t >&2 || true
+      failed=1
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1 && [[ -f "${XRAY_CONFDIR}/10-inbounds.json" ]]; then
+    if jq -e . "${XRAY_CONFDIR}/10-inbounds.json" >/dev/null 2>&1; then
+      ok "sanity: xray config JSON OK"
+    else
+      warn "sanity: xray config JSON INVALID"
+      jq -e . "${XRAY_CONFDIR}/10-inbounds.json" >&2 || true
+      failed=1
+    fi
+  fi
+
+  # Cert presence (TLS termination depends on these)
+  if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
+    ok "sanity: TLS cert files present"
   else
-  warn "sanity: xray config JSON INVALID"
-  jq -e . "${XRAY_CONFDIR}/10-inbounds.json" >&2 || true
-  failed=1
-fi
-fi
+    warn "sanity: TLS cert files missing under /opt/cert"
+    failed=1
+  fi
 
-# Cert presence (TLS termination depends on these)
-if [[ -s "/opt/cert/fullchain.pem" && -s "/opt/cert/privkey.pem" ]]; then
-  ok "sanity: TLS cert files present"
-else
-warn "sanity: TLS cert files missing under /opt/cert"
-failed=1
-fi
+  # Listener hints (informational only)
+  if ss -lntp 2>/dev/null | grep -q ':443'; then
+    ok "sanity: port 443 is listening"
+  else
+    warn "sanity: port 443 not detected as listening (check nginx)"
+  fi
 
-# Listener hints (informational only)
-if ss -lntp 2>/dev/null | grep -q ':443'; then
-  ok "sanity: port 443 is listening"
-else
-warn "sanity: port 443 not detected as listening (check nginx)"
-fi
-
-if [[ "$failed" -ne 0 ]]; then
-  die "Sanity check gagal. Lihat log di atas."
-fi
+  if [[ "$failed" -ne 0 ]]; then
+    die "Sanity check gagal. Lihat log di atas."
+  fi
 }
 
 main() {
-	clear
+  clear
   need_root
   check_os
   install_base_deps
