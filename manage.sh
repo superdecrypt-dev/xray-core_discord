@@ -25,6 +25,29 @@ CERT_DIR="/opt/cert"
 CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
 CERT_PRIVKEY="${CERT_DIR}/privkey.pem"
 
+# Domain / ACME / Cloudflare (disamakan dengan setup.sh)
+CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ}"
+PROVIDED_ROOT_DOMAINS=(
+"vyxara1.web.id"
+"vyxara2.web.id"
+"vyxara1.qzz.io"
+"vyxara2.qzz.io"
+)
+ACME_SH_INSTALL_REF="${ACME_SH_INSTALL_REF:-f39d066ced0271d87790dc426556c1e02a88c91b}"
+ACME_SH_SCRIPT_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/acme.sh"
+ACME_SH_TARBALL_URL="https://codeload.github.com/acmesh-official/acme.sh/tar.gz/${ACME_SH_INSTALL_REF}"
+ACME_SH_DNS_CF_HOOK_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/dnsapi/dns_cf.sh"
+
+# Runtime state untuk Domain Control
+DOMAIN=""
+ACME_CERT_MODE="standalone"
+ACME_ROOT_DOMAIN=""
+CF_ZONE_ID=""
+CF_ACCOUNT_ID=""
+VPS_IPV4=""
+CF_PROXIED="false"
+declare -ag DOMAIN_CTRL_STOPPED_SERVICES=()
+
 # Account store (read-only source for Menu 2)
 ACCOUNT_ROOT="/opt/account"
 ACCOUNT_PROTO_DIRS=("vless" "vmess" "trojan")
@@ -562,6 +585,589 @@ detect_public_ip_ipapi() {
   echo "${ip}"
 }
 
+download_file_or_die() {
+  local url="$1"
+  local out="$2"
+  curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$out" \
+    || die "Gagal download: $url"
+}
+
+rand_str() {
+  local n="${1:-16}"
+  ( set +o pipefail; tr -dc 'a-z0-9' </dev/urandom | head -c "$n" )
+}
+
+rand_email() {
+  local user part
+  user="$(rand_str 10)"
+  part="$(rand_str 6)"
+  local domains=("gmail.com" "outlook.com" "proton.me" "icloud.com" "yahoo.com")
+  local idx=$(( RANDOM % ${#domains[@]} ))
+  echo "${user}.${part}@${domains[$idx]}"
+}
+
+confirm_yn() {
+  local prompt="$1"
+  local ans
+  while true; do
+    read -r -p "${prompt} (y/n): " ans
+    case "${ans,,}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Input tidak valid. Jawab y/n." ;;
+    esac
+  done
+}
+
+get_public_ipv4() {
+  local ip=""
+  ip="$(curl -4fsSL https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl -4fsSL https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ -n "$ip" ]] || ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  [[ -n "$ip" ]] || die "Gagal mendapatkan public IPv4 VPS."
+  echo "$ip"
+}
+
+cf_api() {
+  local method="$1"
+  local endpoint="$2"
+  local data="${3:-}"
+
+  [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "CLOUDFLARE_API_TOKEN belum di-set."
+
+  local url="https://api.cloudflare.com/client/v4${endpoint}"
+  local resp code body trimmed
+
+  if [[ -n "$data" ]]; then
+    resp="$(curl -sS -L -X "$method" "$url" \
+      -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      --connect-timeout 10 \
+      --max-time 30 \
+      --data "$data" \
+      -w $'\n%{http_code}' || true)"
+  else
+    resp="$(curl -sS -L -X "$method" "$url" \
+      -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      --connect-timeout 10 \
+      --max-time 30 \
+      -w $'\n%{http_code}' || true)"
+  fi
+
+  code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
+
+  if [[ -z "${body:-}" ]]; then
+    echo "[Cloudflare] Empty response (HTTP ${code:-?}) for ${endpoint}" >&2
+    return 1
+  fi
+
+  trimmed="${body#"${body%%[![:space:]]*}"}"
+  if [[ ! "$trimmed" =~ ^[\{\[] ]]; then
+    echo "[Cloudflare] Non-JSON response (HTTP ${code:-?}) for ${endpoint}:" >&2
+    echo "$body" >&2
+    return 1
+  fi
+
+  if [[ ! "${code:-}" =~ ^2 ]]; then
+    echo "[Cloudflare] HTTP ${code:-?} for ${endpoint}:" >&2
+    echo "$body" >&2
+    return 1
+  fi
+
+  printf '%s' "$body"
+}
+
+cf_get_zone_id_by_name() {
+  local zone_name="$1"
+  local json zid err
+
+  json="$(cf_api GET "/zones?name=${zone_name}&per_page=1" || true)"
+  if [[ -z "${json:-}" ]]; then
+    return 1
+  fi
+
+  if ! echo "$json" | jq -e '.success == true' >/dev/null 2>&1; then
+    err="$(echo "$json" | jq -r '.errors[0].message // empty' 2>/dev/null || true)"
+    [[ -n "$err" ]] && echo "[Cloudflare] $err" >&2
+    return 1
+  fi
+
+  zid="$(echo "$json" | jq -r '.result[0].id // empty' 2>/dev/null || true)"
+  [[ -n "$zid" ]] || return 1
+  echo "$zid"
+}
+
+cf_get_account_id_by_zone() {
+  local zone_id="$1"
+  local json aid
+
+  json="$(cf_api GET "/zones/${zone_id}" || true)"
+  if [[ -z "${json:-}" ]]; then
+    return 1
+  fi
+
+  aid="$(echo "$json" | jq -r '.result.account.id // empty' 2>/dev/null || true)"
+  [[ -n "$aid" ]] || return 1
+  echo "$aid"
+}
+
+cf_list_a_records_by_ip() {
+  local zone_id="$1"
+  local ip="$2"
+  local json
+
+  json="$(cf_api GET "/zones/${zone_id}/dns_records?type=A&content=${ip}&per_page=100" || true)"
+  if [[ -z "${json:-}" ]]; then
+    return 0
+  fi
+
+  if ! echo "$json" | jq -e '.success == true' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  echo "$json" | jq -r '.result[] | "\(.id)\t\(.name)"'
+}
+
+cf_delete_record() {
+  local zone_id="$1"
+  local record_id="$2"
+  cf_api DELETE "/zones/${zone_id}/dns_records/${record_id}" >/dev/null \
+    || die "Gagal delete DNS record Cloudflare: $record_id"
+}
+
+cf_create_a_record() {
+  local zone_id="$1"
+  local name="$2"
+  local ip="$3"
+  local proxied="${4:-false}"
+
+  if [[ "$proxied" != "true" && "$proxied" != "false" ]]; then
+    proxied="false"
+  fi
+
+  local payload
+  payload="$(cat <<EOF
+{"type":"A","name":"$name","content":"$ip","ttl":1,"proxied":$proxied}
+EOF
+  )"
+  cf_api POST "/zones/${zone_id}/dns_records" "$payload" >/dev/null \
+    || die "Gagal membuat A record Cloudflare untuk $name"
+}
+
+gen_subdomain_random() {
+  rand_str 5
+}
+
+validate_subdomain() {
+  local s="$1"
+  [[ -n "$s" ]] || return 1
+  [[ "$s" == "${s,,}" ]] || return 1
+  [[ "$s" =~ ^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$ ]] || return 1
+  [[ "$s" != *" "* ]] || return 1
+  return 0
+}
+
+cf_prepare_subdomain_a_record() {
+  local zone_id="$1"
+  local fqdn="$2"
+  local ip="$3"
+  local proxied="${4:-false}"
+
+  log "Validasi DNS A record Cloudflare untuk: $fqdn"
+
+  local json rec_ips any_same any_diff
+  json="$(cf_api GET "/zones/${zone_id}/dns_records?type=A&name=${fqdn}&per_page=100" || true)"
+  if [[ -n "${json:-}" ]] && echo "$json" | jq -e '.success == true' >/dev/null 2>&1; then
+    mapfile -t rec_ips < <(echo "$json" | jq -r '.result[].content' 2>/dev/null || true)
+    if [[ ${#rec_ips[@]} -gt 0 ]]; then
+      any_same="0"
+      any_diff="0"
+      local cip
+      for cip in "${rec_ips[@]}"; do
+        if [[ "$cip" == "$ip" ]]; then
+          any_same="1"
+        else
+          any_diff="1"
+        fi
+      done
+
+      if [[ "$any_same" == "1" ]]; then
+        warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
+        if confirm_yn "Lanjut menggunakan domain ini?"; then
+          log "Lanjut."
+          return 0
+        fi
+        die "Dibatalkan oleh user."
+      fi
+
+      if [[ "$any_diff" == "1" ]]; then
+        die "Subdomain $fqdn sudah ada di Cloudflare tetapi IP berbeda (${rec_ips[*]}). Gunakan nama subdomain lain."
+      fi
+    fi
+  fi
+
+  local same_ip=()
+  mapfile -t same_ip < <(cf_list_a_records_by_ip "$zone_id" "$ip" || true)
+  if [[ ${#same_ip[@]} -gt 0 ]]; then
+    local line
+    for line in "${same_ip[@]}"; do
+      local rid="${line%%$'\t'*}"
+      local rname="${line#*$'\t'}"
+      if [[ "$rname" != "$fqdn" ]]; then
+        warn "Ditemukan A record lain dengan IP sama ($ip): $rname -> $ip"
+        warn "Menghapus A record: $rname"
+        cf_delete_record "$zone_id" "$rid"
+      fi
+    done
+  fi
+
+  log "Membuat DNS A record: $fqdn -> $ip"
+  cf_create_a_record "$zone_id" "$fqdn" "$ip" "$proxied"
+}
+
+domain_menu_v2() {
+  echo "============================================"
+  echo "   INPUT DOMAIN (TLS)"
+  echo "============================================"
+  echo "1. input domain sendiri"
+  echo "2. gunakan domain yang disediakan"
+  echo
+
+  local choice=""
+  while true; do
+    read -r -p "Pilih opsi (1-2): " choice
+    case "$choice" in
+      1|2) break ;;
+      *) echo "Pilihan tidak valid." ;;
+    esac
+  done
+
+  if [[ "$choice" == "1" ]]; then
+    local re='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$'
+    while true; do
+      read -r -p "Masukkan domain: " DOMAIN
+      DOMAIN="${DOMAIN,,}"
+
+      [[ -n "${DOMAIN:-}" ]] || {
+        echo "Domain tidak boleh kosong."
+        continue
+      }
+
+      if [[ "$DOMAIN" =~ $re ]]; then
+        log "Domain valid: $DOMAIN"
+        ACME_CERT_MODE="standalone"
+        ACME_ROOT_DOMAIN=""
+        CF_ZONE_ID=""
+        break
+      else
+        echo "Domain tidak valid. Coba lagi."
+      fi
+    done
+    return 0
+  fi
+
+  VPS_IPV4="$(get_public_ipv4)"
+  log "Public IPv4 VPS: $VPS_IPV4"
+
+  [[ ${#PROVIDED_ROOT_DOMAINS[@]} -gt 0 ]] || die "Daftar domain induk (PROVIDED_ROOT_DOMAINS) kosong."
+
+  echo
+  echo "Pilih domain induk"
+  local i=1
+  local root=""
+  for root in "${PROVIDED_ROOT_DOMAINS[@]}"; do
+    echo "  $i. $root"
+    i=$((i + 1))
+  done
+
+  local pick=""
+  while true; do
+    read -r -p "Pilih nomor domain induk (1-${#PROVIDED_ROOT_DOMAINS[@]}): " pick
+    [[ "$pick" =~ ^[0-9]+$ ]] || { echo "Input harus angka."; continue; }
+    [[ "$pick" -ge 1 && "$pick" -le ${#PROVIDED_ROOT_DOMAINS[@]} ]] || { echo "Di luar range."; continue; }
+    break
+  done
+
+  ACME_ROOT_DOMAIN="${PROVIDED_ROOT_DOMAINS[$((pick - 1))]}"
+  log "Domain induk terpilih: $ACME_ROOT_DOMAIN"
+
+  CF_ZONE_ID="$(cf_get_zone_id_by_name "$ACME_ROOT_DOMAIN" || true)"
+  [[ -n "${CF_ZONE_ID:-}" ]] || die "Zone Cloudflare untuk $ACME_ROOT_DOMAIN tidak ditemukan / token tidak punya akses (butuh Zone:Read + DNS:Edit)."
+  CF_ACCOUNT_ID="$(cf_get_account_id_by_zone "$CF_ZONE_ID" || true)"
+  [[ -n "${CF_ACCOUNT_ID:-}" ]] || warn "Tidak bisa ambil CF_ACCOUNT_ID dari zone (acme.sh dns_cf mungkin tetap bisa jalan tanpa ini)."
+
+  echo
+  echo "Pilih metode pembuatan subdomain"
+  echo "1. generate secara acak"
+  echo "2. input sendiri"
+
+  local mth=""
+  while true; do
+    read -r -p "Pilih opsi (1-2): " mth
+    case "$mth" in
+      1|2) break ;;
+      *) echo "Pilihan tidak valid." ;;
+    esac
+  done
+
+  local sub=""
+  if [[ "$mth" == "1" ]]; then
+    sub="$(gen_subdomain_random)"
+    log "Subdomain generated: $sub"
+  else
+    while true; do
+      read -r -p "Masukkan nama subdomain: " sub
+      sub="${sub,,}"
+      if validate_subdomain "$sub"; then
+        log "Subdomain valid: $sub"
+        break
+      fi
+      echo "Subdomain tidak valid. Hanya huruf kecil, angka, titik, dan strip (-). Tanpa spasi/kapital/karakter aneh."
+    done
+  fi
+
+  echo
+  if confirm_yn "Aktifkan Cloudflare proxy (orange cloud) untuk DNS A record?"; then
+    CF_PROXIED="true"
+    log "Cloudflare proxy: ON (proxied=true)"
+  else
+    CF_PROXIED="false"
+    log "Cloudflare proxy: OFF (proxied=false)"
+  fi
+
+  DOMAIN="${sub}.${ACME_ROOT_DOMAIN}"
+  log "Domain final: $DOMAIN"
+
+  cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"
+
+  ACME_CERT_MODE="dns_cf_wildcard"
+  log "Mode sertifikat: wildcard dns_cf untuk ${DOMAIN} (meliputi *.$DOMAIN)"
+}
+
+stop_conflicting_services() {
+  DOMAIN_CTRL_STOPPED_SERVICES=()
+
+  local svc
+  for svc in nginx apache2 caddy lighttpd; do
+    if svc_exists "${svc}" && svc_is_active "${svc}"; then
+      DOMAIN_CTRL_STOPPED_SERVICES+=("${svc}")
+    fi
+    if svc_exists "${svc}"; then
+      systemctl stop "${svc}" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+domain_control_restore_stopped_services() {
+  if (( ${#DOMAIN_CTRL_STOPPED_SERVICES[@]} == 0 )); then
+    return 0
+  fi
+
+  local svc
+  for svc in "${DOMAIN_CTRL_STOPPED_SERVICES[@]}"; do
+    if svc_exists "${svc}"; then
+      systemctl start "${svc}" >/dev/null 2>&1 || warn "Gagal restore service: ${svc}"
+    fi
+  done
+}
+
+domain_control_clear_stopped_services() {
+  DOMAIN_CTRL_STOPPED_SERVICES=()
+}
+
+domain_control_restore_on_exit() {
+  # Safety net: jika proses domain control gagal di tengah (die/exit),
+  # service yang sebelumnya aktif dipulihkan otomatis.
+  if (( ${#DOMAIN_CTRL_STOPPED_SERVICES[@]} > 0 )); then
+    warn "Domain Control berhenti sebelum selesai. Mencoba restore service yang tadi dihentikan..."
+    domain_control_restore_stopped_services
+    domain_control_clear_stopped_services
+  fi
+}
+
+install_acme_and_issue_cert() {
+  local email
+  email="$(rand_email)"
+  log "Email acme.sh (acak): $email"
+
+  stop_conflicting_services
+
+  local acme_tmpdir acme_src_dir acme_tgz acme_install_log
+  acme_tmpdir="$(mktemp -d)"
+  acme_tgz="${acme_tmpdir}/acme.tar.gz"
+  acme_install_log="${acme_tmpdir}/acme-install.log"
+  acme_src_dir=""
+
+  if curl -fsSL --connect-timeout 15 --max-time 120 "${ACME_SH_TARBALL_URL}" -o "${acme_tgz}" 2>/dev/null; then
+    if tar -xzf "${acme_tgz}" -C "${acme_tmpdir}" >/dev/null 2>&1; then
+      acme_src_dir="$(find "${acme_tmpdir}" -maxdepth 1 -type d -name 'acme.sh-*' -print -quit)"
+    fi
+  fi
+
+  if [[ -z "${acme_src_dir:-}" || ! -f "${acme_src_dir}/acme.sh" ]]; then
+    warn "Source bundle acme.sh tidak tersedia, fallback ke single-file installer."
+    acme_src_dir="${acme_tmpdir}/acme-single"
+    mkdir -p "${acme_src_dir}"
+    download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_src_dir}/acme.sh"
+  fi
+
+  chmod 700 "${acme_src_dir}/acme.sh"
+  if ! (cd "${acme_src_dir}" && bash ./acme.sh --install --home /root/.acme.sh --accountemail "$email") >"${acme_install_log}" 2>&1; then
+    warn "Install acme.sh gagal. Ringkasan log:"
+    sed -n '1,120p' "${acme_install_log}" >&2 || true
+    rm -rf "${acme_tmpdir}" >/dev/null 2>&1 || true
+    die "Gagal install acme.sh dari ref ${ACME_SH_INSTALL_REF}."
+  fi
+  rm -rf "${acme_tmpdir}" >/dev/null 2>&1 || true
+
+  export PATH="/root/.acme.sh:${PATH}"
+  [[ -x /root/.acme.sh/acme.sh ]] || die "acme.sh tidak ditemukan setelah proses install."
+  /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null || true
+
+  mkdir -p "${CERT_DIR}"
+  chmod 700 "${CERT_DIR}"
+
+  if [[ "${ACME_CERT_MODE:-standalone}" == "dns_cf_wildcard" ]]; then
+    [[ -n "${ACME_ROOT_DOMAIN:-}" ]] || die "ACME_ROOT_DOMAIN kosong (mode dns_cf_wildcard)."
+    [[ -n "${DOMAIN:-}" ]] || die "DOMAIN kosong (mode dns_cf_wildcard)."
+    [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "CLOUDFLARE_API_TOKEN kosong untuk mode wildcard dns_cf."
+    log "Issue sertifikat wildcard untuk ${DOMAIN} via acme.sh (dns_cf)..."
+
+    if [[ ! -s /root/.acme.sh/dnsapi/dns_cf.sh ]]; then
+      warn "dns_cf hook tidak ditemukan, mencoba bootstrap dari ref ${ACME_SH_INSTALL_REF} ..."
+      mkdir -p /root/.acme.sh/dnsapi
+      download_file_or_die "${ACME_SH_DNS_CF_HOOK_URL}" /root/.acme.sh/dnsapi/dns_cf.sh
+      chmod 700 /root/.acme.sh/dnsapi/dns_cf.sh >/dev/null 2>&1 || true
+    fi
+    [[ -s /root/.acme.sh/dnsapi/dns_cf.sh ]] || die "Hook dns_cf tetap tidak ditemukan setelah bootstrap."
+
+    if ! cf_api GET "/user/tokens/verify" >/dev/null 2>&1; then
+      die "Token Cloudflare tidak valid/kurang scope. Butuh minimal: Zone:DNS Edit + Zone:Read untuk zone domain."
+    fi
+
+    export CF_Token="$CLOUDFLARE_API_TOKEN"
+    [[ -n "${CF_ACCOUNT_ID:-}" ]] && export CF_Account_ID="$CF_ACCOUNT_ID"
+    [[ -n "${CF_ZONE_ID:-}" ]] && export CF_Zone_ID="$CF_ZONE_ID"
+
+    /root/.acme.sh/acme.sh --issue --force --dns dns_cf \
+      -d "$DOMAIN" -d "*.$DOMAIN" \
+      || die "Gagal issue sertifikat wildcard via dns_cf (pastikan token Cloudflare valid)."
+
+    /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+      --key-file "$CERT_PRIVKEY" \
+      --fullchain-file "$CERT_FULLCHAIN" \
+      --reloadcmd "systemctl restart nginx || true" >/dev/null
+  else
+    log "Issue sertifikat untuk $DOMAIN via acme.sh (standalone port 80)..."
+    /root/.acme.sh/acme.sh --issue --force --standalone -d "$DOMAIN" --httpport 80 \
+      || die "Gagal issue sertifikat (pastikan port 80 terbuka & DNS domain mengarah ke VPS)."
+
+    /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+      --key-file "$CERT_PRIVKEY" \
+      --fullchain-file "$CERT_FULLCHAIN" \
+      --reloadcmd "systemctl restart nginx || true" >/dev/null
+  fi
+
+  chmod 600 "$CERT_PRIVKEY" "$CERT_FULLCHAIN"
+
+  log "Sertifikat tersimpan:"
+  log "  - $CERT_FULLCHAIN"
+  log "  - $CERT_PRIVKEY"
+  domain_control_clear_stopped_services
+}
+
+domain_control_apply_nginx_domain() {
+  local domain="$1"
+  [[ -n "${domain}" ]] || die "Domain kosong."
+  [[ -f "${NGINX_CONF}" ]] || die "Nginx conf tidak ditemukan: ${NGINX_CONF}"
+  ensure_path_writable "${NGINX_CONF}"
+
+  local backup
+  backup="${WORK_DIR}/xray.conf.domain-backup.$(date +%s)"
+  cp -a "${NGINX_CONF}" "${backup}" || die "Gagal membuat backup nginx conf."
+
+  if ! sed -E -i "s|^([[:space:]]*server_name[[:space:]]+)[^;]+;|\\1${domain};|g" "${NGINX_CONF}"; then
+    cp -a "${backup}" "${NGINX_CONF}" >/dev/null 2>&1 || true
+    die "Gagal update server_name di nginx conf."
+  fi
+
+  local domain_re
+  domain_re="$(printf '%s\n' "${domain}" | sed -e 's/[.[\*^$()+?{|]/\\&/g')"
+  if ! grep -Eq "^[[:space:]]*server_name[[:space:]]+${domain_re};" "${NGINX_CONF}"; then
+    cp -a "${backup}" "${NGINX_CONF}" >/dev/null 2>&1 || true
+    die "server_name ${domain}; tidak ditemukan setelah update."
+  fi
+
+  if ! nginx -t >/dev/null 2>&1; then
+    warn "nginx -t gagal setelah update domain, rollback ke backup."
+    cp -a "${backup}" "${NGINX_CONF}" >/dev/null 2>&1 || true
+    nginx -t >&2 || true
+    die "Konfigurasi nginx invalid setelah ubah domain."
+  fi
+
+  if ! systemctl restart nginx >/dev/null 2>&1; then
+    warn "Restart nginx gagal setelah update domain, rollback ke backup."
+    cp -a "${backup}" "${NGINX_CONF}" >/dev/null 2>&1 || true
+    systemctl restart nginx >/dev/null 2>&1 || true
+    die "Gagal restart nginx setelah ubah domain."
+  fi
+
+  log "server_name nginx diperbarui ke: ${domain}"
+}
+
+domain_control_set_domain_now() {
+  title
+  echo "5) Domain Control > Set Domain (setup flow)"
+  hr
+  have_cmd curl || die "curl tidak ditemukan."
+  have_cmd jq || die "jq tidak ditemukan."
+
+  domain_menu_v2
+  install_acme_and_issue_cert
+  domain_control_apply_nginx_domain "${DOMAIN}"
+
+  hr
+  log "Domain aktif sekarang: ${DOMAIN}"
+  pause
+}
+
+domain_control_show_info() {
+  title
+  echo "5) Domain Control > Show Current Domain"
+  hr
+  echo "Domain aktif : $(detect_domain)"
+  echo "Cert file    : ${CERT_FULLCHAIN}"
+  echo "Key file     : ${CERT_PRIVKEY}"
+  if [[ -s "${CERT_FULLCHAIN}" && -s "${CERT_PRIVKEY}" ]]; then
+    echo "Status cert  : tersedia"
+  else
+    echo "Status cert  : belum tersedia / kosong"
+  fi
+  hr
+  pause
+}
+
+domain_control_menu() {
+  while true; do
+    title
+    echo "5) Domain Control"
+    hr
+    echo "  1) Set Domain + Issue Certificate (sama seperti setup.sh)"
+    echo "  2) Show Current Domain"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1) domain_control_set_domain_now ;;
+      2) domain_control_show_info ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
 need_python3() {
   have_cmd python3 || die "python3 tidak ditemukan. Install dulu: apt-get install -y python3"
 }
@@ -615,9 +1221,38 @@ title() {
 # -------------------------
 # Service helpers
 # -------------------------
+svc_state() {
+  local svc="$1"
+  systemctl is-active "${svc}" 2>/dev/null || true
+}
+
 svc_is_active() {
   local svc="$1"
-  systemctl is-active --quiet "${svc}"
+  systemctl is-active --quiet "${svc}" >/dev/null 2>&1
+}
+
+svc_wait_active() {
+  # args: service [timeout_seconds]
+  local svc="$1"
+  local timeout="${2:-20}"
+  local checks i state
+
+  if [[ ! "${timeout}" =~ ^[0-9]+$ ]] || (( timeout <= 0 )); then
+    timeout=20
+  fi
+  checks=$(( timeout * 4 ))
+  if (( checks < 1 )); then
+    checks=1
+  fi
+
+  for (( i=0; i<checks; i++ )); do
+    state="$(svc_state "${svc}")"
+    if [[ "${state}" == "active" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
 }
 
 svc_exists() {
@@ -638,18 +1273,35 @@ svc_status_line() {
 
 svc_restart() {
   local svc="$1"
-  systemctl restart "${svc}"
-  if svc_is_active "${svc}"; then
+  local st
+  systemctl restart "${svc}" >/dev/null 2>&1 || true
+  if svc_wait_active "${svc}" 20; then
     log "Restart sukses: ${svc}"
-  else
-    warn "Restart dilakukan, tapi status masih tidak aktif: ${svc}"
+    return 0
   fi
+
+  st="$(svc_state "${svc}")"
+  if [[ "${st}" == "failed" || "${st}" == "inactive" ]]; then
+    # Recovery best-effort: antisipasi start-limit-hit saat restart beruntun.
+    systemctl reset-failed "${svc}" >/dev/null 2>&1 || true
+    sleep 1
+    systemctl start "${svc}" >/dev/null 2>&1 || true
+    if svc_wait_active "${svc}" 20; then
+      log "Restart recovery sukses: ${svc}"
+      return 0
+    fi
+    st="$(svc_state "${svc}")"
+  fi
+
+  warn "Restart dilakukan, tapi status masih tidak aktif: ${svc} (state=${st:-unknown})"
+  return 1
 }
 
 svc_restart_if_exists() {
   local svc="$1"
   if systemctl cat "${svc}" >/dev/null 2>&1; then
     systemctl restart "${svc}" >/dev/null 2>&1 || true
+    svc_wait_active "${svc}" 20 >/dev/null 2>&1 || true
     return 0
   fi
   return 1
@@ -1167,11 +1819,34 @@ check_files() {
 }
 
 check_nginx_config() {
-  if nginx -t; then
-    log "nginx -t: OK"
-  else
-    die "nginx -t: GAGAL"
+  if ! have_cmd nginx; then
+    warn "nginx tidak tersedia, lewati nginx -t"
+    return 0
   fi
+
+  local out rc
+  out="$(nginx -t 2>&1 || true)"
+  if echo "${out}" | grep -q "test is successful"; then
+    log "nginx -t: OK"
+    return 0
+  fi
+
+  # Beberapa environment (container/sandbox terbatas) memblokir akses pid/log
+  # sehingga nginx -t false-negative. Dalam kasus ini jadikan warning agar menu
+  # diagnostic tetap bisa lanjut.
+  if echo "${out}" | grep -Eqi "Permission denied|/var/run/nginx.pid|could not open error log file"; then
+    warn "nginx -t tidak bisa diverifikasi penuh di environment ini (permission restriction)."
+    echo "${out}" >&2
+    return 0
+  fi
+
+  warn "nginx -t: GAGAL"
+  if [[ -n "${out}" ]]; then
+    echo "${out}" >&2
+  else
+    warn "Tidak ada output dari nginx -t"
+  fi
+  return 1
 }
 
 check_xray_config_json() {
@@ -1290,7 +1965,7 @@ sanity_check_now() {
 
   check_files || true
   hr
-  check_nginx_config
+  check_nginx_config || warn "Validasi nginx gagal (lanjut cek lain)."
   check_xray_config_json
   check_tls_expiry
   hr
@@ -1301,6 +1976,8 @@ sanity_check_now() {
   echo "[OK] Sanity check selesai (lihat WARN bila ada)."
   pause
 }
+
+trap 'domain_control_restore_on_exit' EXIT
 
 # -------------------------
 # Xray user management (placeholder)
@@ -1359,7 +2036,7 @@ xray_restart_or_rollback_file() {
   local backup="$2"
   local ctx="${3:-config}"
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     cp -a "${backup}" "${target}" 2>/dev/null || true
     systemctl restart xray || true
     die "xray tidak aktif setelah update ${ctx}. Config di-rollback ke backup: ${backup}"
@@ -1499,7 +2176,7 @@ PY
 
   # restart xray to apply
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
@@ -1636,7 +2313,7 @@ PY
   fi
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
@@ -1776,7 +2453,7 @@ PY
   fi
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -2363,7 +3040,7 @@ PY
   }
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
@@ -4542,7 +5219,7 @@ PY
   }
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -4642,7 +5319,7 @@ PY
   }
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -4754,7 +5431,7 @@ PY
   }
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -5155,7 +5832,7 @@ PY
   }
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -5265,7 +5942,7 @@ PY
   }
 
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -6187,7 +6864,7 @@ PY
     die "Gagal update routing (rollback ke backup: ${backup})"
   }
   svc_restart xray || true
-  if ! svc_is_active xray; then
+  if ! svc_wait_active xray 20; then
     (
       flock -x 200
       cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -6948,7 +7625,7 @@ PY
           die "Gagal update routing (rollback ke backup: ${backup})"
         }
         svc_restart xray || true
-        if ! svc_is_active xray; then
+        if ! svc_wait_active xray 20; then
           (
             flock -x 200
             cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -7030,7 +7707,7 @@ PY
           die "Gagal update routing (rollback ke backup: ${backup})"
         }
         svc_restart xray || true
-        if ! svc_is_active xray; then
+        if ! svc_wait_active xray 20; then
           (
             flock -x 200
             cp -a "${backup}" "${XRAY_ROUTING_CONF}"
@@ -7461,7 +8138,7 @@ dns_addons_menu() {
         if have_cmd nano; then
           nano "${XRAY_DNS_CONF}"
           svc_restart xray || true
-          if ! svc_is_active xray; then
+          if ! svc_wait_active xray 20; then
             warn "xray tidak aktif setelah edit manual DNS config."
             systemctl status xray --no-pager 2>/dev/null || true
           fi
@@ -8184,7 +8861,7 @@ security_overview_menu() {
 fail2ban_menu() {
   while true; do
     title
-    echo "5) Security"
+    echo "6) Security"
     hr
     echo "  1) TLS & Certificate"
     echo "  2) Fail2ban Protection"
@@ -8208,7 +8885,7 @@ fail2ban_menu() {
 # -------------------------
 wireproxy_status_menu() {
   title
-  echo "6) Maintenance > Wireproxy (WARP) Status"
+  echo "7) Maintenance > Wireproxy (WARP) Status"
   hr
 
   if ! svc_exists wireproxy; then
@@ -8271,7 +8948,7 @@ wireproxy_status_menu() {
 
 wireproxy_restart_menu() {
   title
-  echo "6) Maintenance > Restart Wireproxy (WARP)"
+  echo "7) Maintenance > Restart Wireproxy (WARP)"
   hr
 
   if ! svc_exists wireproxy; then
@@ -8288,7 +8965,7 @@ wireproxy_restart_menu() {
 
 daemon_status_menu() {
   title
-  echo "6) Maintenance > Daemon Status"
+  echo "7) Maintenance > Daemon Status"
   hr
 
   local daemons=("xray" "nginx" "xray-expired" "xray-quota" "xray-limit-ip" "xray-speed" "wireproxy")
@@ -8361,7 +9038,7 @@ daemon_status_menu() {
 maintenance_menu() {
   while true; do
     title
-    echo "6) Maintenance"
+    echo "7) Maintenance"
     hr
     echo "  1. Restart xray"
     echo "  2. Restart nginx"
@@ -8404,8 +9081,9 @@ main_menu() {
     echo "  2) User Management"
     echo "  3) Quota & Access Control"
     echo "  4) Network Controls"
-    echo "  5) Security"
-    echo "  6) Maintenance"
+    echo "  5) Domain Control"
+    echo "  6) Security"
+    echo "  7) Maintenance"
     echo "  0) Exit (kembali)"
     hr
     if ! read -r -p "Pilih: " c; then
@@ -8417,8 +9095,9 @@ main_menu() {
       2) run_action "User Management" user_menu ;;
       3) run_action "Quota & Access Control" quota_menu ;;
       4) run_action "Network Controls" network_menu ;;
-      5) run_action "Security" fail2ban_menu ;;
-      6) run_action "Maintenance" maintenance_menu ;;
+      5) run_action "Domain Control" domain_control_menu ;;
+      6) run_action "Security" fail2ban_menu ;;
+      7) run_action "Maintenance" maintenance_menu ;;
       0|kembali|k|back|b) exit 0 ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
