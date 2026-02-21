@@ -3870,14 +3870,28 @@ def apply_tc(iface, ifb_iface, default_rate_mbit, policies):
   run(["tc", "qdisc", "replace", "dev", iface, "parent", "1:999", "handle", "1999:", "fq_codel"], check=False)
 
   run(["tc", "qdisc", "replace", "dev", iface, "handle", "ffff:", "ingress"], check=True)
-  run([
+
+  # Download path fix:
+  # Copy conntrack mark -> skb mark BEFORE mirroring ingress packets to IFB.
+  # This allows fw filter on IFB (handle <mark>) to classify per-user download traffic.
+  ingress_v4 = [
     "tc", "filter", "replace", "dev", iface, "parent", "ffff:", "protocol", "ip",
-    "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", ifb_iface
-  ], check=True)
-  run([
+    "u32", "match", "u32", "0", "0"
+  ]
+  try:
+    run(ingress_v4 + ["action", "connmark", "action", "mirred", "egress", "redirect", "dev", ifb_iface], check=True)
+  except Exception:
+    # Fallback for kernels without act_connmark support (keeps previous behavior).
+    run(ingress_v4 + ["action", "mirred", "egress", "redirect", "dev", ifb_iface], check=True)
+
+  ingress_v6 = [
     "tc", "filter", "replace", "dev", iface, "parent", "ffff:", "protocol", "ipv6",
-    "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", ifb_iface
-  ], check=False)
+    "u32", "match", "u32", "0", "0"
+  ]
+  try:
+    run(ingress_v6 + ["action", "connmark", "action", "mirred", "egress", "redirect", "dev", ifb_iface], check=True)
+  except Exception:
+    run(ingress_v6 + ["action", "mirred", "egress", "redirect", "dev", ifb_iface], check=False)
 
   run(["tc", "qdisc", "replace", "dev", ifb_iface, "root", "handle", "2:", "htb", "default", "999"], check=True)
   run(["tc", "class", "replace", "dev", ifb_iface, "parent", "2:", "classid", "2:999", "htb", "rate", default_rate, "ceil", default_rate], check=True)
