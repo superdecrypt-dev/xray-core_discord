@@ -3458,7 +3458,8 @@ PY
 
 quota_read_detail_fields() {
   # args: json_file
-  # prints: username|quota_limit_disp|quota_used_disp|expired_at_date|ip_limit_onoff|ip_limit_value|block_reason
+  # prints:
+  # username|quota_limit_disp|quota_used_disp|expired_at_date|ip_limit_onoff|ip_limit_value|block_reason|speed_onoff|speed_down_mbit|speed_up_mbit
   local qf="$1"
   need_python3
   python3 - <<'PY' "${qf}"
@@ -3467,10 +3468,10 @@ p=sys.argv[1]
 try:
   d=json.load(open(p,'r',encoding='utf-8'))
 except Exception:
-  print("-|0 GB|0 B|-|OFF|0|-")
+  print("-|0 GB|0 B|-|OFF|0|-|OFF|0|0")
   raise SystemExit(0)
 if not isinstance(d, dict):
-  print("-|0 GB|0 B|-|OFF|0|-")
+  print("-|0 GB|0 B|-|OFF|0|-|OFF|0|0")
   raise SystemExit(0)
 
 def to_int(v, default=0):
@@ -3487,6 +3488,31 @@ def to_int(v, default=0):
     return int(float(s))
   except Exception:
     return default
+
+def to_float(v, default=0.0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return float(int(v))
+    if isinstance(v, (int, float)):
+      return float(v)
+    s=str(v).strip()
+    if s == "":
+      return default
+    return float(s)
+  except Exception:
+    return default
+
+def fmt_mbit(v):
+  try:
+    n=float(v)
+  except Exception:
+    n=0.0
+  if n < 0:
+    n=0.0
+  s=f"{n:.3f}".rstrip('0').rstrip('.')
+  return s if s else "0"
 
 u=str(d.get("username") or "-")
 ql=to_int(d.get("quota_limit"), 0)
@@ -3533,7 +3559,15 @@ elif st.get("quota_exhausted") or lr == "quota":
 elif st.get("ip_limit_locked") or lr == "ip_limit":
   reason="IP_LIMIT"
 
-print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{'ON' if ip_en else 'OFF'}|{ip_lim}|{reason}")
+speed_en=bool(st.get("speed_limit_enabled"))
+speed_down=to_float(st.get("speed_down_mbit"), 0.0)
+speed_up=to_float(st.get("speed_up_mbit"), 0.0)
+if speed_down < 0:
+  speed_down = 0.0
+if speed_up < 0:
+  speed_up = 0.0
+
+print(f"{u}|{ql_disp}|{qu_disp}|{exp_date}|{'ON' if ip_en else 'OFF'}|{ip_lim}|{reason}|{'ON' if speed_en else 'OFF'}|{fmt_mbit(speed_down)}|{fmt_mbit(speed_up)}")
 PY
 }
 
@@ -3588,6 +3622,37 @@ except Exception:
 PY
 }
 
+quota_get_status_number() {
+  # args: json_file key
+  local qf="$1"
+  local key="$2"
+  need_python3
+  python3 - <<'PY' "${qf}" "${key}"
+import json, sys
+p, k = sys.argv[1:3]
+try:
+  d = json.load(open(p, 'r', encoding='utf-8'))
+except Exception:
+  print("0")
+  raise SystemExit(0)
+if not isinstance(d, dict):
+  print("0")
+  raise SystemExit(0)
+st = d.get("status") or {}
+if not isinstance(st, dict):
+  st = {}
+v = st.get(k, 0)
+try:
+  n = float(v)
+except Exception:
+  n = 0.0
+if n < 0:
+  n = 0.0
+s = f"{n:.3f}".rstrip("0").rstrip(".")
+print(s if s else "0")
+PY
+}
+
 quota_get_lock_reason() {
   # args: json_file
   local qf="$1"
@@ -3609,6 +3674,49 @@ if not isinstance(st, dict):
 v = st.get("lock_reason") or ""
 print(str(v))
 PY
+}
+
+quota_sync_speed_policy_for_user() {
+  # args: proto username quota_file
+  local proto="$1"
+  local username="$2"
+  local qf="$3"
+
+  local speed_on speed_down speed_up mark
+  speed_on="$(quota_get_status_bool "${qf}" "speed_limit_enabled")"
+  speed_down="$(quota_get_status_number "${qf}" "speed_down_mbit")"
+  speed_up="$(quota_get_status_number "${qf}" "speed_up_mbit")"
+
+  if [[ "${speed_on}" == "true" ]]; then
+    if ! speed_mbit_is_positive "${speed_down}" || ! speed_mbit_is_positive "${speed_up}"; then
+      warn "Speed limit aktif, tapi nilai download/upload belum valid (> 0)."
+      return 1
+    fi
+    if ! mark="$(speed_policy_upsert "${proto}" "${username}" "${speed_down}" "${speed_up}")"; then
+      warn "Gagal menyimpan speed policy ${username}@${proto}"
+      return 1
+    fi
+    if ! speed_policy_sync_xray; then
+      warn "Gagal sinkronisasi speed policy ke xray"
+      return 1
+    fi
+    if ! speed_policy_apply_now; then
+      warn "Speed policy tersimpan, tetapi apply runtime gagal (cek service xray-speed)"
+      return 1
+    fi
+    log "Speed policy aktif untuk ${username}@${proto} (mark=${mark}, down=${speed_down}Mbps, up=${speed_up}Mbps)"
+    return 0
+  fi
+
+  if speed_policy_exists "${proto}" "${username}"; then
+    speed_policy_remove "${proto}" "${username}"
+    if ! speed_policy_sync_xray; then
+      warn "Speed limit dinonaktifkan, tetapi sinkronisasi speed policy ke xray gagal"
+      return 1
+    fi
+  fi
+  speed_policy_apply_now >/dev/null 2>&1 || true
+  return 0
 }
 
 
@@ -3798,26 +3906,19 @@ quota_edit_flow() {
     echo "File  : ${qf}"
     hr
 
-    local fields username ql_disp qu_disp exp_date ip_state ip_lim block_reason
+    local fields username ql_disp qu_disp exp_date ip_state ip_lim block_reason speed_state speed_down speed_up
     fields="$(quota_read_detail_fields "${qf}")"
-    username="${fields%%|*}"
-    fields="${fields#*|}"
-    ql_disp="${fields%%|*}"
-    fields="${fields#*|}"
-    qu_disp="${fields%%|*}"
-    fields="${fields#*|}"
-    exp_date="${fields%%|*}"
-    fields="${fields#*|}"
-    ip_state="${fields%%|*}"
-    fields="${fields#*|}"
-    ip_lim="${fields%%|*}"
-    block_reason="${fields##*|}"
+    IFS='|' read -r username ql_disp qu_disp exp_date ip_state ip_lim block_reason speed_state speed_down speed_up <<<"${fields}"
 
     # Normalisasi username ke format email (username@proto) untuk routing calls.
     # Metadata lama mungkin hanya menyimpan "alice", bukan "alice@vless".
     local email_for_routing="${username}"
     if [[ "${email_for_routing}" != *"@"* ]]; then
       email_for_routing="${email_for_routing}@${proto}"
+    fi
+    local speed_username="${username}"
+    if [[ "${speed_username}" == *"@"* ]]; then
+      speed_username="${speed_username%%@*}"
     fi
 
     echo "Username     : ${username}"
@@ -3827,6 +3928,9 @@ quota_edit_flow() {
     echo "IP Limit     : ${ip_state}"
     echo "Block Reason : ${block_reason}"
     echo "IP Limit Max : ${ip_lim}"
+    echo "Speed Download : ${speed_down} Mbps"
+    echo "Speed Upload   : ${speed_up} Mbps"
+    echo "Speed Limit    : ${speed_state}"
     hr
 
     echo "  1) View JSON"
@@ -3836,6 +3940,9 @@ quota_edit_flow() {
     echo "  5) IP Limit Enable/Disable (toggle)"
     echo "  6) Set IP Limit (angka)"
     echo "  7) Unlock IP Lock"
+    echo "  8) Set Speed Download (Mbps)"
+    echo "  9) Set Speed Upload (Mbps)"
+    echo " 10) Speed Limit Enable/Disable (toggle)"
     echo "  0) Back (kembali)"
     hr
     read -r -p "Pilih: " c
@@ -3934,6 +4041,80 @@ quota_edit_flow() {
         quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
         svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP lock di-unlock"
+        pause
+        ;;
+      8)
+        read -r -p "Speed Download (Mbps) (contoh: 20 atau 20mbit) (atau kembali): " speed_down_input
+        if is_back_choice "${speed_down_input}"; then
+          continue
+        fi
+        speed_down_input="$(normalize_speed_mbit_input "${speed_down_input}")"
+        if [[ -z "${speed_down_input}" ]] || ! speed_mbit_is_positive "${speed_down_input}"; then
+          warn "Speed download tidak valid. Gunakan angka > 0, contoh: 20 atau 20mbit"
+          pause
+          continue
+        fi
+        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_down_mbit']=float(${speed_down_input})"
+        if [[ "$(quota_get_status_bool "${qf}" "speed_limit_enabled")" == "true" ]]; then
+          quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
+        fi
+        log "Speed download diubah: ${speed_down_input} Mbps"
+        pause
+        ;;
+      9)
+        read -r -p "Speed Upload (Mbps) (contoh: 10 atau 10mbit) (atau kembali): " speed_up_input
+        if is_back_choice "${speed_up_input}"; then
+          continue
+        fi
+        speed_up_input="$(normalize_speed_mbit_input "${speed_up_input}")"
+        if [[ -z "${speed_up_input}" ]] || ! speed_mbit_is_positive "${speed_up_input}"; then
+          warn "Speed upload tidak valid. Gunakan angka > 0, contoh: 10 atau 10mbit"
+          pause
+          continue
+        fi
+        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_up_mbit']=float(${speed_up_input})"
+        if [[ "$(quota_get_status_bool "${qf}" "speed_limit_enabled")" == "true" ]]; then
+          quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
+        fi
+        log "Speed upload diubah: ${speed_up_input} Mbps"
+        pause
+        ;;
+      10)
+        local speed_on speed_down_now speed_up_now
+        speed_on="$(quota_get_status_bool "${qf}" "speed_limit_enabled")"
+        if [[ "${speed_on}" == "true" ]]; then
+          quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_limit_enabled']=False"
+          quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
+          log "Speed limit: OFF"
+          pause
+          continue
+        fi
+
+        speed_down_now="$(quota_get_status_number "${qf}" "speed_down_mbit")"
+        speed_up_now="$(quota_get_status_number "${qf}" "speed_up_mbit")"
+
+        if ! speed_mbit_is_positive "${speed_down_now}"; then
+          read -r -p "Speed Download (Mbps) (contoh: 20 atau 20mbit): " speed_down_now
+          speed_down_now="$(normalize_speed_mbit_input "${speed_down_now}")"
+          if [[ -z "${speed_down_now}" ]] || ! speed_mbit_is_positive "${speed_down_now}"; then
+            warn "Speed download tidak valid. Speed limit tetap OFF."
+            pause
+            continue
+          fi
+        fi
+        if ! speed_mbit_is_positive "${speed_up_now}"; then
+          read -r -p "Speed Upload (Mbps) (contoh: 10 atau 10mbit): " speed_up_now
+          speed_up_now="$(normalize_speed_mbit_input "${speed_up_now}")"
+          if [[ -z "${speed_up_now}" ]] || ! speed_mbit_is_positive "${speed_up_now}"; then
+            warn "Speed upload tidak valid. Speed limit tetap OFF."
+            pause
+            continue
+          fi
+        fi
+
+        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_down_mbit']=float(${speed_down_now}); st['speed_up_mbit']=float(${speed_up_now}); st['speed_limit_enabled']=True"
+        quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
+        log "Speed limit: ON"
         pause
         ;;
       *)
@@ -8048,7 +8229,7 @@ daemon_status_menu() {
   echo "6) Maintenance > Daemon Status"
   hr
 
-  local daemons=("xray" "nginx" "xray-expired" "xray-quota" "xray-limit-ip" "wireproxy")
+  local daemons=("xray" "nginx" "xray-expired" "xray-quota" "xray-limit-ip" "xray-speed" "wireproxy")
   local d
   for d in "${daemons[@]}"; do
     if svc_exists "${d}"; then
@@ -8061,7 +8242,7 @@ daemon_status_menu() {
 
   echo "Log terakhir daemon:"
   hr
-  for d in "xray-expired" "xray-quota" "xray-limit-ip"; do
+  for d in "xray-expired" "xray-quota" "xray-limit-ip" "xray-speed"; do
     if svc_exists "${d}"; then
       echo "--- ${d} (5 baris terakhir) ---"
       journalctl -u "${d}" --no-pager -n 5 2>/dev/null || true
@@ -8072,10 +8253,14 @@ daemon_status_menu() {
   echo "  1) Restart xray-expired"
   echo "  2) Restart xray-quota"
   echo "  3) Restart xray-limit-ip"
-  echo "  4) Restart semua daemon (xray-expired + xray-quota + xray-limit-ip)"
+  echo "  4) Restart xray-speed"
+  echo "  5) Restart semua daemon (xray-expired + xray-quota + xray-limit-ip + xray-speed)"
   echo "  0) Back"
   hr
-  read -r -p "Pilih: " c
+  if ! read -r -p "Pilih: " c; then
+    echo
+    return 0
+  fi
   case "${c}" in
     1)
       if svc_exists xray-expired; then svc_restart xray-expired ; else warn "xray-expired tidak terpasang" ; fi
@@ -8090,7 +8275,11 @@ daemon_status_menu() {
       pause
       ;;
     4)
-      for d in xray-expired xray-quota xray-limit-ip; do
+      if svc_exists xray-speed; then svc_restart xray-speed ; else warn "xray-speed tidak terpasang" ; fi
+      pause
+      ;;
+    5)
+      for d in xray-expired xray-quota xray-limit-ip xray-speed; do
         if svc_exists "${d}"; then
           svc_restart "${d}"
         else
@@ -8119,10 +8308,13 @@ maintenance_menu() {
     echo "  5. View nginx logs (tail)"
     echo "  6. Wireproxy (WARP) Status & Monitor"
     echo "  7. Restart wireproxy (WARP)"
-    echo "  8. Daemon Status & Restart (xray-expired / xray-quota / xray-limit-ip)"
+    echo "  8. Daemon Status & Restart (xray-expired / xray-quota / xray-limit-ip / xray-speed)"
     echo "  0. Back (kembali)"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) svc_restart xray ; pause ;;
       2) svc_restart nginx ; pause ;;
@@ -8154,7 +8346,10 @@ main_menu() {
     echo "  6) Maintenance"
     echo "  0) Exit (kembali)"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      exit 0
+    fi
     case "${c}" in
       1) run_action "Status & Diagnostics" sanity_check_now ;;
       2) run_action "User Management" user_menu ;;

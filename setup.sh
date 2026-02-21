@@ -603,13 +603,21 @@ install_acme_and_issue_cert() {
 
   stop_conflicting_services
 
-  local acme_installer
-  acme_installer="$(mktemp)"
+  # acme.sh installer tertentu mengharuskan nama file "acme.sh" ada di cwd
+  # saat --install (jika tidak, bisa muncul: cp: cannot stat 'acme.sh').
+  local acme_tmpdir acme_installer acme_install_log
+  acme_tmpdir="$(mktemp -d)"
+  acme_installer="${acme_tmpdir}/acme.sh"
+  acme_install_log="${acme_tmpdir}/acme-install.log"
   download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_installer}"
   chmod 700 "${acme_installer}"
-  bash "${acme_installer}" --install --home /root/.acme.sh --accountemail "$EMAIL" >/dev/null \
-    || { rm -f "${acme_installer}" >/dev/null 2>&1 || true; die "Gagal install acme.sh dari ref ${ACME_SH_INSTALL_REF}."; }
-  rm -f "${acme_installer}" >/dev/null 2>&1 || true
+  if ! (cd "${acme_tmpdir}" && bash ./acme.sh --install --home /root/.acme.sh --accountemail "$EMAIL") >"${acme_install_log}" 2>&1; then
+    warn "Install acme.sh gagal. Ringkasan log:"
+    sed -n '1,120p' "${acme_install_log}" >&2 || true
+    rm -rf "${acme_tmpdir}" >/dev/null 2>&1 || true
+    die "Gagal install acme.sh dari ref ${ACME_SH_INSTALL_REF}."
+  fi
+  rm -rf "${acme_tmpdir}" >/dev/null 2>&1 || true
 
   export PATH="/root/.acme.sh:$PATH"
   [[ -x /root/.acme.sh/acme.sh ]] || die "acme.sh tidak ditemukan setelah proses install."
