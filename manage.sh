@@ -4661,16 +4661,17 @@ quota_edit_flow() {
       speed_username="${speed_username%%@*}"
     fi
 
-    echo "Username     : ${username}"
-    echo "Quota Limit  : ${ql_disp}"
-    echo "Quota Used   : ${qu_disp}"
-    echo "Expired At   : ${exp_date}"
-    echo "IP Limit     : ${ip_state}"
-    echo "Block Reason : ${block_reason}"
-    echo "IP Limit Max : ${ip_lim}"
-    echo "Speed Download : ${speed_down} Mbps"
-    echo "Speed Upload   : ${speed_up} Mbps"
-    echo "Speed Limit    : ${speed_state}"
+    local label_w=14
+    printf "%-${label_w}s : %s\n" "Username" "${username}"
+    printf "%-${label_w}s : %s\n" "Quota Limit" "${ql_disp}"
+    printf "%-${label_w}s : %s\n" "Quota Used" "${qu_disp}"
+    printf "%-${label_w}s : %s\n" "Expired At" "${exp_date}"
+    printf "%-${label_w}s : %s\n" "IP Limit" "${ip_state}"
+    printf "%-${label_w}s : %s\n" "Block Reason" "${block_reason}"
+    printf "%-${label_w}s : %s\n" "IP Limit Max" "${ip_lim}"
+    printf "%-${label_w}s : %s Mbps\n" "Speed Download" "${speed_down}"
+    printf "%-${label_w}s : %s Mbps\n" "Speed Upload" "${speed_up}"
+    printf "%-${label_w}s : %s\n" "Speed Limit" "${speed_state}"
     hr
 
     echo "  1) View JSON"
