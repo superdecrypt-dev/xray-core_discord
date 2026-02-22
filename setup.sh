@@ -52,6 +52,9 @@ XRAY_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${X
 ACME_SH_SCRIPT_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/acme.sh"
 ACME_SH_TARBALL_URL="https://codeload.github.com/acmesh-official/acme.sh/tar.gz/${ACME_SH_INSTALL_REF}"
 ACME_SH_DNS_CF_HOOK_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/dnsapi/dns_cf.sh"
+CUSTOM_GEOSITE_URL="${CUSTOM_GEOSITE_URL:-https://github.com/superdecrypt-dev/custom-geosite-xray/raw/main/custom.dat}"
+XRAY_ASSET_DIR="/usr/local/share/xray"
+CUSTOM_GEOSITE_DEST="${XRAY_ASSET_DIR}/custom.dat"
 
 die() {
   echo -e "${RED}[ERROR]${NC} $*" >&2
@@ -2050,14 +2053,23 @@ setup_xray_geodata_updater() {
 set -euo pipefail
 
 URL="${XRAY_INSTALL_SCRIPT_URL}"
+CUSTOM_URL="${CUSTOM_GEOSITE_URL}"
+CUSTOM_DEST="${CUSTOM_GEOSITE_DEST}"
 tmp="\$(mktemp)"
+tmp_custom="\$(mktemp)"
 cleanup() {
   rm -f "\${tmp}" >/dev/null 2>&1 || true
+  rm -f "\${tmp_custom}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 curl -fsSL --connect-timeout 15 --max-time 120 "\${URL}" -o "\${tmp}"
 bash "\${tmp}" install-geodata >/dev/null 2>&1
+
+mkdir -p "\$(dirname "\${CUSTOM_DEST}")"
+curl -fsSL --connect-timeout 15 --max-time 120 "\${CUSTOM_URL}" -o "\${tmp_custom}"
+[[ -s "\${tmp_custom}" ]] || { echo "[xray-update-geodata] custom.dat kosong: \${CUSTOM_URL}" >&2; exit 1; }
+install -m 644 "\${tmp_custom}" "\${CUSTOM_DEST}"
 EOF
 
   chmod +x /usr/local/bin/xray-update-geodata
@@ -2076,6 +2088,23 @@ EOF
   /usr/local/bin/xray-update-geodata || die "Gagal update geodata pertama kali (cek koneksi ke github.com)."
   ok "Update geodata pertama kali selesai."
 
+}
+
+install_custom_geosite_adblock() {
+  ok "Download custom geosite adblock (custom.dat)..."
+  mkdir -p "${XRAY_ASSET_DIR}"
+
+  local tmp
+  tmp="$(mktemp)"
+  download_file_or_die "${CUSTOM_GEOSITE_URL}" "${tmp}"
+  [[ -s "${tmp}" ]] || {
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    die "File custom geosite kosong: ${CUSTOM_GEOSITE_URL}"
+  }
+
+  install -m 644 "${tmp}" "${CUSTOM_GEOSITE_DEST}"
+  rm -f "${tmp}" >/dev/null 2>&1 || true
+  ok "custom.dat tersimpan di: ${CUSTOM_GEOSITE_DEST}"
 }
 
 setup_logrotate() {
@@ -4260,6 +4289,7 @@ main() {
   install_acme_and_issue_cert
   install_xray
   setup_xray_geodata_updater
+  install_custom_geosite_adblock
   write_xray_config
   write_xray_modular_configs
   configure_xray_service_confdir

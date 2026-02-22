@@ -26,6 +26,10 @@ CERT_FULLCHAIN="${CERT_DIR}/fullchain.pem"
 CERT_PRIVKEY="${CERT_DIR}/privkey.pem"
 WIREPROXY_CONF="/etc/wireproxy/config.conf"
 WGCF_DIR="/etc/wgcf"
+XRAY_ASSET_DIR="/usr/local/share/xray"
+CUSTOM_GEOSITE_DAT="${XRAY_ASSET_DIR}/custom.dat"
+ADBLOCK_GEOSITE_ENTRY="ext:custom.dat:adblock"
+ADBLOCK_BALANCER_TAG="adblock-balance"
 
 # Domain / ACME / Cloudflare (disamakan dengan setup.sh)
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ}"
@@ -5167,6 +5171,7 @@ quota_menu() {
 # - Observatory: conf.d/60-observatory.json (untuk leastPing/leastLoad)
 # - WARP: global / per-user / per-protocol (inbound)
 # - Domain/Geosite: direct exceptions (editable list, template tetap readonly)
+# - Adblock: custom geosite ext:custom.dat:adblock (enable/disable)
 # -------------------------
 warp_status() {
   title
@@ -7205,6 +7210,403 @@ PY
   fi
 }
 
+xray_routing_adblock_rule_get() {
+  # prints: enabled=<0|1> outbound=<tag|balancer:tag|-> duplicates=<n> domains=<n>
+  need_python3
+  if [[ ! -f "${XRAY_ROUTING_CONF}" ]]; then
+    echo "enabled=0"
+    echo "outbound=-"
+    echo "duplicates=0"
+    echo "domains=0"
+    return 0
+  fi
+  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${ADBLOCK_GEOSITE_ENTRY}" 2>/dev/null || true
+import json
+import sys
+
+src, entry = sys.argv[1:3]
+
+try:
+  with open(src, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+except Exception:
+  print("enabled=0")
+  print("outbound=-")
+  print("duplicates=0")
+  print("domains=0")
+  raise SystemExit(0)
+
+rules = ((cfg.get("routing") or {}).get("rules") or [])
+targets = []
+for i, r in enumerate(rules):
+  if not isinstance(r, dict):
+    continue
+  if r.get("type") != "field":
+    continue
+  dom = r.get("domain") or []
+  if not isinstance(dom, list):
+    continue
+  if any(isinstance(x, str) and x.strip() == entry for x in dom):
+    targets.append((i, r))
+
+if not targets:
+  print("enabled=0")
+  print("outbound=-")
+  print("duplicates=0")
+  print("domains=0")
+  raise SystemExit(0)
+
+r = targets[0][1]
+out = "-"
+ot = r.get("outboundTag")
+if isinstance(ot, str) and ot.strip():
+  out = ot.strip()
+else:
+  bt = r.get("balancerTag")
+  if isinstance(bt, str) and bt.strip():
+    out = "balancer:" + bt.strip()
+
+dom = r.get("domain") or []
+dom_count = 0
+if isinstance(dom, list):
+  dom_count = sum(1 for x in dom if isinstance(x, str) and x.strip())
+
+print("enabled=1")
+print(f"outbound={out}")
+print(f"duplicates={max(0, len(targets) - 1)}")
+print(f"domains={dom_count}")
+PY
+}
+
+adblock_custom_dat_status_get() {
+  if [[ -s "${CUSTOM_GEOSITE_DAT}" ]]; then
+    local sz
+    sz="$(stat -c '%s' "${CUSTOM_GEOSITE_DAT}" 2>/dev/null || echo "0")"
+    echo "ready (${sz} bytes)"
+  else
+    echo "missing"
+  fi
+}
+
+xray_routing_adblock_rule_set() {
+  # args: blocked|direct|warp|balancer|off
+  local mode="${1:-}"
+  local backup tmp out changed
+  need_python3
+  [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
+  if [[ "${mode,,}" == "balancer" ]]; then
+    [[ -f "${XRAY_OUTBOUNDS_CONF}" ]] || die "Xray outbounds conf tidak ditemukan: ${XRAY_OUTBOUNDS_CONF}"
+  fi
+  ensure_path_writable "${XRAY_ROUTING_CONF}"
+  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing-adblock.json.tmp"
+
+  out="$(
+    (
+      flock -x 200
+      python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${ADBLOCK_GEOSITE_ENTRY}" "${ADBLOCK_BALANCER_TAG}" || exit 1
+import json
+import sys
+
+src, out_src, dst, mode, entry, bal_tag = sys.argv[1:7]
+mode = mode.strip().lower()
+if mode not in ("blocked", "direct", "warp", "balancer", "off"):
+  raise SystemExit("Mode harus blocked|direct|warp|balancer|off")
+
+with open(src, "r", encoding="utf-8") as f:
+  cfg = json.load(f)
+
+routing = cfg.get("routing") or {}
+rules = routing.get("rules")
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing.rules")
+balancers = routing.get("balancers")
+if not isinstance(balancers, list):
+  balancers = []
+
+before = json.dumps(cfg, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+def is_default_rule(r):
+  if not isinstance(r, dict):
+    return False
+  if r.get("type") != "field":
+    return False
+  port = str(r.get("port", "")).strip()
+  if port not in ("1-65535", "0-65535"):
+    return False
+  if r.get("user") or r.get("domain") or r.get("ip") or r.get("protocol"):
+    return False
+  return True
+
+def find_default_idx():
+  idx = None
+  for i, r in enumerate(rules):
+    if is_default_rule(r):
+      idx = i
+  return idx
+
+def find_template_direct_idx():
+  for i, r in enumerate(rules):
+    if not isinstance(r, dict):
+      continue
+    if r.get("type") != "field":
+      continue
+    if r.get("outboundTag") != "direct":
+      continue
+    dom = r.get("domain") or []
+    if isinstance(dom, list) and ("geosite:apple" in dom or "geosite:google" in dom):
+      return i
+  return None
+
+def has_entry(r):
+  if not isinstance(r, dict):
+    return False
+  if r.get("type") != "field":
+    return False
+  dom = r.get("domain") or []
+  if not isinstance(dom, list):
+    return False
+  for x in dom:
+    if isinstance(x, str) and x.strip() == entry:
+      return True
+  return False
+
+def get_outbound_tags():
+  try:
+    with open(out_src, "r", encoding="utf-8") as f:
+      out_cfg = json.load(f)
+  except Exception as e:
+    raise SystemExit(f"Gagal membaca outbounds: {e}")
+  outbounds = out_cfg.get("outbounds")
+  if not isinstance(outbounds, list):
+    outbounds = []
+  tags = []
+  for o in outbounds:
+    if not isinstance(o, dict):
+      continue
+    t = o.get("tag")
+    if isinstance(t, str) and t.strip():
+      tags.append(t.strip())
+  return tags
+
+idxs = [i for i, r in enumerate(rules) if has_entry(r)]
+
+if mode == "off":
+  if idxs:
+    rm = set(idxs)
+    rules = [r for i, r in enumerate(rules) if i not in rm]
+else:
+  if len(idxs) > 1:
+    rm = set(idxs[1:])
+    rules = [r for i, r in enumerate(rules) if i not in rm]
+
+  primary_idx = None
+  for i, r in enumerate(rules):
+    if has_entry(r):
+      primary_idx = i
+      break
+
+  if primary_idx is None:
+    default_idx = find_default_idx()
+    tpl_idx = find_template_direct_idx()
+    insert_at = default_idx if default_idx is not None else len(rules)
+    if tpl_idx is not None and tpl_idx < insert_at:
+      insert_at = tpl_idx + 1
+    rules.insert(insert_at, {
+      "type": "field",
+      "domain": [entry],
+      "outboundTag": "blocked"
+    })
+    primary_idx = insert_at
+
+  rule = rules[primary_idx]
+  if not isinstance(rule, dict):
+    rule = {}
+  dom = rule.get("domain")
+  if not isinstance(dom, list):
+    dom = []
+
+  cleaned = [entry]
+  seen = {entry}
+  for x in dom:
+    if not isinstance(x, str):
+      continue
+    x = x.strip()
+    if not x or x in seen:
+      continue
+    cleaned.append(x)
+    seen.add(x)
+
+  rule["type"] = "field"
+  rule["domain"] = cleaned
+  if mode == "balancer":
+    rule.pop("outboundTag", None)
+    rule["balancerTag"] = bal_tag
+  else:
+    rule.pop("balancerTag", None)
+    rule["outboundTag"] = mode
+  rules[primary_idx] = rule
+
+  default_idx = find_default_idx()
+  if default_idx is not None and primary_idx > default_idx:
+    moved = rules.pop(primary_idx)
+    rules.insert(default_idx, moved)
+
+clean_balancers = []
+found_bal = None
+for b in balancers:
+  if not isinstance(b, dict):
+    continue
+  t = b.get("tag")
+  if isinstance(t, str) and t.strip() == bal_tag:
+    if found_bal is None:
+      found_bal = dict(b)
+    continue
+  clean_balancers.append(b)
+
+if mode == "balancer":
+  known = set(get_outbound_tags())
+  if not {"direct", "warp"}.issubset(known):
+    raise SystemExit("Outbound direct/warp wajib ada untuk mode balancer adblock.")
+  selector = ["direct", "warp"]
+
+  if found_bal is None:
+    found_bal = {"tag": bal_tag}
+  found_bal["selector"] = selector
+  st = found_bal.get("strategy")
+  if not isinstance(st, dict):
+    st = {}
+  typ = st.get("type")
+  if not isinstance(typ, str) or not typ.strip():
+    st = {"type": "random"}
+  found_bal["strategy"] = st
+  clean_balancers.insert(0, found_bal)
+
+routing["rules"] = rules
+routing["balancers"] = clean_balancers
+cfg["routing"] = routing
+after = json.dumps(cfg, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+changed = 1 if after != before else 0
+print(f"changed={changed}")
+
+with open(dst, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+PY
+      xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+  )" || {
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    die "Gagal update adblock routing (rollback ke backup: ${backup})"
+  }
+
+  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+  if [[ "${changed}" != "1" ]]; then
+    return 0
+  fi
+
+  svc_restart xray || true
+  if ! svc_wait_active xray 20; then
+    (
+      flock -x 200
+      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
+    ) 200>"${ROUTING_LOCK_FILE}"
+    systemctl restart xray || true
+    die "xray tidak aktif setelah update adblock routing. Config di-rollback ke backup: ${backup}"
+  fi
+}
+
+adblock_menu() {
+  need_python3
+  while true; do
+    local st enabled outbound duplicates domains asset_status
+    st="$(xray_routing_adblock_rule_get 2>/dev/null || true)"
+    enabled="$(printf '%s\n' "${st}" | awk -F'=' '/^enabled=/{print $2; exit}')"
+    outbound="$(printf '%s\n' "${st}" | awk -F'=' '/^outbound=/{sub(/^outbound=/,""); print; exit}')"
+    duplicates="$(printf '%s\n' "${st}" | awk -F'=' '/^duplicates=/{print $2; exit}')"
+    domains="$(printf '%s\n' "${st}" | awk -F'=' '/^domains=/{print $2; exit}')"
+    asset_status="$(adblock_custom_dat_status_get)"
+
+    title
+    echo "4) Network Controls > Adblock (Custom Geosite)"
+    hr
+    printf "Geosite File : %s\n" "${CUSTOM_GEOSITE_DAT}"
+    printf "Asset Status : %s\n" "${asset_status}"
+    printf "Rule Entry   : %s\n" "${ADBLOCK_GEOSITE_ENTRY}"
+    if [[ "${enabled}" == "1" ]]; then
+      printf "Rule Status  : ON\n"
+    else
+      printf "Rule Status  : OFF\n"
+    fi
+    printf "OutboundTag  : %s\n" "${outbound:--}"
+    printf "Domain Count : %s\n" "${domains:-0}"
+    if [[ -n "${duplicates}" && "${duplicates}" != "0" ]]; then
+      printf "Duplicates   : %s (akan dibersihkan saat update)\n" "${duplicates}"
+    fi
+    hr
+    echo "  1) Enable -> blocked"
+    echo "  2) Enable -> direct"
+    echo "  3) Enable -> warp"
+    echo "  4) Enable -> balancer (direct+warp)"
+    echo "  5) Disable (hapus rule)"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c
+    case "${c}" in
+      1)
+        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
+          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
+          pause
+          continue
+        fi
+        xray_routing_adblock_rule_set blocked
+        log "Adblock diaktifkan ke outbound blocked (${ADBLOCK_GEOSITE_ENTRY})"
+        pause
+        ;;
+      2)
+        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
+          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
+          pause
+          continue
+        fi
+        xray_routing_adblock_rule_set direct
+        log "Adblock diaktifkan ke outbound direct (${ADBLOCK_GEOSITE_ENTRY})"
+        pause
+        ;;
+      3)
+        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
+          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
+          pause
+          continue
+        fi
+        xray_routing_adblock_rule_set warp
+        log "Adblock diaktifkan ke outbound warp (${ADBLOCK_GEOSITE_ENTRY})"
+        pause
+        ;;
+      4)
+        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
+          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
+          pause
+          continue
+        fi
+        xray_routing_adblock_rule_set balancer
+        log "Adblock diaktifkan ke balancer ${ADBLOCK_BALANCER_TAG} (${ADBLOCK_GEOSITE_ENTRY})"
+        pause
+        ;;
+      5)
+        xray_routing_adblock_rule_set off
+        log "Adblock dinonaktifkan (rule dihapus: ${ADBLOCK_GEOSITE_ENTRY})"
+        pause
+        ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
 warp_global_menu() {
   while true; do
     title
@@ -9016,6 +9418,7 @@ network_menu() {
     echo "  3) DNS Settings"
     echo "  4) DNS Advanced (Editor)"
     echo "  5) Diagnostics"
+    echo "  6) Adblock (Custom Geosite)"
     echo "  0) Back (kembali)"
     hr
     read -r -p "Pilih: " c
@@ -9025,6 +9428,7 @@ network_menu() {
       3) dns_settings_menu ;;
       4) dns_addons_menu ;;
       5) network_diagnostics_menu ;;
+      6) adblock_menu ;;
       0|kembali|k|back|b) break ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac
@@ -9922,6 +10326,19 @@ daemon_log_tail_show() {
   pause
 }
 
+install_discord_bot_menu() {
+  title
+  echo "9) Install BOT Discord"
+  hr
+  echo "Kerangka menu Install BOT Discord sudah disiapkan."
+  echo "Fungsi instalasi belum diimplementasikan (placeholder)."
+  echo
+  echo "Placeholder script:"
+  echo "  /opt/xray-core_discord/install-discord-bot.sh"
+  hr
+  pause
+}
+
 daemon_status_menu() {
   title
   echo "8) Maintenance > Daemon Status"
@@ -10046,6 +10463,7 @@ main_menu() {
     echo "  6) Speedtest"
     echo "  7) Security"
     echo "  8) Maintenance"
+    echo "  9) Install BOT Discord"
     echo "  0) Exit (kembali)"
     hr
     if ! read -r -p "Pilih: " c; then
@@ -10061,6 +10479,7 @@ main_menu() {
       6) run_action "Speedtest" speedtest_menu ;;
       7) run_action "Security" fail2ban_menu ;;
       8) run_action "Maintenance" maintenance_menu ;;
+      9) run_action "Install BOT Discord" install_discord_bot_menu ;;
       0|kembali|k|back|b) exit 0 ;;
       *) warn "Pilihan tidak valid" ; sleep 1 ;;
     esac

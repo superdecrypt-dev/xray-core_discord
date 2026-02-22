@@ -23,6 +23,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/xray-core_d
 |---|---|
 | `setup.sh` | One-time setup dari nol sampai service aktif |
 | `manage.sh` | Menu operasional harian (runtime changes) |
+| `install-discord-bot.sh` | Kerangka installer BOT Discord (placeholder) |
 | `run.sh` | Bootstrap installer cepat |
 
 ## Highlight Fitur Menu (`manage.sh`)
@@ -38,6 +39,7 @@ Main Menu
   6) Speedtest
   7) Security
   8) Maintenance
+  9) Install BOT Discord
   0) Exit
 ```
 
@@ -138,6 +140,10 @@ Operasi service tanpa keluar menu:
 - Wireproxy status (mode ringkas) + restart
 - Daemon status & restart (`xray-expired`, `xray-quota`, `xray-limit-ip`, `xray-speed`)
 - Log daemon sekarang **on-demand** agar layar tidak penuh
+
+### 9) Install BOT Discord
+- Menu kerangka untuk fitur install bot Discord
+- Script `install-discord-bot.sh` saat ini masih placeholder (belum diimplementasikan)
 
 ## Ringkasan Fitur `setup.sh` (One-Time)
 `setup.sh` menangani provisioning awal end-to-end:
