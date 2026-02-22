@@ -1,34 +1,25 @@
-# Xray Core Discord - Auto Setup + Menu Operasional Harian
+# Xray Core Discord
 
-Automasi instalasi dan operasional VPS untuk Xray-core dengan pendekatan:
-- `setup.sh` untuk provisioning awal (sekali jalan)
-- `manage.sh` untuk operasional harian berbasis menu interaktif
+> Auto setup + menu operasional harian untuk Xray-core di VPS Linux.
 
-Fokus project ini: operasional cepat untuk admin, bukan sekadar template config statis.
+![Shell](https://img.shields.io/badge/Shell-Bash-121011?logo=gnu-bash)
+![OS](https://img.shields.io/badge/OS-Ubuntu%20%2F%20Debian-0B3D91)
+![Xray](https://img.shields.io/badge/Xray-Core-Operational-1F6FEB)
+![Mode](https://img.shields.io/badge/Mode-Menu%20Driven-2EA043)
 
-## Fokus Utama: `manage.sh`
-`manage.sh` adalah pusat kontrol runtime untuk pekerjaan harian admin.  
-`setup.sh` dipakai sekali saat provisioning, lalu semua operasi harian dipusatkan ke `manage.sh`.
+`setup.sh` dipakai sekali untuk provisioning. `manage.sh` dipakai terus untuk operasi harian.
 
-Kenapa `manage.sh` jadi fitur utama:
-- Satu command untuk operasi rutin: `manage`
-- Main menu menampilkan ringkasan realtime server + status layanan
-- Manajemen user, quota, limit IP, speed, routing, domain, dan security ada di satu tempat
-- Runtime change lebih aman (validasi config, lock file, dan flow menu yang terstruktur)
-- Integrasi langsung dengan daemon operasional (`xray-expired`, `xray-quota`, `xray-limit-ip`, `xray-speed`)
+[Quick Install](#quick-install-root) | [Fitur manage.sh](#fitur-unggulan-managesh) | [Daemon Runtime](#daemon-runtime) | [Troubleshooting](#troubleshooting-cepat)
 
-## Ringkasan Fitur Unggulan `manage.sh`
-| Area | Yang Bisa Dilakukan | Dampak Operasional |
-|---|---|---|
-| Monitoring | Cek status service, daemon, TLS, listener, validasi config | Diagnosa masalah cepat tanpa command manual panjang |
-| User Lifecycle | Add/delete user, set expiry, set quota, list akun | Onboarding/offboarding user lebih cepat |
-| Access Control | Manual block/unblock, IP limit, unlock lock, speed limit | Kontrol abuse per akun lebih presisi |
-| Network | Mode egress direct/warp/balancer, adblock geosite, DNS editor, WARP tier | Routing fleksibel sesuai kebutuhan jaringan |
-| Security & Maintenance | Kelola cert TLS, fail2ban, restart service/daemon, cek hardening | Operasional harian stabil tanpa keluar menu |
+## Kenapa Project Ini
+| Nilai Utama | Penjelasan Singkat |
+|---|---|
+| Cepat dipakai | Satu command install, lanjut operasi lewat menu interaktif |
+| Operasional terpusat | User, quota, speed, routing, domain, dan security di satu panel |
+| Aman untuk runtime changes | Ada validasi config, lock file, dan pemisahan setup vs daily operations |
+| Ramah admin | Status realtime server tampil di header menu utama |
 
-## Quick Install
-Jalankan sebagai `root`:
-
+## Quick Install (Root)
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/xray-core_discord/main/run.sh)
 ```
@@ -38,17 +29,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/xray-core_d
 2. Install command `manage` ke `/usr/local/bin/manage`
 3. Menjalankan `setup.sh`
 
+## Alur Operasional
+```mermaid
+flowchart LR
+    A[run.sh] --> B[setup.sh one-time provisioning]
+    B --> C[service dan daemon siap]
+    C --> D[manage.sh daily operations]
+```
+
 ## Struktur File
 | File | Peran |
 |---|---|
 | `setup.sh` | One-time setup dari nol sampai service aktif |
 | `manage.sh` | Menu operasional harian (runtime changes) |
-| `install-discord-bot.sh` | Kerangka installer BOT Discord (placeholder) |
 | `run.sh` | Bootstrap installer cepat |
+| `tc-limit.sh` | Helper pembatasan bandwidth berbasis tc |
 
-## Peta Menu `manage.sh`
-Menu utama saat ini:
+## Fitur Unggulan `manage.sh`
+`manage.sh` adalah pusat kontrol runtime untuk pekerjaan harian admin.
 
+### Peta Menu
 ```text
 Main Menu
   1) Status & Diagnostics
@@ -63,38 +63,26 @@ Main Menu
   0) Exit
 ```
 
-Selain daftar menu, bagian atas Main Menu menampilkan header realtime:
+Header realtime di Main Menu menampilkan:
 - `SYSTEM OS`, `RAM`, `UPTIME`
 - `IP VPS`, `ISP`, `COUNTRY`
 - `DOMAIN`, `TLS EXPIRED`, `WARP STATUS`
-- Ringkasan horizontal jumlah akun: `VLESS | VMESS | TROJAN`
+- Jumlah akun: `VLESS | VMESS | TROJAN`
 
-## Fitur Per Menu
+### Ringkasan Fitur Per Menu
+| Menu | Fokus Operasional | Dampak |
+|---|---|---|
+| `1) Status & Diagnostics` | Cek status `xray/nginx`, daemon, TLS, listener, validasi config | Diagnosa cepat saat ada gangguan |
+| `2) User Management` | Add, delete, set expiry, list user | Lifecycle akun harian lebih efisien |
+| `3) Quota & Access Control` | Quota, block, IP limit, speed limit per user | Kontrol abuse lebih presisi |
+| `4) Network Controls` | Egress direct/warp/balancer, adblock geosite, DNS, WARP tier | Routing fleksibel sesuai kebutuhan |
+| `5) Domain Control` | Set domain + issue cert, cek status cert/key | Manajemen domain dari satu menu |
+| `6) Speedtest` | Jalankan Ookla speedtest + cek versi | Verifikasi performa jaringan cepat |
+| `7) Security` | TLS ops, fail2ban, hardening status | Meningkatkan keamanan operasional |
+| `8) Maintenance` | Restart service/daemon, tail log, wireproxy status | Maintenance tanpa keluar panel |
+| `9) Install BOT Discord` | Placeholder menu integrasi bot | Slot ekspansi fitur berikutnya |
 
-### 1) Status & Diagnostics
-Untuk health check cepat server:
-- Status service inti (`xray`, `nginx`)
-- Status daemon (`xray-expired`, `xray-quota`, `xray-limit-ip`)
-- Validasi file penting, JSON config, listener, TLS expiry
-- Ringkasan “siap pakai / ada warning”
-
-### 2) User Management
-Operasi akun harian:
-- Add user (`vless` / `vmess` / `trojan`)
-- Delete user
-- Extend/Set expiry
-- List users
-
-Input Add User:
-- Username
-- Masa aktif (hari)
-- Quota (GB)
-- IP limit `on/off` + nilai limit
-- Speed limit `on/off` + speed download/upload
-
-### 3) Quota & Access Control
-Menu kontrol detail per akun (fitur paling operasional):
-
+### Detail Penting: `3) Quota & Access Control`
 ```text
 1) View JSON
 2) Set Quota Limit (GB)
@@ -110,95 +98,46 @@ Menu kontrol detail per akun (fitur paling operasional):
 ```
 
 Status detail akun menampilkan:
-- Quota Limit / Quota Used / Expired
-- IP Limit ON/OFF + nilai max
-- Lock reason (`manual`, `quota`, `ip_limit`)
-- Speed download/upload + status speed limit
+- Quota limit, quota used, expired date
+- Status IP limit dan nilai maksimum
+- Lock reason: `manual`, `quota`, `ip_limit`
+- Speed download/upload + status speed limiter
 
-### 4) Network Controls
-Pusat kontrol routing dan jaringan:
+### Detail Penting: `4) Network Controls`
 - Egress mode: `direct`, `warp`, `balancer`
-- Balancer strategy + selector + observatory tuning
-- Adblock custom geosite:
-  - Rule entry: `ext:custom.dat:adblock`
-  - Opsi mode: `blocked`, `direct`, `warp`, `balancer (direct+warp)`, `disable`
-  - Balancer adblock memakai tag khusus `adblock-balance` (terisolasi dari balancer global `egress-balance`)
-- WARP controls:
-  - Global
-  - Per-user
-  - Per-protocol inbound
-  - Per-domain/geosite
-  - **WARP Tier (Free/Plus)** dengan status:
-    - `Target Tier` (tujuan tersimpan)
-    - `Live Tier` (hasil realtime)
-- DNS settings + DNS advanced editor
-- Diagnostics routing/conf.d/service status
+- Balancer strategy, selector, observatory tuning
+- Adblock geosite custom (`ext:custom.dat:adblock`) dengan mode:
+  `blocked`, `direct`, `warp`, `balancer (direct+warp)`, `disable`
+- WARP controls: global, per-user, per-protocol inbound, per-domain/geosite
+- WARP tier management: `Target Tier` dan `Live Tier`
+- DNS settings + advanced DNS editor
 
-### 5) Domain Control
-Fitur domain yang setara dengan flow setup:
-- Set domain + issue certificate (flow penuh)
-- Show current domain + status cert/key
-
-### 6) Speedtest
-- Run speedtest (Ookla)
-- Show speedtest version
-
-### 7) Security
-- TLS & Certificate:
-  - Show cert info
-  - Check expiry
-  - Renew cert
-  - Reload nginx
-- Fail2ban protection:
-  - Show jail status
-  - Show banned IP
-  - Unban IP
-  - Restart fail2ban
-- System hardening status (BBR, swap, ulimit, chrony)
-- Security overview ringkas
-
-### 8) Maintenance
-Operasi service tanpa keluar menu:
-- Restart `xray`, `nginx`, atau keduanya
-- Tail log `xray` / `nginx`
-- Wireproxy status (mode ringkas) + restart
-- Daemon status & restart (`xray-expired`, `xray-quota`, `xray-limit-ip`, `xray-speed`)
-- Log daemon sekarang **on-demand** agar layar tidak penuh
-
-### 9) Install BOT Discord
-- Menu kerangka untuk fitur install bot Discord
-- Script `install-discord-bot.sh` saat ini masih placeholder (belum diimplementasikan)
-
-## Ringkasan Fitur `setup.sh` (One-Time)
+## Ringkasan `setup.sh` (One-Time)
 `setup.sh` menangani provisioning awal end-to-end:
 1. Install dependency OS
 2. Install Nginx dari repo resmi `nginx.org`
 3. Install Xray-core + geodata updater + custom geosite adblock (`custom.dat`)
 4. Generate modular config di `/usr/local/etc/xray/conf.d/`
-5. Issue TLS dengan acme.sh (standalone atau `dns_cf_wildcard`)
+5. Issue TLS via acme.sh (standalone atau `dns_cf_wildcard`)
 6. Install WARP stack (`wgcf` + `wireproxy`)
-7. Install runtime daemon:
-   - `xray-expired`
-   - `xray-quota`
-   - `xray-limit-ip`
-   - `xray-speed`
-8. Install hardening baseline (fail2ban, sysctl/BBR, swap, ulimit, logrotate)
+7. Install daemon runtime: `xray-expired`, `xray-quota`, `xray-limit-ip`, `xray-speed`
+8. Apply baseline hardening (fail2ban, sysctl/BBR, swap, ulimit, logrotate)
 9. Install speedtest via snap
 
 Catatan custom geosite adblock:
-- Sumber file: `https://github.com/superdecrypt-dev/custom-geosite-xray/raw/main/custom.dat`
+- Sumber: `https://github.com/superdecrypt-dev/custom-geosite-xray/raw/main/custom.dat`
 - Lokasi install: `/usr/local/share/xray/custom.dat`
-- Routing tidak dipaksa dari `setup.sh`; pengaturan mode dilakukan dari menu `manage.sh` -> `4) Network Controls` -> `6) Adblock (Custom Geosite)`
+- Aktivasi routing dilakukan dari `manage.sh` -> `4) Network Controls` -> `6) Adblock (Custom Geosite)`
 
 ## Daemon Runtime
-Service yang menopang automasi operasional:
-- `xray-expired`: hapus user expired dari inbounds/routing
-- `xray-quota`: lock user ketika quota habis
-- `xray-limit-ip`: lock user saat IP aktif melebihi limit
-- `xray-speed`: apply limit speed per user (tc + nft)
+| Service | Fungsi |
+|---|---|
+| `xray-expired` | Hapus user expired dari inbounds/routing |
+| `xray-quota` | Lock user saat quota habis |
+| `xray-limit-ip` | Lock user saat IP aktif melebihi limit |
+| `xray-speed` | Terapkan speed policy per user (tc + nft) |
 
 Cek cepat:
-
 ```bash
 systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-pager
 ```
@@ -225,20 +164,19 @@ systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-page
 manage
 ```
 
-atau
-
+Atau:
 ```bash
 /usr/local/bin/manage
 ```
 
-## Troubleshooting Singkat
+## Troubleshooting Cepat
 | Kasus | Tindakan |
 |---|---|
 | `Jalankan sebagai root` | Jalankan dengan `sudo` atau login root |
-| TLS issue gagal (dns_cf) | Pastikan token Cloudflare valid + scope DNS edit & zone read |
-| Speed limit tidak terasa | Cek `xray-speed` service dan status apply policy |
-| User tidak auto-lock/unlock | Cek `xray-quota` + `xray-limit-ip` service |
+| TLS issue gagal (dns_cf) | Pastikan token Cloudflare valid, scope DNS edit + zone read |
+| Speed limit tidak terasa | Cek service `xray-speed` dan status apply policy |
+| User tidak auto-lock/unlock | Cek service `xray-quota` + `xray-limit-ip` |
 | `Target Tier` unknown | Jalankan switch tier (Free/Plus) sekali agar target tersimpan |
 
 ---
-Dokumentasi ini sengaja menonjolkan fitur operasional menu karena itu inti workflow harian admin di project ini.
+Dokumentasi ini sengaja menempatkan `manage.sh` sebagai pusat workflow harian admin.
