@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Harden PATH untuk mencegah PATH hijacking saat script dijalankan sebagai root.
+SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="${SAFE_PATH}"
+export PATH
+
 trap 'rc=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2; exit ${rc}' ERR
 
 # =========================
@@ -159,7 +164,7 @@ ensure_dpkg_consistent() {
 }
 
 wait_for_dpkg_lock() {
-  local timeout="${1:-300}"
+  local timeout=300
   local waited=0
   local step=3
   local lock_files=(
@@ -1317,11 +1322,13 @@ EOF
 
 
   # Validasi config sebelum dipakai (hindari exit "diam-diam").
-  local test_log="/tmp/xray-config-test.log"
+  local test_log
+  test_log="$(mktemp "/tmp/xray-config-test.XXXXXX.log")"
   if ! xray run -test -config "$XRAY_CONFIG" >"$test_log" 2>&1; then
     tail -n 200 "$test_log" >&2 || true
     die "Xray config test gagal. Lihat: $test_log"
   fi
+  rm -f "$test_log" >/dev/null 2>&1 || true
 
   # Tidak perlu enable/restart xray di sini.
   # configure_xray_service_confdir (dipanggil setelah write_xray_modular_configs)
@@ -2052,7 +2059,8 @@ setup_wgcf() {
   pushd /etc/wgcf >/dev/null || die "Gagal masuk ke /etc/wgcf."
 
   if [[ ! -f wgcf-account.toml ]]; then
-    local reg_log="/tmp/wgcf-register.log"
+    local reg_log
+    reg_log="$(mktemp "/tmp/wgcf-register.XXXXXX.log")"
 
     # wgcf versi baru kadang pakai prompt berbasis TTY (arrow-keys). `yes |` sering tidak efektif.
     if command -v expect >/dev/null 2>&1; then
@@ -2081,9 +2089,11 @@ EOF
       tail -n 120 "$reg_log" >&2 || true
       die "wgcf register gagal. Lihat log: $reg_log"
     }
+    rm -f "$reg_log" >/dev/null 2>&1 || true
   fi
 
-  local gen_log="/tmp/wgcf-generate.log"
+  local gen_log
+  gen_log="$(mktemp "/tmp/wgcf-generate.XXXXXX.log")"
   wgcf generate >"$gen_log" 2>&1 || {
     tail -n 120 "$gen_log" >&2 || true
     die "wgcf generate gagal. Lihat log: $gen_log"
@@ -2092,6 +2102,7 @@ EOF
     tail -n 120 "$gen_log" >&2 || true
     die "wgcf-profile.conf tidak ditemukan setelah generate."
   }
+  rm -f "$gen_log" >/dev/null 2>&1 || true
 
   popd >/dev/null || die "Gagal kembali dari /etc/wgcf."
   ok "wgcf selesai."

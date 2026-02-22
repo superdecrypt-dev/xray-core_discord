@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Harden PATH untuk mencegah PATH hijacking saat script dijalankan sebagai root.
+SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="${SAFE_PATH}"
+export PATH
+
 # ============================================================
 # manage.sh - CLI Menu Manajemen (post-setup)
 # - Tidak mengubah setup.sh
@@ -395,6 +400,14 @@ ensure_path_writable() {
   rm -f "${tmp}" 2>/dev/null || true
 }
 
+restore_file_if_exists() {
+  local src="$1"
+  local dst="$2"
+  if [[ -f "${src}" ]]; then
+    cp -a "${src}" "${dst}" || true
+  fi
+}
+
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -564,6 +577,12 @@ is_back_choice() {
   local v="${1:-}"
   v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
   [[ "${v}" == "0" || "${v}" == "kembali" || "${v}" == "k" || "${v}" == "back" || "${v}" == "b" ]]
+}
+
+is_back_word_choice() {
+  local v="${1:-}"
+  v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${v}" == "kembali" || "${v}" == "k" || "${v}" == "back" || "${v}" == "b" ]]
 }
 
 detect_domain() {
@@ -1320,7 +1339,7 @@ domain_control_apply_nginx_domain() {
   fi
 
   local domain_re
-  domain_re="$(printf '%s\n' "${domain}" | sed -e 's/[.[\*^$()+?{|]/\\&/g')"
+  domain_re="$(printf '%s\n' "${domain}" | sed -e "s/[.[\\\\*^\\$()+?{|]/\\\\\\\\&/g")"
   if ! grep -Eq "^[[:space:]]*server_name[[:space:]]+${domain_re};" "${NGINX_CONF}"; then
     cp -a "${backup}" "${NGINX_CONF}" >/dev/null 2>&1 || true
     die "server_name ${domain}; tidak ditemukan setelah update."
@@ -2192,14 +2211,14 @@ sanity_check_now() {
   title
   echo "Sanity Check (core only)"
   hr
-  echo "$(svc_status_line xray)"
-  echo "$(svc_status_line nginx)"
+  svc_status_line xray
+  svc_status_line nginx
   hr
 
   echo "Daemon Status:"
-  echo "$(svc_status_line xray-expired)"
-  echo "$(svc_status_line xray-quota)"
-  echo "$(svc_status_line xray-limit-ip)"
+  svc_status_line xray-expired
+  svc_status_line xray-quota
+  svc_status_line xray-limit-ip
   hr
 
   check_files || true
@@ -2439,13 +2458,13 @@ PY
 
       if [[ "${changed_local}" == "1" ]]; then
         xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp}" || {
-          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_INBOUNDS_CONF}" || true
+          restore_file_if_exists "${backup}" "${XRAY_INBOUNDS_CONF}"
           exit 1
         }
 
         svc_restart xray || true
         if ! svc_wait_active xray 20; then
-          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_INBOUNDS_CONF}" || true
+          restore_file_if_exists "${backup}" "${XRAY_INBOUNDS_CONF}"
           systemctl restart xray || true
           exit 86
         fi
@@ -2561,20 +2580,20 @@ PY
 
       if [[ "${changed_local}" == "1" ]]; then
         xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp_inb}" || {
-          [[ -f "${backup_inb}" ]] && cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}" || true
-          [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+          restore_file_if_exists "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
+          restore_file_if_exists "${backup_rt}" "${XRAY_ROUTING_CONF}"
           exit 1
         }
         xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}" || {
-          [[ -f "${backup_inb}" ]] && cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}" || true
-          [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+          restore_file_if_exists "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
+          restore_file_if_exists "${backup_rt}" "${XRAY_ROUTING_CONF}"
           exit 1
         }
 
         svc_restart xray || true
         if ! svc_wait_active xray 20; then
-          [[ -f "${backup_inb}" ]] && cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}" || true
-          [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+          restore_file_if_exists "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
+          restore_file_if_exists "${backup_rt}" "${XRAY_ROUTING_CONF}"
           systemctl restart xray || true
           exit 86
         fi
@@ -2692,13 +2711,13 @@ PY
 
       if [[ "${changed_local}" == "1" ]]; then
         xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+          restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
           exit 1
         }
 
         svc_restart xray || true
         if ! svc_wait_active xray 20; then
-          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+          restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
           systemctl restart xray || true
           exit 86
         fi
@@ -3288,20 +3307,20 @@ rt_cfg["routing"] = routing
 dump_json(rt_dst, rt_cfg)
 PY
     xray_write_file_atomic "${XRAY_OUTBOUNDS_CONF}" "${tmp_out}" || {
-      [[ -f "${backup_out}" ]] && cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}" || true
-      [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
+      restore_file_if_exists "${backup_rt}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}" || {
-      [[ -f "${backup_out}" ]] && cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}" || true
-      [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
+      restore_file_if_exists "${backup_rt}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
 
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup_out}" ]] && cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}" || true
-      [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
+      restore_file_if_exists "${backup_rt}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -3650,7 +3669,7 @@ user_add_menu() {
   fi
 
   read -r -p "Masa aktif (hari) (atau kembali): " days
-  if is_back_choice "${days}"; then
+  if is_back_word_choice "${days}"; then
     return 0
   fi
   if [[ -z "${days}" || ! "${days}" =~ ^[0-9]+$ || "${days}" -le 0 ]]; then
@@ -3688,7 +3707,7 @@ user_add_menu() {
   if is_yes "${ip_toggle}"; then
     ip_enabled="true"
     read -r -p "Limit IP (angka) (atau kembali): " ip_limit
-    if is_back_choice "${ip_limit}"; then
+    if is_back_word_choice "${ip_limit}"; then
       return 0
     fi
     if [[ -z "${ip_limit}" || ! "${ip_limit}" =~ ^[0-9]+$ || "${ip_limit}" -le 0 ]]; then
@@ -3710,7 +3729,7 @@ user_add_menu() {
     speed_enabled="true"
 
     read -r -p "Speed Download Mbps (contoh: 20 atau 20mbit) (atau kembali): " speed_down
-    if is_back_choice "${speed_down}"; then
+    if is_back_word_choice "${speed_down}"; then
       return 0
     fi
     speed_down_mbit="$(normalize_speed_mbit_input "${speed_down}")"
@@ -3721,7 +3740,7 @@ user_add_menu() {
     fi
 
     read -r -p "Speed Upload Mbps (contoh: 10 atau 10mbit) (atau kembali): " speed_up
-    if is_back_choice "${speed_up}"; then
+    if is_back_word_choice "${speed_up}"; then
       return 0
     fi
     speed_up_mbit="$(normalize_speed_mbit_input "${speed_up}")"
@@ -4014,7 +4033,7 @@ PY
   case "${mode}" in
     1)
       read -r -p "Tambah berapa hari? (atau kembali): " add_days
-      if is_back_choice "${add_days}"; then
+      if is_back_word_choice "${add_days}"; then
         return 0
       fi
       if [[ -z "${add_days}" || ! "${add_days}" =~ ^[0-9]+$ || "${add_days}" -le 0 ]]; then
@@ -4132,9 +4151,11 @@ PY
         cred="$(grep -E '^UUID\s*:' "${acc_file}" | head -n1 | sed 's/^UUID\s*:\s*//' | tr -d '[:space:]')"
       fi
       if [[ -n "${cred}" ]]; then
-        xray_add_client "${proto}" "${username}" "${cred}" 2>/dev/null && \
-          log "User ${username}@${proto} di-restore ke inbounds (expired lalu di-extend)." || \
+        if xray_add_client "${proto}" "${username}" "${cred}" 2>/dev/null; then
+          log "User ${username}@${proto} di-restore ke inbounds (expired lalu di-extend)."
+        else
           warn "Gagal me-restore ${username}@${proto} ke inbounds. Cek credential di: ${acc_file}"
+        fi
       else
         warn "Credential tidak ditemukan di ${acc_file}. Re-add user manual jika diperlukan."
       fi
@@ -5030,7 +5051,7 @@ quota_edit_flow() {
         ;;
       6)
         read -r -p "IP Limit (angka) (atau kembali): " lim
-        if is_back_choice "${lim}"; then
+        if is_back_word_choice "${lim}"; then
           continue
         fi
         if [[ -z "${lim}" || ! "${lim}" =~ ^[0-9]+$ || "${lim}" -le 0 ]]; then
@@ -5054,7 +5075,7 @@ quota_edit_flow() {
         ;;
       8)
         read -r -p "Speed Download (Mbps) (contoh: 20 atau 20mbit) (atau kembali): " speed_down_input
-        if is_back_choice "${speed_down_input}"; then
+        if is_back_word_choice "${speed_down_input}"; then
           continue
         fi
         speed_down_input="$(normalize_speed_mbit_input "${speed_down_input}")"
@@ -5072,7 +5093,7 @@ quota_edit_flow() {
         ;;
       9)
         read -r -p "Speed Upload (Mbps) (contoh: 10 atau 10mbit) (atau kembali): " speed_up_input
-        if is_back_choice "${speed_up_input}"; then
+        if is_back_word_choice "${speed_up_input}"; then
           continue
         fi
         speed_up_input="$(normalize_speed_mbit_input "${speed_up_input}")"
@@ -5580,18 +5601,18 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
 
     if ! xray_confdir_syntax_test; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 87
     fi
 
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -5688,12 +5709,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -5801,12 +5822,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -5900,12 +5921,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -5967,12 +5988,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -6033,12 +6054,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -6095,12 +6116,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -6161,12 +6182,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_OBSERVATORY_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -6278,12 +6299,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -6390,12 +6411,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -6476,7 +6497,7 @@ network_show_summary() {
   hr
 
   if svc_exists wireproxy; then
-    echo "$(svc_status_line wireproxy)"
+    svc_status_line wireproxy
   else
     echo "wireproxy: (tidak terpasang)"
   fi
@@ -6943,7 +6964,7 @@ warp_controls_summary() {
   wi="$(xray_routing_rule_inbound_list_get "dummy-warp-inbounds" "warp" | wc -l | tr -d ' ')"
   di="$(xray_routing_rule_inbound_list_get "dummy-direct-inbounds" "direct" | wc -l | tr -d ' ')"
   dd="$(xray_routing_custom_domain_list_get "regexp:^$" "direct" | wc -l | tr -d ' ')"
-  wd="$(xray_routing_custom_domain_list_get 'regexp:^$WARP' "warp" | wc -l | tr -d ' ')"
+  wd="$(xray_routing_custom_domain_list_get "regexp:^\$WARP" "warp" | wc -l | tr -d ' ')"
 
   echo "WARP Global : ${global}"
   echo "wireproxy   : ${wire_state}"
@@ -7321,12 +7342,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -7629,14 +7650,14 @@ PY
       changed_local="$(xray_txn_changed_flag "${py_out}")"
 
       xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-        [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+        restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
         exit 1
       }
 
       if [[ "${changed_local}" == "1" ]]; then
         svc_restart xray || true
         if ! svc_wait_active xray 20; then
-          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+          restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
           systemctl restart xray || true
           exit 86
         fi
@@ -8159,7 +8180,7 @@ warp_domain_geosite_menu() {
 
     if [[ "${mode}" == "warp" ]]; then
       header="Custom WARP list:"
-      mapfile -t lst_raw < <(xray_routing_custom_domain_list_get 'regexp:^$WARP' "warp" 2>/dev/null || true)
+      mapfile -t lst_raw < <(xray_routing_custom_domain_list_get "regexp:^\$WARP" "warp" 2>/dev/null || true)
     else
       header="Custom DIRECT list:"
       mapfile -t lst_raw < <(xray_routing_custom_domain_list_get "regexp:^$" "direct" 2>/dev/null || true)
@@ -8206,7 +8227,7 @@ warp_domain_geosite_menu() {
           continue
         fi
         ent="$(echo "${ent}" | tr -d '[:space:]')"
-        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == 'regexp:^$WARP' ]]; then
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^\$WARP" ]]; then
           warn "Entry tidak valid / reserved"
           pause
           continue
@@ -8241,7 +8262,7 @@ warp_domain_geosite_menu() {
           ent="${lst[$((ent - 1))]}"
         fi
 
-        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == 'regexp:^$WARP' ]]; then
+        if [[ -z "${ent}" || "${ent}" == "regexp:^$" || "${ent}" == "regexp:^\$WARP" ]]; then
           warn "Entry tidak valid / reserved"
           pause
           continue
@@ -8395,7 +8416,8 @@ warp_wireproxy_apply_profile() {
 }
 
 warp_wgcf_register_noninteractive() {
-  local reg_log="/tmp/wgcf-register-manage.$$.log"
+  local reg_log
+  reg_log="$(mktemp "/tmp/wgcf-register-manage.XXXXXX.log")"
 
   mkdir -p "${WGCF_DIR}"
   pushd "${WGCF_DIR}" >/dev/null || {
@@ -8434,6 +8456,7 @@ EOF
     tail -n 60 "${reg_log}" >&2 || true
     return 1
   fi
+  rm -f "${reg_log}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -8441,8 +8464,9 @@ warp_wgcf_build_profile() {
   # args: tier [license_key]
   local tier="${1:-free}"
   local license_key="${2:-}"
-  local gen_log="/tmp/wgcf-generate-manage.$$.log"
-  local upd_log="/tmp/wgcf-update-manage.$$.log"
+  local gen_log upd_log
+  gen_log="$(mktemp "/tmp/wgcf-generate-manage.XXXXXX.log")"
+  upd_log="$(mktemp "/tmp/wgcf-update-manage.XXXXXX.log")"
 
   mkdir -p "${WGCF_DIR}"
   if [[ ! -f "${WGCF_DIR}/wgcf-account.toml" ]]; then
@@ -8483,6 +8507,7 @@ warp_wgcf_build_profile() {
     warn "wgcf-profile.conf tidak ditemukan setelah generate"
     return 1
   fi
+  rm -f "${gen_log}" "${upd_log}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -8920,12 +8945,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
           xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
             exit 1
           }
           svc_restart xray || true
           if ! svc_wait_active xray 20; then
-            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
             systemctl restart xray || true
             exit 86
           fi
@@ -8940,7 +8965,7 @@ PY
         ;;
       2)
         read -r -p "Hapus nomor entry (lihat daftar) (atau kembali): " no
-        if is_back_choice "${no}"; then
+        if is_back_word_choice "${no}"; then
           continue
         fi
         if [[ -z "${no}" || ! "${no}" =~ ^[0-9]+$ || "${no}" -le 0 ]]; then
@@ -9003,12 +9028,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
           xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
-            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
             exit 1
           }
           svc_restart xray || true
           if ! svc_wait_active xray 20; then
-            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            restore_file_if_exists "${backup}" "${XRAY_ROUTING_CONF}"
             systemctl restart xray || true
             exit 86
           fi
@@ -9151,12 +9176,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -9234,12 +9259,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -9300,12 +9325,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -9362,12 +9387,12 @@ with open(dst,'w',encoding='utf-8') as f:
   f.write("\n")
 PY
     xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       exit 1
     }
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
-      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      restore_file_if_exists "${backup}" "${XRAY_DNS_CONF}"
       systemctl restart xray || true
       exit 86
     fi
@@ -10246,11 +10271,11 @@ hardening_check_chrony() {
   echo "System Hardening Status > Check Chrony"
   hr
   if svc_exists chrony; then
-    echo "$(svc_status_line chrony)"
+    svc_status_line chrony
     hr
     systemctl status chrony --no-pager || true
   elif svc_exists chronyd; then
-    echo "$(svc_status_line chronyd)"
+    svc_status_line chronyd
     hr
     systemctl status chronyd --no-pager || true
   else
@@ -10536,7 +10561,7 @@ daemon_status_menu() {
   local d
   for d in "${daemons[@]}"; do
     if svc_exists "${d}"; then
-      echo "$(svc_status_line "${d}")"
+      svc_status_line "${d}"
     else
       echo "N/A  - ${d} (not installed)"
     fi

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Harden PATH untuk mencegah PATH hijacking saat script dijalankan sebagai root.
+SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="${SAFE_PATH}"
+export PATH
+
 # ============================================================
 # run.sh — Installer otomatis Xray VPN Server
 # Repo: https://github.com/superdecrypt-dev/xray-core_discord
