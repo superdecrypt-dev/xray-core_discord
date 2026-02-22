@@ -69,6 +69,30 @@ warn() {
   echo -e "${YELLOW}[WARN]${NC} $*"
 }
 
+declare -a _EXIT_CLEANUP_FNS=()
+
+run_exit_cleanups() {
+  local rc=$?
+  local fn
+  for fn in "${_EXIT_CLEANUP_FNS[@]}"; do
+    if declare -F "$fn" >/dev/null 2>&1; then
+      "$fn" || true
+    fi
+  done
+  return "$rc"
+}
+
+register_exit_cleanup() {
+  local fn="$1"
+  local existing
+  for existing in "${_EXIT_CLEANUP_FNS[@]}"; do
+    [[ "$existing" == "$fn" ]] && return 0
+  done
+  _EXIT_CLEANUP_FNS+=("$fn")
+}
+
+trap run_exit_cleanups EXIT
+
 safe_clear() {
   # clear bisa gagal pada shell non-interaktif (TERM tidak ada).
   if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
@@ -309,12 +333,15 @@ gen_subdomain_random() {
 }
 
 validate_subdomain() {
-  # allow: lowercase letters, digits, dot, dash; no spaces; no uppercase
+  # Allow nested subdomain labels, tapi setiap label wajib valid DNS:
+  # - 1..63 chars
+  # - hanya [a-z0-9-]
+  # - tidak boleh diawali/diakhiri '-'
   local s="$1"
   [[ -n "$s" ]] || return 1
   [[ "$s" == "${s,,}" ]] || return 1
-  [[ "$s" =~ ^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$ ]] || return 1
   [[ "$s" != *" "* ]] || return 1
+  [[ "$s" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]] || return 1
   return 0
 }
 
@@ -527,10 +554,12 @@ is_port_free() {
 # parent shell, sehingga array biasa tidak bisa dipakai untuk dedup lintas panggilan.
 # Temp file di filesystem bersifat shared dan persisten lintas subshell.
 _PICK_PORT_REGISTRY="$(mktemp)"
-# Bersihkan temp file saat script selesai (normal maupun error).
-# SC2064: intentional — ekspansi dilakukan saat trap didefinisikan (bukan saat dieksekusi).
-# shellcheck disable=SC2064
-trap "rm -f '${_PICK_PORT_REGISTRY}' 2>/dev/null || true" EXIT
+
+cleanup_pick_port_registry() {
+  [[ -n "${_PICK_PORT_REGISTRY:-}" ]] || return 0
+  rm -f -- "${_PICK_PORT_REGISTRY}" 2>/dev/null || true
+}
+register_exit_cleanup cleanup_pick_port_registry
 
 pick_port() {
   local p tries=0
@@ -3606,12 +3635,18 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable xray-expired --now >/dev/null 2>&1 || true
-  systemctl enable xray-limit-ip --now >/dev/null 2>&1 || true
-  systemctl enable xray-quota --now >/dev/null 2>&1 || true
-  systemctl restart xray-expired >/dev/null 2>&1 || true
-  systemctl restart xray-limit-ip >/dev/null 2>&1 || true
-  systemctl restart xray-quota >/dev/null 2>&1 || true
+  if ! service_enable_restart_checked xray-expired; then
+    journalctl -u xray-expired -n 120 --no-pager >&2 || true
+    die "xray-expired gagal diaktifkan. Cek log di atas."
+  fi
+  if ! service_enable_restart_checked xray-limit-ip; then
+    journalctl -u xray-limit-ip -n 120 --no-pager >&2 || true
+    die "xray-limit-ip gagal diaktifkan. Cek log di atas."
+  fi
+  if ! service_enable_restart_checked xray-quota; then
+    journalctl -u xray-quota -n 120 --no-pager >&2 || true
+    die "xray-quota gagal diaktifkan. Cek log di atas."
+  fi
 
   ok "Script manajemen siap:"
   ok "  - /usr/local/bin/xray-expired (service: xray-expired)"
