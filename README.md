@@ -6,6 +6,26 @@ Automasi instalasi dan operasional VPS untuk Xray-core dengan pendekatan:
 
 Fokus project ini: operasional cepat untuk admin, bukan sekadar template config statis.
 
+## Fokus Utama: `manage.sh`
+`manage.sh` adalah pusat kontrol runtime untuk pekerjaan harian admin.  
+`setup.sh` dipakai sekali saat provisioning, lalu semua operasi harian dipusatkan ke `manage.sh`.
+
+Kenapa `manage.sh` jadi fitur utama:
+- Satu command untuk operasi rutin: `manage`
+- Main menu menampilkan ringkasan realtime server + status layanan
+- Manajemen user, quota, limit IP, speed, routing, domain, dan security ada di satu tempat
+- Runtime change lebih aman (validasi config, lock file, dan flow menu yang terstruktur)
+- Integrasi langsung dengan daemon operasional (`xray-expired`, `xray-quota`, `xray-limit-ip`, `xray-speed`)
+
+## Ringkasan Fitur Unggulan `manage.sh`
+| Area | Yang Bisa Dilakukan | Dampak Operasional |
+|---|---|---|
+| Monitoring | Cek status service, daemon, TLS, listener, validasi config | Diagnosa masalah cepat tanpa command manual panjang |
+| User Lifecycle | Add/delete user, set expiry, set quota, list akun | Onboarding/offboarding user lebih cepat |
+| Access Control | Manual block/unblock, IP limit, unlock lock, speed limit | Kontrol abuse per akun lebih presisi |
+| Network | Mode egress direct/warp/balancer, adblock geosite, DNS editor, WARP tier | Routing fleksibel sesuai kebutuhan jaringan |
+| Security & Maintenance | Kelola cert TLS, fail2ban, restart service/daemon, cek hardening | Operasional harian stabil tanpa keluar menu |
+
 ## Quick Install
 Jalankan sebagai `root`:
 
@@ -26,7 +46,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/xray-core_d
 | `install-discord-bot.sh` | Kerangka installer BOT Discord (placeholder) |
 | `run.sh` | Bootstrap installer cepat |
 
-## Highlight Fitur Menu (`manage.sh`)
+## Peta Menu `manage.sh`
 Menu utama saat ini:
 
 ```text
