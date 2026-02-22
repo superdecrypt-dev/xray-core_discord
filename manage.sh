@@ -7520,12 +7520,11 @@ PY
 adblock_menu() {
   need_python3
   while true; do
-    local st enabled outbound duplicates domains asset_status
+    local st enabled outbound duplicates asset_status
     st="$(xray_routing_adblock_rule_get 2>/dev/null || true)"
     enabled="$(printf '%s\n' "${st}" | awk -F'=' '/^enabled=/{print $2; exit}')"
     outbound="$(printf '%s\n' "${st}" | awk -F'=' '/^outbound=/{sub(/^outbound=/,""); print; exit}')"
     duplicates="$(printf '%s\n' "${st}" | awk -F'=' '/^duplicates=/{print $2; exit}')"
-    domains="$(printf '%s\n' "${st}" | awk -F'=' '/^domains=/{print $2; exit}')"
     asset_status="$(adblock_custom_dat_status_get)"
 
     title
@@ -7540,7 +7539,6 @@ adblock_menu() {
       printf "Rule Status  : OFF\n"
     fi
     printf "OutboundTag  : %s\n" "${outbound:--}"
-    printf "Domain Count : %s\n" "${domains:-0}"
     if [[ -n "${duplicates}" && "${duplicates}" != "0" ]]; then
       printf "Duplicates   : %s (akan dibersihkan saat update)\n" "${duplicates}"
     fi
