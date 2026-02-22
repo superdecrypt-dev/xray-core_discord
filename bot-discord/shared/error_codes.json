@@ -1,0 +1,8 @@
+{
+  "ok": "Permintaan berhasil diproses.",
+  "unknown_menu": "Menu tidak ditemukan.",
+  "unknown_action": "Action tidak ditemukan.",
+  "missing_param": "Parameter wajib belum diisi.",
+  "forbidden": "Action diblokir oleh kebijakan keamanan.",
+  "backend_error": "Terjadi error pada backend."
+}

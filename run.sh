@@ -17,6 +17,7 @@ export PATH
 REPO_URL="https://github.com/superdecrypt-dev/xray-core_discord.git"
 REPO_DIR="/tmp/xray-core_discord_$$"
 MANAGE_BIN="/usr/local/bin/manage"
+BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
 
 # -------------------------
 # Warna output
@@ -87,12 +88,18 @@ clone_repo() {
 
 install_manage() {
   local src="${REPO_DIR}/manage.sh"
+  local bot_installer_src="${REPO_DIR}/install-discord-bot.sh"
 
   [[ -f "${src}" ]] || die "File manage.sh tidak ditemukan di repositori."
+  [[ -f "${bot_installer_src}" ]] || die "File install-discord-bot.sh tidak ditemukan di repositori."
 
   log "Menginstal 'manage' ke ${MANAGE_BIN} ..."
   install -m 0755 "${src}" "${MANAGE_BIN}"
   ok "Perintah 'manage' tersedia di: ${MANAGE_BIN}"
+
+  log "Menginstal installer bot Discord ke ${BOT_INSTALLER_BIN} ..."
+  install -m 0755 "${bot_installer_src}" "${BOT_INSTALLER_BIN}"
+  ok "Installer bot Discord tersedia di: ${BOT_INSTALLER_BIN}"
 }
 
 run_setup() {

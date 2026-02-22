@@ -10532,24 +10532,27 @@ install_discord_bot_menu() {
   title
   echo "9) Install BOT Discord"
   hr
-  echo "Kerangka menu Install BOT Discord sudah disiapkan."
-  echo "Fungsi instalasi belum diimplementasikan (placeholder)."
-  echo
-  local self_path base_dir installer_path
-  self_path="${BASH_SOURCE[0]}"
-  if command -v readlink >/dev/null 2>&1; then
-    self_path="$(readlink -f "${self_path}" 2>/dev/null || echo "${self_path}")"
-  fi
-  base_dir="$(cd -- "$(dirname -- "${self_path}")" >/dev/null 2>&1 && pwd -P)"
-  installer_path="${base_dir}/install-discord-bot.sh"
+  local installer_cmd="/usr/local/bin/install-discord-bot"
 
-  echo "Placeholder script:"
-  echo "  ${installer_path}"
-  if [[ ! -f "${installer_path}" ]]; then
-    warn "File installer tidak ditemukan di path di atas."
+  if [[ ! -x "${installer_cmd}" ]]; then
+    warn "Installer bot Discord tidak ditemukan / tidak executable:"
+    echo "  ${installer_cmd}"
+    echo
+    echo "Hint: jalankan ulang run.sh agar installer ikut dipasang."
+    hr
+    pause
+    return 0
   fi
+
+  echo "Menjalankan installer:"
+  echo "  ${installer_cmd}"
   hr
-  pause
+  if ! "${installer_cmd}" menu; then
+    warn "Installer bot Discord keluar dengan status error."
+    hr
+    pause
+  fi
+  return 0
 }
 
 daemon_status_menu() {

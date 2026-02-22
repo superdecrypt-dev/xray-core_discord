@@ -1,0 +1,615 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="${SAFE_PATH}"
+export PATH
+
+trap 'rc=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2; exit ${rc}' ERR
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+BOT_HOME="${BOT_HOME:-/opt/bot-discord}"
+BOT_ENV_DIR="${BOT_ENV_DIR:-/etc/xray-discord-bot}"
+BOT_ENV_FILE="${BOT_ENV_FILE:-${BOT_ENV_DIR}/bot.env}"
+BOT_STATE_DIR="${BOT_STATE_DIR:-/var/lib/xray-discord-bot}"
+BOT_LOG_DIR="${BOT_LOG_DIR:-/var/log/xray-discord-bot}"
+
+BACKEND_SERVICE="xray-discord-backend"
+GATEWAY_SERVICE="xray-discord-gateway"
+
+SRC_OWNER="${BOT_SOURCE_OWNER:-superdecrypt-dev}"
+SRC_REPO="${BOT_SOURCE_REPO:-xray-core_discord}"
+SRC_REF="${BOT_SOURCE_REF:-main}"
+SRC_ARCHIVE_URL="${BOT_SOURCE_ARCHIVE_URL:-https://codeload.github.com/${SRC_OWNER}/${SRC_REPO}/tar.gz/${SRC_REF}}"
+
+OS_DEPS=(
+  curl
+  ca-certificates
+  tar
+  jq
+  rsync
+  git
+  bash
+  python3
+  python3-venv
+  python3-pip
+  nodejs
+  npm
+)
+
+log() { echo -e "${CYAN}[bot-installer]${NC} $*"; }
+ok() { echo -e "${GREEN}[OK]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+die() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+hr() { echo "------------------------------------------------------------"; }
+
+safe_clear() {
+  if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
+    clear || true
+  fi
+}
+
+pause() {
+  read -r -p "Tekan ENTER untuk lanjut..." _ || true
+}
+
+need_root() {
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Jalankan script sebagai root."
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+mask_secret() {
+  local s="$1"
+  local n
+  n="${#s}"
+  if [[ -z "$s" ]]; then
+    echo "(kosong)"
+    return 0
+  fi
+  if (( n <= 6 )); then
+    echo "******"
+    return 0
+  fi
+  echo "${s:0:3}...${s: -3}"
+}
+
+get_env_value() {
+  local key="$1"
+  local file="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v key="$key" -F= '$1==key {print substr($0, index($0,"=")+1); exit}' "$file"
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  local tmp
+
+  mkdir -p "$(dirname "$file")"
+  [[ -f "$file" ]] || touch "$file"
+
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { done=0 }
+    $0 ~ ("^" key "=") { print key "=" value; done=1; next }
+    { print }
+    END { if (!done) print key "=" value }
+  ' "$file" > "$tmp"
+
+  install -m 600 "$tmp" "$file"
+  rm -f "$tmp" >/dev/null 2>&1 || true
+}
+
+prompt_with_default() {
+  local prompt="$1"
+  local def="$2"
+  local out
+  read -r -p "${prompt} [${def}]: " out || true
+  echo "${out:-$def}"
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local ans
+  while true; do
+    read -r -p "${prompt} (y/n): " ans || true
+    case "${ans,,}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Masukkan y atau n." ;;
+    esac
+  done
+}
+
+prompt_secret() {
+  local prompt="$1"
+  local out
+  read -r -s -p "${prompt}: " out || true
+  echo
+  echo "$out"
+}
+
+generate_secret() {
+  if command_exists openssl; then
+    openssl rand -hex 24
+  else
+    date +%s%N | sha256sum | awk '{print $1}'
+  fi
+}
+
+ensure_env_file() {
+  mkdir -p "${BOT_ENV_DIR}" "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
+
+  if [[ ! -f "${BOT_ENV_FILE}" ]]; then
+    cat > "${BOT_ENV_FILE}" <<ENVEOF
+INTERNAL_SHARED_SECRET=
+DISCORD_BOT_TOKEN=
+DISCORD_APPLICATION_ID=
+DISCORD_GUILD_ID=
+DISCORD_ADMIN_ROLE_IDS=
+DISCORD_ADMIN_USER_IDS=
+BACKEND_BASE_URL=http://127.0.0.1:8080
+BACKEND_HOST=127.0.0.1
+BACKEND_PORT=8080
+COMMANDS_FILE=${BOT_HOME}/shared/commands.json
+ENABLE_DANGEROUS_ACTIONS=true
+ENVEOF
+    chmod 600 "${BOT_ENV_FILE}"
+    ok "File env dibuat: ${BOT_ENV_FILE}"
+  else
+    chmod 600 "${BOT_ENV_FILE}" || true
+  fi
+}
+
+validate_required_env() {
+  local missing=()
+  local key val
+  for key in INTERNAL_SHARED_SECRET DISCORD_BOT_TOKEN DISCORD_APPLICATION_ID DISCORD_GUILD_ID; do
+    val="$(get_env_value "$key" "${BOT_ENV_FILE}")"
+    [[ -n "${val}" ]] || missing+=("$key")
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    warn "Env belum lengkap: ${missing[*]}"
+    return 1
+  fi
+  return 0
+}
+
+service_unit_exists() {
+  local svc="$1"
+  systemctl cat "${svc}.service" >/dev/null 2>&1
+}
+
+show_service_status() {
+  local svc="$1"
+  local active enabled
+
+  active="$(systemctl is-active "${svc}" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "${svc}" 2>/dev/null || true)"
+
+  [[ -n "${active}" ]] || active="unknown"
+  [[ -n "${enabled}" ]] || enabled="unknown"
+
+  printf "%-24s active=%-10s enabled=%s\n" "${svc}" "${active}" "${enabled}"
+}
+
+install_dependencies() {
+  need_root
+
+  if ! command_exists apt-get; then
+    die "Script ini saat ini mendukung distro berbasis apt (Ubuntu/Debian)."
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+  log "Install dependency OS/runtime..."
+  apt-get update -y
+  apt-get install -y "${OS_DEPS[@]}"
+
+  ok "Dependency berhasil dipasang."
+  echo "Versi runtime:"
+  echo "- python3: $(python3 --version 2>/dev/null || echo 'n/a')"
+  echo "- node: $(node --version 2>/dev/null || echo 'n/a')"
+  echo "- npm: $(npm --version 2>/dev/null || echo 'n/a')"
+}
+
+configure_env_interactive() {
+  need_root
+  ensure_env_file
+
+  local current_token current_secret token app_id guild_id role_ids user_ids dangerous secret_input
+
+  current_token="$(get_env_value DISCORD_BOT_TOKEN "${BOT_ENV_FILE}")"
+  current_secret="$(get_env_value INTERNAL_SHARED_SECRET "${BOT_ENV_FILE}")"
+
+  echo "Konfigurasi env: ${BOT_ENV_FILE}"
+  echo "- DISCORD_BOT_TOKEN: $(mask_secret "${current_token}")"
+  echo "- INTERNAL_SHARED_SECRET: $(mask_secret "${current_secret}")"
+
+  token="$(prompt_secret "Masukkan DISCORD_BOT_TOKEN (kosong=pertahankan yang lama)")"
+  if [[ -n "${token}" ]]; then
+    set_env_value DISCORD_BOT_TOKEN "${token}" "${BOT_ENV_FILE}"
+    ok "DISCORD_BOT_TOKEN diperbarui."
+  fi
+
+  if [[ -z "$(get_env_value INTERNAL_SHARED_SECRET "${BOT_ENV_FILE}")" ]]; then
+    secret_input="$(generate_secret)"
+    set_env_value INTERNAL_SHARED_SECRET "${secret_input}" "${BOT_ENV_FILE}"
+    ok "INTERNAL_SHARED_SECRET digenerate otomatis."
+  fi
+
+  app_id="$(prompt_with_default "DISCORD_APPLICATION_ID" "$(get_env_value DISCORD_APPLICATION_ID "${BOT_ENV_FILE}")")"
+  guild_id="$(prompt_with_default "DISCORD_GUILD_ID" "$(get_env_value DISCORD_GUILD_ID "${BOT_ENV_FILE}")")"
+  role_ids="$(prompt_with_default "DISCORD_ADMIN_ROLE_IDS (opsional, pisahkan koma)" "$(get_env_value DISCORD_ADMIN_ROLE_IDS "${BOT_ENV_FILE}")")"
+  user_ids="$(prompt_with_default "DISCORD_ADMIN_USER_IDS (opsional, pisahkan koma)" "$(get_env_value DISCORD_ADMIN_USER_IDS "${BOT_ENV_FILE}")")"
+  dangerous="$(prompt_with_default "ENABLE_DANGEROUS_ACTIONS (true/false)" "$(get_env_value ENABLE_DANGEROUS_ACTIONS "${BOT_ENV_FILE}")")"
+
+  [[ -n "${app_id}" ]] && set_env_value DISCORD_APPLICATION_ID "${app_id}" "${BOT_ENV_FILE}"
+  [[ -n "${guild_id}" ]] && set_env_value DISCORD_GUILD_ID "${guild_id}" "${BOT_ENV_FILE}"
+  set_env_value DISCORD_ADMIN_ROLE_IDS "${role_ids}" "${BOT_ENV_FILE}"
+  set_env_value DISCORD_ADMIN_USER_IDS "${user_ids}" "${BOT_ENV_FILE}"
+  set_env_value ENABLE_DANGEROUS_ACTIONS "${dangerous:-true}" "${BOT_ENV_FILE}"
+
+  set_env_value BACKEND_BASE_URL "http://127.0.0.1:8080" "${BOT_ENV_FILE}"
+  set_env_value BACKEND_HOST "127.0.0.1" "${BOT_ENV_FILE}"
+  set_env_value BACKEND_PORT "8080" "${BOT_ENV_FILE}"
+  set_env_value COMMANDS_FILE "${BOT_HOME}/shared/commands.json" "${BOT_ENV_FILE}"
+
+  chmod 600 "${BOT_ENV_FILE}" || true
+  validate_required_env || warn "Beberapa field wajib belum terisi."
+  ok "Konfigurasi env selesai."
+}
+
+change_discord_token() {
+  need_root
+  ensure_env_file
+
+  local current masked new_token confirm
+  current="$(get_env_value DISCORD_BOT_TOKEN "${BOT_ENV_FILE}")"
+  masked="$(mask_secret "${current}")"
+
+  echo "Token saat ini: ${masked}"
+  new_token="$(prompt_secret "Masukkan token Discord baru")"
+  [[ -n "${new_token}" ]] || die "Token baru tidak boleh kosong."
+
+  confirm="$(prompt_secret "Ulangi token untuk konfirmasi")"
+  [[ "${new_token}" == "${confirm}" ]] || die "Konfirmasi token tidak sama."
+
+  set_env_value DISCORD_BOT_TOKEN "${new_token}" "${BOT_ENV_FILE}"
+  chmod 600 "${BOT_ENV_FILE}" || true
+  ok "Token berhasil diperbarui di ${BOT_ENV_FILE}."
+
+  if prompt_yes_no "Restart service bot sekarang"; then
+    start_or_restart_services
+  fi
+}
+
+validate_source_tree() {
+  local src="$1"
+  [[ -d "${src}" ]] || die "Source bot tidak ditemukan: ${src}"
+  [[ -f "${src}/gateway-ts/package.json" ]] || die "Source invalid: gateway-ts/package.json tidak ditemukan"
+  [[ -f "${src}/backend-py/requirements.txt" ]] || die "Source invalid: backend-py/requirements.txt tidak ditemukan"
+  [[ -f "${src}/systemd/xray-discord-backend.service.tpl" ]] || die "Source invalid: template backend service tidak ditemukan"
+  [[ -f "${src}/systemd/xray-discord-gateway.service.tpl" ]] || die "Source invalid: template gateway service tidak ditemukan"
+}
+
+deploy_or_update_files() {
+  need_root
+
+  local cmd
+  for cmd in curl tar rsync python3 npm node; do
+    command_exists "${cmd}" || die "Dependency '${cmd}' belum tersedia. Jalankan menu 2) Install Dependencies."
+  done
+
+  local tmp archive src_root src_dir
+  tmp="$(mktemp -d /tmp/bot-discord-src.XXXXXX)"
+  archive="${tmp}/src.tar.gz"
+
+  log "Download source archive: ${SRC_ARCHIVE_URL}"
+  curl -fsSL --connect-timeout 15 --max-time 180 "${SRC_ARCHIVE_URL}" -o "${archive}" || die "Gagal download archive source."
+
+  log "Extract archive..."
+  tar -xzf "${archive}" -C "${tmp}" || die "Gagal extract archive."
+
+  src_root="$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  [[ -n "${src_root}" ]] || die "Tidak menemukan root folder hasil extract."
+
+  src_dir="${src_root}/bot-discord"
+  validate_source_tree "${src_dir}"
+
+  mkdir -p "${BOT_HOME}" "${BOT_STATE_DIR}" "${BOT_LOG_DIR}" "${BOT_ENV_DIR}"
+
+  log "Sync source ke ${BOT_HOME}"
+  rsync -a --delete \
+    --exclude '.env' \
+    --exclude '.venv' \
+    --exclude 'node_modules' \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    "${src_dir}/" "${BOT_HOME}/"
+
+  rm -rf "${tmp}" >/dev/null 2>&1 || true
+
+  log "Install dependency Python backend"
+  if [[ ! -d "${BOT_HOME}/.venv" ]]; then
+    python3 -m venv "${BOT_HOME}/.venv"
+  fi
+  "${BOT_HOME}/.venv/bin/pip" install --upgrade pip >/dev/null
+  "${BOT_HOME}/.venv/bin/pip" install -r "${BOT_HOME}/backend-py/requirements.txt"
+
+  log "Install dependency Node gateway + build"
+  (
+    cd "${BOT_HOME}/gateway-ts"
+    npm install
+    npm run build
+  )
+
+  ensure_env_file
+  if [[ ! -f "${BOT_HOME}/.env" ]]; then
+    cp "${BOT_ENV_FILE}" "${BOT_HOME}/.env" || true
+  fi
+
+  chmod -R go-rwx "${BOT_ENV_DIR}" || true
+  ok "Deploy/update bot files selesai."
+}
+
+install_or_update_systemd() {
+  need_root
+  command_exists systemctl || die "systemctl tidak tersedia di host ini."
+
+  local backend_tpl gateway_tpl backend_dst gateway_dst
+  backend_tpl="${BOT_HOME}/systemd/xray-discord-backend.service.tpl"
+  gateway_tpl="${BOT_HOME}/systemd/xray-discord-gateway.service.tpl"
+  backend_dst="/etc/systemd/system/${BACKEND_SERVICE}.service"
+  gateway_dst="/etc/systemd/system/${GATEWAY_SERVICE}.service"
+
+  [[ -f "${backend_tpl}" ]] || die "Template tidak ditemukan: ${backend_tpl}"
+  [[ -f "${gateway_tpl}" ]] || die "Template tidak ditemukan: ${gateway_tpl}"
+
+  sed \
+    -e "s#/opt/bot-discord#${BOT_HOME}#g" \
+    -e "s#/etc/xray-discord-bot/bot.env#${BOT_ENV_FILE}#g" \
+    "${backend_tpl}" > "${backend_dst}"
+
+  sed \
+    -e "s#/opt/bot-discord#${BOT_HOME}#g" \
+    -e "s#/etc/xray-discord-bot/bot.env#${BOT_ENV_FILE}#g" \
+    "${gateway_tpl}" > "${gateway_dst}"
+
+  chmod 644 "${backend_dst}" "${gateway_dst}"
+
+  systemctl daemon-reload
+  systemctl enable "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
+
+  ok "Systemd service terpasang/terupdate."
+  show_service_status "${BACKEND_SERVICE}"
+  show_service_status "${GATEWAY_SERVICE}"
+}
+
+start_or_restart_services() {
+  need_root
+  command_exists systemctl || die "systemctl tidak tersedia di host ini."
+
+  service_unit_exists "${BACKEND_SERVICE}" || die "Service ${BACKEND_SERVICE}.service belum terpasang. Jalankan menu 6 dulu."
+  service_unit_exists "${GATEWAY_SERVICE}" || die "Service ${GATEWAY_SERVICE}.service belum terpasang. Jalankan menu 6 dulu."
+
+  systemctl restart "${BACKEND_SERVICE}"
+  systemctl restart "${GATEWAY_SERVICE}"
+
+  ok "Service bot di-restart."
+  show_service_status "${BACKEND_SERVICE}"
+  show_service_status "${GATEWAY_SERVICE}"
+}
+
+status_services() {
+  need_root
+  command_exists systemctl || die "systemctl tidak tersedia di host ini."
+
+  echo "Status service bot Discord"
+  hr
+  show_service_status "${BACKEND_SERVICE}"
+  show_service_status "${GATEWAY_SERVICE}"
+  hr
+
+  local token
+  token="$(get_env_value DISCORD_BOT_TOKEN "${BOT_ENV_FILE}")"
+  echo "Env file : ${BOT_ENV_FILE}"
+  echo "Token    : $(mask_secret "${token}")"
+  echo "Bot home : ${BOT_HOME}"
+}
+
+view_logs_menu() {
+  need_root
+  command_exists journalctl || die "journalctl tidak tersedia."
+
+  local c lines
+  lines="$(prompt_with_default "Jumlah baris log" "80")"
+  [[ "${lines}" =~ ^[0-9]+$ ]] || lines="80"
+
+  echo "Pilih log service:"
+  echo "  1) ${BACKEND_SERVICE}"
+  echo "  2) ${GATEWAY_SERVICE}"
+  echo "  3) Keduanya"
+  echo "  0) Kembali"
+  read -r -p "Pilih: " c || true
+
+  case "${c}" in
+    1)
+      journalctl -u "${BACKEND_SERVICE}" --no-pager -n "${lines}" || true
+      ;;
+    2)
+      journalctl -u "${GATEWAY_SERVICE}" --no-pager -n "${lines}" || true
+      ;;
+    3)
+      journalctl -u "${BACKEND_SERVICE}" --no-pager -n "${lines}" || true
+      hr
+      journalctl -u "${GATEWAY_SERVICE}" --no-pager -n "${lines}" || true
+      ;;
+    0)
+      return 0
+      ;;
+    *)
+      warn "Pilihan tidak valid."
+      ;;
+  esac
+}
+
+uninstall_bot() {
+  need_root
+  command_exists systemctl || die "systemctl tidak tersedia di host ini."
+
+  echo "Anda akan menghapus instalasi bot Discord dari sistem ini."
+  echo "- Service: ${BACKEND_SERVICE}, ${GATEWAY_SERVICE}"
+  echo "- Bot home: ${BOT_HOME}"
+  echo "- Env file: ${BOT_ENV_FILE}"
+  read -r -p "Ketik HAPUS untuk lanjut: " confirm || true
+  [[ "${confirm}" == "HAPUS" ]] || {
+    warn "Batal uninstall."
+    return 0
+  }
+
+  systemctl stop "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
+  systemctl disable "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
+
+  rm -f \
+    "/etc/systemd/system/${BACKEND_SERVICE}.service" \
+    "/etc/systemd/system/${GATEWAY_SERVICE}.service" >/dev/null 2>&1 || true
+
+  systemctl daemon-reload || true
+
+  if prompt_yes_no "Hapus folder bot (${BOT_HOME})"; then
+    rm -rf "${BOT_HOME}"
+    ok "Folder bot dihapus."
+  fi
+
+  if prompt_yes_no "Hapus env (${BOT_ENV_DIR})"; then
+    rm -rf "${BOT_ENV_DIR}"
+    ok "Folder env dihapus."
+  fi
+
+  if prompt_yes_no "Hapus runtime state/log (${BOT_STATE_DIR}, ${BOT_LOG_DIR})"; then
+    rm -rf "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
+    ok "Folder runtime dihapus."
+  fi
+
+  ok "Uninstall selesai."
+}
+
+quick_setup_all_in_one() {
+  need_root
+  echo "Quick Setup akan menjalankan:"
+  echo "1) Install dependencies"
+  echo "2) Configure env/token"
+  echo "3) Deploy/update source ke ${BOT_HOME}"
+  echo "4) Install/update systemd"
+  echo "5) Start/restart service"
+  hr
+
+  prompt_yes_no "Lanjutkan Quick Setup sekarang" || {
+    warn "Quick setup dibatalkan."
+    return 0
+  }
+
+  install_dependencies
+  configure_env_interactive
+  validate_required_env || die "Env belum lengkap. Isi dulu data wajib."
+  deploy_or_update_files
+  install_or_update_systemd
+  start_or_restart_services
+  status_services
+
+  ok "Quick setup selesai."
+}
+
+show_header() {
+  safe_clear
+  echo -e "${BOLD}Install BOT Discord (Standalone)${NC}"
+  echo "Target deploy : ${BOT_HOME}"
+  echo "Env file      : ${BOT_ENV_FILE}"
+  echo "Source archive: ${SRC_ARCHIVE_URL}"
+  hr
+}
+
+menu_loop() {
+  need_root
+  while true; do
+    show_header
+    echo "  1) Quick Setup Bot Discord (All-in-One)"
+    echo "  2) Install Dependencies"
+    echo "  3) Configure Bot (.env)"
+    echo "  4) Ganti Discord Bot Token"
+    echo "  5) Deploy/Update Bot Files"
+    echo "  6) Install/Update systemd Services"
+    echo "  7) Start/Restart Services"
+    echo "  8) Status Services"
+    echo "  9) View Logs"
+    echo " 10) Uninstall Bot"
+    echo "  0) Back"
+    hr
+    read -r -p "Pilih: " c || true
+
+    case "${c}" in
+      1) quick_setup_all_in_one; pause ;;
+      2) install_dependencies; pause ;;
+      3) configure_env_interactive; pause ;;
+      4) change_discord_token; pause ;;
+      5) deploy_or_update_files; pause ;;
+      6) install_or_update_systemd; pause ;;
+      7) start_or_restart_services; pause ;;
+      8) status_services; pause ;;
+      9) view_logs_menu; pause ;;
+      10) uninstall_bot; pause ;;
+      0|back|kembali|k|b) return 0 ;;
+      *) warn "Pilihan tidak valid."; sleep 1 ;;
+    esac
+  done
+}
+
+usage() {
+  cat <<USAGE
+Usage:
+  $0 menu
+  $0 quick-setup
+  $0 install-deps
+  $0 configure-env
+  $0 update-token
+  $0 deploy
+  $0 install-systemd
+  $0 restart
+  $0 status
+  $0 logs
+  $0 uninstall
+USAGE
+}
+
+main() {
+  local cmd="${1:-menu}"
+  case "${cmd}" in
+    menu) menu_loop ;;
+    quick-setup) quick_setup_all_in_one ;;
+    install-deps) install_dependencies ;;
+    configure-env) configure_env_interactive ;;
+    update-token) change_discord_token ;;
+    deploy) deploy_or_update_files ;;
+    install-systemd) install_or_update_systemd ;;
+    restart) start_or_restart_services ;;
+    status) status_services ;;
+    logs) view_logs_menu ;;
+    uninstall) uninstall_bot ;;
+    -h|--help|help) usage ;;
+    *) usage; die "Command tidak dikenal: ${cmd}" ;;
+  esac
+}
+
+main "$@"

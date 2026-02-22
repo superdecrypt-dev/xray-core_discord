@@ -1,0 +1,11 @@
+.env
+.venv/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+runtime/logs/*
+runtime/tmp/*
+!runtime/logs/.gitkeep
+!runtime/tmp/.gitkeep
+!runtime/locks/.gitkeep

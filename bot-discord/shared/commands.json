@@ -1,0 +1,123 @@
+{
+  "menus": [
+    {
+      "id": "1",
+      "label": "Status & Diagnostics",
+      "description": "Cek status server, tes config Xray, dan info TLS.",
+      "actions": [
+        { "id": "overview", "label": "Ringkasan Status", "mode": "direct", "style": "primary" },
+        { "id": "xray_test", "label": "Test Config Xray", "mode": "direct", "style": "secondary" },
+        { "id": "tls_info", "label": "TLS Info", "mode": "direct", "style": "secondary" }
+      ]
+    },
+    {
+      "id": "2",
+      "label": "User Management",
+      "description": "Lihat daftar user dan pencarian user.",
+      "actions": [
+        { "id": "list_users", "label": "List Users", "mode": "direct", "style": "primary" },
+        {
+          "id": "search_user",
+          "label": "Search User",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Search User",
+            "fields": [
+              { "id": "query", "label": "Username Query", "style": "short", "required": true, "placeholder": "contoh: alice" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "label": "Quota & Access Control",
+      "description": "Ringkasan quota metadata dan detail per user.",
+      "actions": [
+        { "id": "summary", "label": "Quota Summary", "mode": "direct", "style": "primary" },
+        {
+          "id": "detail",
+          "label": "Quota Detail",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Quota Detail",
+            "fields": [
+              { "id": "proto", "label": "Protocol", "style": "short", "required": true, "placeholder": "vless/vmess/trojan" },
+              { "id": "username", "label": "Username", "style": "short", "required": true, "placeholder": "contoh: alice" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "label": "Network Controls",
+      "description": "Ringkasan outbounds/routing, DNS, dan state network.",
+      "actions": [
+        { "id": "egress_summary", "label": "Egress Summary", "mode": "direct", "style": "primary" },
+        { "id": "dns_summary", "label": "DNS Summary", "mode": "direct", "style": "secondary" },
+        { "id": "state_file", "label": "State File", "mode": "direct", "style": "secondary" }
+      ]
+    },
+    {
+      "id": "5",
+      "label": "Domain Control",
+      "description": "Info domain aktif dan server_name nginx.",
+      "actions": [
+        { "id": "domain_info", "label": "Domain Info", "mode": "direct", "style": "primary" },
+        { "id": "nginx_server_name", "label": "Nginx Server Name", "mode": "direct", "style": "secondary" }
+      ]
+    },
+    {
+      "id": "6",
+      "label": "Speedtest",
+      "description": "Speedtest Ookla dan versi binary.",
+      "actions": [
+        { "id": "run", "label": "Run Speedtest", "mode": "direct", "style": "primary" },
+        { "id": "version", "label": "Speedtest Version", "mode": "direct", "style": "secondary" }
+      ]
+    },
+    {
+      "id": "7",
+      "label": "Security",
+      "description": "Status fail2ban dan ringkasan hardening kernel.",
+      "actions": [
+        { "id": "fail2ban_status", "label": "Fail2ban Status", "mode": "direct", "style": "primary" },
+        { "id": "sysctl_summary", "label": "Sysctl Summary", "mode": "direct", "style": "secondary" }
+      ]
+    },
+    {
+      "id": "8",
+      "label": "Maintenance",
+      "description": "Status service, restart service, dan tail logs.",
+      "actions": [
+        { "id": "service_status", "label": "Service Status", "mode": "direct", "style": "primary" },
+        { "id": "restart_xray", "label": "Restart Xray", "mode": "direct", "style": "danger", "confirm": true },
+        { "id": "restart_nginx", "label": "Restart Nginx", "mode": "direct", "style": "danger", "confirm": true },
+        {
+          "id": "tail_log",
+          "label": "Tail Logs",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Tail Service Logs",
+            "fields": [
+              { "id": "service", "label": "Service Name", "style": "short", "required": true, "placeholder": "xray/nginx/wireproxy" },
+              { "id": "lines", "label": "Lines", "style": "short", "required": false, "placeholder": "80" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "9",
+      "label": "Install BOT Discord",
+      "description": "Info lifecycle installer bot discord.",
+      "actions": [
+        { "id": "info", "label": "Install Info", "mode": "direct", "style": "primary" }
+      ]
+    }
+  ]
+}
