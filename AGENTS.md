@@ -1,24 +1,25 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-Repositori ini sengaja berbentuk flat (berbasis skrip di root). `setup.sh` menangani provisioning one-time server, `manage.sh` untuk operasi harian melalui menu, `run.sh` sebagai bootstrap installer cepat, dan `tc-limit.sh` sebagai helper traffic shaping berbasis `tc`. `README.md` berisi alur operator dan ringkasan fitur. Jika menambah file baru, pertahankan pemisahan ini: provisioning di `setup.sh`, operasi runtime di `manage.sh`, utilitas terpisah di skrip sendiri.
+## Struktur Proyek & Organisasi Modul
+Repositori ini memiliki dua area utama. Area root berisi skrip operasional server: `setup.sh` (provisioning awal), `manage.sh` (menu harian), `run.sh` (bootstrap installer), `tc-limit.sh` (traffic shaping), dan `install-discord-bot.sh` (installer bot Discord). Area `bot-discord/` adalah stack bot standalone dengan `gateway-ts/` (UI Discord tombol/modal), `backend-py/` (API FastAPI per menu 1-9), `shared/` (kontrak action), `systemd/`, dan `scripts/`.
 
-## Build, Test, and Development Commands
-- `bash -n setup.sh manage.sh run.sh tc-limit.sh`: cek syntax Bash tanpa eksekusi.
-- `shellcheck *.sh`: lint statis (direkomendasikan sebelum PR).
-- `sudo bash run.sh`: bootstrap penuh (clone repo, pasang `manage`, jalankan setup).
-- `sudo bash setup.sh`: provisioning langsung tanpa bootstrap.
-- `sudo manage`: buka menu operasi harian.
-- `sudo xray run -test -confdir /usr/local/etc/xray/conf.d`: validasi konfigurasi Xray setelah perubahan.
+## Build, Test, dan Command Pengembangan
+- `bash -n setup.sh manage.sh run.sh tc-limit.sh install-discord-bot.sh`: validasi syntax skrip shell.
+- `shellcheck *.sh`: lint shell di root.
+- `sudo bash run.sh`: instalasi cepat (pasang `manage` + `install-discord-bot` ke `/usr/local/bin` lalu jalankan setup).
+- `sudo manage`: buka menu operasional utama.
+- `sudo /usr/local/bin/install-discord-bot menu`: buka installer bot Discord.
+- `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py')`: cek syntax backend bot.
+- `cd bot-discord/gateway-ts && npm run build`: validasi build gateway TypeScript.
 
-## Coding Style & Naming Conventions
-Gunakan Bash strict mode (`set -euo pipefail`) dan pertahankan gaya defensif yang sudah ada. Indentasi utama 2 spasi. Nama fungsi gunakan `snake_case`, konstanta dan environment variable gunakan `UPPER_SNAKE_CASE`, dan nama file skrip gunakan pola `kebab-case.sh`. Selalu quote ekspansi variabel, gunakan `local` di fungsi, dan konsolidasikan output status melalui helper seperti `ok`, `warn`, dan `die`.
+## Gaya Kode & Konvensi Penamaan
+Gunakan Bash strict mode (`set -euo pipefail`) dan pola defensif yang sudah ada (`ok`, `warn`, `die`). Indentasi utama 2 spasi untuk shell. Nama fungsi `snake_case`, konstanta/env `UPPER_SNAKE_CASE`, nama skrip `kebab-case.sh`. Untuk Python/TypeScript bot, gunakan nama modul yang deskriptif per domain menu (`menu_1_status`, `menu_8_maintenance`, dst).
 
-## Testing Guidelines
-Belum ada framework test terpisah di repo ini. Minimum validasi sebelum merge: syntax check + `shellcheck` + smoke test di VPS Debian/Ubuntu disposable. Untuk perubahan runtime, verifikasi `systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-pager` dan ulangi test config Xray. Jika menambah skrip test, gunakan pola nama `test_<area>.sh`.
+## Panduan Testing
+Minimum sebelum merge: syntax check + lint shell + smoke check layanan terkait. Untuk perubahan runtime Xray, verifikasi `systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-pager` dan `xray run -test -confdir /usr/local/etc/xray/conf.d`. Untuk bot Discord, uji `backend-py` health endpoint dan alur `/panel` -> button -> modal di server Discord staging.
 
-## Commit & Pull Request Guidelines
-Ikuti gaya commit yang sudah terlihat di histori: `feat`, `fix`, `docs`, `chore`, `refactor`, `style`, `security` (opsional dengan scope, mis. `fix(manage): ...`). Subjek commit harus ringkas dan fokus satu perubahan. PR wajib berisi ringkasan tujuan, risiko/rollback, daftar command validasi yang dijalankan, serta cuplikan output/screenshot bila ada perubahan perilaku menu.
+## Commit & Pull Request
+Ikuti konvensi commit yang sudah dipakai: `feat`, `fix`, `docs`, `chore`, `refactor`, `style`, `security` (opsional dengan scope, contoh `feat(bot): ...`). PR wajib memuat ringkasan perubahan, risiko/rollback, command validasi yang dijalankan, serta bukti hasil (log/screenshot) untuk perubahan interaksi menu.
 
-## Security & Configuration Tips
-Jangan commit token, private key, atau domain sensitif. Gunakan environment variable (contoh: `CLOUDFLARE_API_TOKEN`) dan redaksi nilai pada dokumentasi/log. Semua skrip diasumsikan berjalan sebagai root; uji dulu di environment non-produksi sebelum diterapkan ke VPS produksi.
+## Keamanan & Konfigurasi
+Jangan commit token/secret/key. Simpan rahasia pada env file (contoh: `/etc/xray-discord-bot/bot.env`) dan gunakan masking saat ditampilkan. Semua skrip diasumsikan berjalan sebagai root; selalu uji dulu di VPS non-produksi sebelum rollout ke produksi.

@@ -1,14 +1,15 @@
-# Bot Discord Architecture Lock
+# Kunci Arsitektur Bot Discord
 
-Dokumen ini mengunci keputusan implementasi agar konsisten saat eksekusi berikutnya.
+Dokumen ini menjadi acuan tetap implementasi bot Discord standalone pada repo ini.
 
-## 1) Struktur Bot Discord (Standalone)
-Bot Discord berjalan standalone dan tidak mengeksekusi `manage.sh` secara langsung.
+## 1) Prinsip Dasar
+- Bot Discord berdiri sendiri dan **tidak mengeksekusi `manage.sh`**.
+- Perilaku menu mengikuti struktur CLI `manage.sh` (menu 1-9), tetapi eksekusi action dilakukan oleh backend bot.
+- UI Discord meminimalkan slash command (entry point `/panel`) dan menggunakan button/modal untuk interaksi utama.
 
+## 2) Struktur Direktori Bot
 ```text
 bot-discord/
-├─ README.md
-├─ .env.example
 ├─ shared/
 │  ├─ commands.json
 │  ├─ error_codes.json
@@ -16,6 +17,7 @@ bot-discord/
 ├─ gateway-ts/
 │  ├─ package.json
 │  ├─ tsconfig.json
+│  ├─ .env.example
 │  └─ src/
 │     ├─ index.ts
 │     ├─ config.ts
@@ -26,6 +28,7 @@ bot-discord/
 │     └─ views/
 ├─ backend-py/
 │  ├─ requirements.txt
+│  ├─ .env.example
 │  └─ app/
 │     ├─ main.py
 │     ├─ config.py
@@ -39,16 +42,16 @@ bot-discord/
 │  ├─ locks/
 │  └─ tmp/
 ├─ systemd/
-│  ├─ xray-discord-gateway.service.tpl
-│  └─ xray-discord-backend.service.tpl
+│  ├─ xray-discord-backend.service.tpl
+│  └─ xray-discord-gateway.service.tpl
 └─ scripts/
    ├─ dev-up.sh
    ├─ dev-down.sh
    └─ smoke-test.sh
 ```
 
-## 2) Struktur Menu `install-discord-bot.sh`
-Mode utama yang dipakai: `menu`.
+## 3) Kontrak Menu Installer
+Installer utama: `install-discord-bot.sh` dengan mode `menu`.
 
 ```text
 1) Quick Setup Bot Discord (All-in-One)
@@ -64,36 +67,28 @@ Mode utama yang dipakai: `menu`.
 0) Back
 ```
 
-### Mekanisme fungsi menu
-- `1` menjalankan full flow: dependencies -> input token/env -> deploy source -> install/update service -> start bot -> verifikasi status.
-- `2` memasang prasyarat OS/runtime (idempotent).
-- `3` membuat/memperbarui `/etc/xray-discord-bot/bot.env`.
-- `4` memperbarui `DISCORD_BOT_TOKEN` secara aman (`read -s`, mask, permission 600).
-- `5` deployment source ke `/opt/bot-discord`.
-- `6` pasang/update service systemd yang menunjuk ke `/opt/bot-discord`.
-- `7` restart/start service bot.
-- `8` cek status service.
-- `9` tampilkan log (`journalctl`).
-- `10` uninstall dengan konfirmasi.
+Ringkasan fungsi:
+- `1` menjalankan alur penuh: dependency -> env/token -> deploy -> systemd -> start -> verifikasi.
+- `4` update token aman (`read -s`, konfirmasi ulang, permission file env 600).
+- `5` deploy dari archive GitHub lalu `rsync` ke target.
+- `6` memasang template systemd untuk backend dan gateway.
+- `7-9` operasional service (restart/status/log).
 
-## 3) Lokasi Deploy (Fixed)
-Lokasi bot Discord dikunci di:
-
-```text
-/opt/bot-discord
-```
-
-Lokasi operasional terkait:
-- Launcher menu: `/usr/local/bin/install-discord-bot.sh`
-- Env file: `/etc/xray-discord-bot/bot.env`
+## 4) Lokasi Deploy & Integrasi Root Script
+- Lokasi bot terpasang: `/opt/bot-discord`
+- Env produksi: `/etc/xray-discord-bot/bot.env`
 - Runtime data/log: `/var/lib/xray-discord-bot`, `/var/log/xray-discord-bot`
+- Launcher installer: `/usr/local/bin/install-discord-bot`
 
-## 4) Mekanisme Deploy Source di VPS (Tanpa Repo Lokal)
-Deploy menggunakan archive terstruktur (tar.gz) dari GitHub lalu sync ke target:
-1. Download archive dengan `REF` yang dipin (tag/commit).
+Integrasi:
+- `run.sh` memasang `install-discord-bot.sh` ke `/usr/local/bin/install-discord-bot`
+- `manage.sh` menu `9) Install BOT Discord` menjalankan `/usr/local/bin/install-discord-bot menu`
+
+## 5) Mekanisme Deploy di VPS (Tanpa Repo Lokal)
+1. Unduh archive source (`tar.gz`) dengan `REF` terpin.
 2. Extract ke staging `/tmp`.
-3. Validasi struktur wajib (`gateway-ts/package.json`, `backend-py/requirements.txt`, `systemd/*.service.tpl`).
-4. Sync ke `/opt/bot-discord` menggunakan `rsync -a --delete` dengan exclude file runtime (`.env`, `.venv`, `node_modules`, `__pycache__`, `*.pyc`).
-5. Install dependency app lalu restart service.
+3. Validasi struktur wajib (`gateway-ts/package.json`, `backend-py/requirements.txt`, template systemd).
+4. Sinkronisasi ke `/opt/bot-discord` menggunakan `rsync -a --delete` (exclude `.env`, `.venv`, `node_modules`, `__pycache__`, `*.pyc`).
+5. Install dependency backend + gateway, build gateway, pasang/update systemd, lalu restart service.
 
-Keputusan ini menjadi baseline implementasi berikutnya sampai ada perubahan eksplisit.
+Dokumen ini dianggap baseline hingga ada perubahan arsitektur yang disepakati.
