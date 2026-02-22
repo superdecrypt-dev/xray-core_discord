@@ -7280,9 +7280,7 @@ PY
 
 adblock_custom_dat_status_get() {
   if [[ -s "${CUSTOM_GEOSITE_DAT}" ]]; then
-    local sz
-    sz="$(stat -c '%s' "${CUSTOM_GEOSITE_DAT}" 2>/dev/null || echo "0")"
-    echo "ready (${sz} bytes)"
+    echo "ready"
   else
     echo "missing"
   fi
@@ -7547,11 +7545,8 @@ adblock_menu() {
       printf "Duplicates   : %s (akan dibersihkan saat update)\n" "${duplicates}"
     fi
     hr
-    echo "  1) Enable -> blocked"
-    echo "  2) Enable -> direct"
-    echo "  3) Enable -> warp"
-    echo "  4) Enable -> balancer (direct+warp)"
-    echo "  5) Disable (hapus rule)"
+    echo "  1) Enable -> balancer (direct+warp)"
+    echo "  2) Disable (hapus rule)"
     echo "  0) Back"
     hr
     read -r -p "Pilih: " c
@@ -7562,41 +7557,11 @@ adblock_menu() {
           pause
           continue
         fi
-        xray_routing_adblock_rule_set blocked
-        log "Adblock diaktifkan ke outbound blocked (${ADBLOCK_GEOSITE_ENTRY})"
-        pause
-        ;;
-      2)
-        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
-          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
-          pause
-          continue
-        fi
-        xray_routing_adblock_rule_set direct
-        log "Adblock diaktifkan ke outbound direct (${ADBLOCK_GEOSITE_ENTRY})"
-        pause
-        ;;
-      3)
-        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
-          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
-          pause
-          continue
-        fi
-        xray_routing_adblock_rule_set warp
-        log "Adblock diaktifkan ke outbound warp (${ADBLOCK_GEOSITE_ENTRY})"
-        pause
-        ;;
-      4)
-        if [[ ! -s "${CUSTOM_GEOSITE_DAT}" ]]; then
-          warn "custom.dat belum tersedia. Jalankan setup.sh dulu untuk download custom geosite."
-          pause
-          continue
-        fi
         xray_routing_adblock_rule_set balancer
         log "Adblock diaktifkan ke balancer ${ADBLOCK_BALANCER_TAG} (${ADBLOCK_GEOSITE_ENTRY})"
         pause
         ;;
-      5)
+      2)
         xray_routing_adblock_rule_set off
         log "Adblock dinonaktifkan (rule dihapus: ${ADBLOCK_GEOSITE_ENTRY})"
         pause
