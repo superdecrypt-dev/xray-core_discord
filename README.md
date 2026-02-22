@@ -99,6 +99,10 @@ Status detail akun menampilkan:
 Pusat kontrol routing dan jaringan:
 - Egress mode: `direct`, `warp`, `balancer`
 - Balancer strategy + selector + observatory tuning
+- Adblock custom geosite:
+  - Rule entry: `ext:custom.dat:adblock`
+  - Opsi mode: `blocked`, `direct`, `warp`, `balancer (direct+warp)`, `disable`
+  - Balancer adblock memakai tag khusus `adblock-balance` (terisolasi dari balancer global `egress-balance`)
 - WARP controls:
   - Global
   - Per-user
@@ -149,7 +153,7 @@ Operasi service tanpa keluar menu:
 `setup.sh` menangani provisioning awal end-to-end:
 1. Install dependency OS
 2. Install Nginx dari repo resmi `nginx.org`
-3. Install Xray-core + geodata updater
+3. Install Xray-core + geodata updater + custom geosite adblock (`custom.dat`)
 4. Generate modular config di `/usr/local/etc/xray/conf.d/`
 5. Issue TLS dengan acme.sh (standalone atau `dns_cf_wildcard`)
 6. Install WARP stack (`wgcf` + `wireproxy`)
@@ -160,6 +164,11 @@ Operasi service tanpa keluar menu:
    - `xray-speed`
 8. Install hardening baseline (fail2ban, sysctl/BBR, swap, ulimit, logrotate)
 9. Install speedtest via snap
+
+Catatan custom geosite adblock:
+- Sumber file: `https://github.com/superdecrypt-dev/custom-geosite-xray/raw/main/custom.dat`
+- Lokasi install: `/usr/local/share/xray/custom.dat`
+- Routing tidak dipaksa dari `setup.sh`; pengaturan mode dilakukan dari menu `manage.sh` -> `4) Network Controls` -> `6) Adblock (Custom Geosite)`
 
 ## Daemon Runtime
 Service yang menopang automasi operasional:
