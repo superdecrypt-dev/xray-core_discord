@@ -79,6 +79,8 @@ WORK_DIR="/var/lib/xray-manage"
 # (xray-quota, limit-ip, user-block). Semua pihak harus acquire lock ini sebelum
 # memodifikasi 30-routing.json untuk menghindari race condition last-write-wins.
 ROUTING_LOCK_FILE="/var/lock/xray-routing.lock"
+DNS_LOCK_FILE="/var/lock/xray-dns.lock"
+OBS_LOCK_FILE="/var/lock/xray-observatory.lock"
 
 # Direktori laporan/export
 REPORT_DIR="/var/log/xray-manage"
@@ -103,6 +105,8 @@ init_runtime_dirs() {
   chmod 700 "${WORK_DIR}"
 
   mkdir -p "$(dirname "${ROUTING_LOCK_FILE}")" 2>/dev/null || true
+  mkdir -p "$(dirname "${DNS_LOCK_FILE}")" 2>/dev/null || true
+  mkdir -p "$(dirname "${OBS_LOCK_FILE}")" 2>/dev/null || true
 
   mkdir -p "${REPORT_DIR}"
   chmod 700 "${REPORT_DIR}"
@@ -1381,7 +1385,10 @@ domain_control_menu() {
     echo "  0) Back (kembali)"
     echo "  kembali) Back"
     hr
-    read -r -p "Pilih (1-2/0/kembali): " c
+    if ! read -r -p "Pilih (1-2/0/kembali): " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) domain_control_set_domain_now ;;
       2) domain_control_show_info ;;
@@ -1407,7 +1414,7 @@ PY
 }
 
 pause() {
-  read -r -p "Tekan ENTER untuk kembali..." _
+  read -r -p "Tekan ENTER untuk kembali..." _ || true
 }
 
 run_action() {
@@ -2217,14 +2224,37 @@ trap 'domain_control_restore_on_exit' EXIT
 
 
 xray_backup_config() {
-  # Rolling backup to avoid long-term pile-up.
+  # Create operation-local backup file to avoid cross-operation overwrite.
   # args: file_path (optional)
-  local src b
+  local src b base
   src="${1:-${XRAY_INBOUNDS_CONF}}"
+  base="$(basename "${src}")"
 
-  b="${WORK_DIR}/$(basename "${src}").prev"
-  cp -a "${src}" "${b}"
+  [[ -f "${src}" ]] || die "File backup source tidak ditemukan: ${src}"
+  mkdir -p "${WORK_DIR}" 2>/dev/null || true
+
+  b="$(mktemp "${WORK_DIR}/${base}.prev.XXXXXX")" || die "Gagal membuat file backup untuk: ${src}"
+  if ! cp -a "${src}" "${b}"; then
+    rm -f "${b}" 2>/dev/null || true
+    die "Gagal membuat backup untuk: ${src}"
+  fi
+
+  # Best-effort housekeeping: hapus backup lama (>7 hari) untuk file yang sama.
+  find "${WORK_DIR}" -maxdepth 1 -type f -name "${base}.prev.*" -mtime +7 -delete 2>/dev/null || true
+
   echo "${b}"
+}
+
+xray_backup_path_prepare() {
+  # Reserve a unique backup path without copying file content yet.
+  # Use this when snapshot must be taken inside an existing lock section.
+  local src="$1"
+  local base path
+  base="$(basename "${src}")"
+  mkdir -p "${WORK_DIR}" 2>/dev/null || true
+  path="$(mktemp "${WORK_DIR}/${base}.prev.XXXXXX")" || die "Gagal menyiapkan path backup untuk: ${src}"
+  rm -f "${path}" 2>/dev/null || true
+  echo "${path}"
 }
 
 
@@ -2287,6 +2317,37 @@ xray_write_routing_locked() {
   ) 200>"${ROUTING_LOCK_FILE}"
 }
 
+xray_txn_changed_flag() {
+  # args: output_blob -> prints 1 or 0
+  local out="${1:-}"
+  local changed
+  changed="$(printf '%s\n' "${out}" | awk -F'=' '/^changed=/{print $2; exit}')"
+  if [[ "${changed}" == "1" ]]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+xray_txn_rc_or_die() {
+  # args: rc fail_msg [restart_fail_msg] [syntax_fail_msg]
+  local rc="$1"
+  local fail_msg="$2"
+  local restart_fail_msg="${3:-}"
+  local syntax_fail_msg="${4:-}"
+
+  if (( rc == 0 )); then
+    return 0
+  fi
+  if (( rc == 87 )) && [[ -n "${syntax_fail_msg}" ]]; then
+    die "${syntax_fail_msg}"
+  fi
+  if (( rc == 86 )) && [[ -n "${restart_fail_msg}" ]]; then
+    die "${restart_fail_msg}"
+  fi
+  die "${fail_msg}"
+}
+
 
 
 xray_add_client() {
@@ -2301,121 +2362,108 @@ xray_add_client() {
   [[ -f "${XRAY_INBOUNDS_CONF}" ]] || die "Xray inbounds conf tidak ditemukan: ${XRAY_INBOUNDS_CONF}"
   ensure_path_writable "${XRAY_INBOUNDS_CONF}"
 
-  local backup out changed
-  backup="$(xray_backup_config "${XRAY_INBOUNDS_CONF}")"
-  out="$(python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${ROUTING_LOCK_FILE}" "${proto}" "${email}" "${cred}"
+  local backup tmp out changed rc
+  backup="$(xray_backup_path_prepare "${XRAY_INBOUNDS_CONF}")"
+  tmp="${WORK_DIR}/10-inbounds.add.tmp"
+
+  set +e
+  out="$(
+    (
+      flock -x 200
+      cp -a "${XRAY_INBOUNDS_CONF}" "${backup}" || exit 1
+
+      py_out="$(
+        python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${tmp}" "${proto}" "${email}" "${cred}"
 import json
-import os
 import sys
-import tempfile
-import fcntl
 
-src, lock_file, proto, email, cred = sys.argv[1:6]
+src, dst, proto, email, cred = sys.argv[1:6]
 
-def save_json_atomic(path, data):
-  dirn = os.path.dirname(path) or "."
-  st = None
-  try:
-    st = os.stat(path)
-  except Exception:
-    st = None
-  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
-  try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-      json.dump(data, f, ensure_ascii=False, indent=2)
-      f.write("\n")
-      f.flush()
-      os.fsync(f.fileno())
-    if st is not None:
-      try:
-        os.chmod(tmp, st.st_mode & 0o7777)
-      except Exception:
-        pass
-      try:
-        os.chown(tmp, st.st_uid, st.st_gid)
-      except Exception:
-        pass
-    os.replace(tmp, path)
-  finally:
-    try:
-      if os.path.exists(tmp):
-        os.remove(tmp)
-    except Exception:
-      pass
+with open(src, "r", encoding="utf-8") as f:
+  cfg = json.load(f)
 
-os.makedirs(os.path.dirname(lock_file) or "/var/lock", exist_ok=True)
-with open(lock_file, "w", encoding="utf-8") as lf:
-  fcntl.flock(lf, fcntl.LOCK_EX)
-  try:
-    with open(src, "r", encoding="utf-8") as f:
-      cfg = json.load(f)
+inbounds = cfg.get("inbounds", [])
+if not isinstance(inbounds, list):
+  raise SystemExit("Invalid config: inbounds is not a list")
 
-    inbounds = cfg.get("inbounds", [])
-    if not isinstance(inbounds, list):
-      raise SystemExit("Invalid config: inbounds is not a list")
+def iter_clients_for_protocol(p):
+  for ib in inbounds:
+    if ib.get("protocol") != p:
+      continue
+    st = ib.get("settings") or {}
+    clients = st.get("clients")
+    if isinstance(clients, list):
+      for c in clients:
+        yield c
 
-    def iter_clients_for_protocol(p):
-      for ib in inbounds:
-        if ib.get("protocol") != p:
-          continue
-        st = ib.get("settings") or {}
-        clients = st.get("clients")
-        if isinstance(clients, list):
-          for c in clients:
-            yield c
+for c in iter_clients_for_protocol(proto):
+  if c.get("email") == email:
+    raise SystemExit(f"user sudah ada di config untuk {proto}: {email}")
 
-    for c in iter_clients_for_protocol(proto):
-      if c.get("email") == email:
-        raise SystemExit(f"user sudah ada di config untuk {proto}: {email}")
+if proto == "vless":
+  client = {"id": cred, "email": email}
+elif proto == "vmess":
+  client = {"id": cred, "alterId": 0, "email": email}
+elif proto == "trojan":
+  client = {"password": cred, "email": email}
+else:
+  raise SystemExit("Unsupported protocol: " + proto)
 
-    if proto == "vless":
-      client = {"id": cred, "email": email}
-    elif proto == "vmess":
-      client = {"id": cred, "alterId": 0, "email": email}
-    elif proto == "trojan":
-      client = {"password": cred, "email": email}
-    else:
-      raise SystemExit("Unsupported protocol: " + proto)
+updated = False
+for ib in inbounds:
+  if ib.get("protocol") != proto:
+    continue
+  st = ib.setdefault("settings", {})
+  clients = st.get("clients")
+  if clients is None:
+    st["clients"] = []
+    clients = st["clients"]
+  if not isinstance(clients, list):
+    continue
+  clients.append(client)
+  updated = True
 
-    updated = False
-    for ib in inbounds:
-      if ib.get("protocol") != proto:
-        continue
-      st = ib.setdefault("settings", {})
-      clients = st.get("clients")
-      if clients is None:
-        st["clients"] = []
-        clients = st["clients"]
-      if not isinstance(clients, list):
-        continue
-      clients.append(client)
-      updated = True
+if not updated:
+  raise SystemExit(f"Tidak menemukan inbound protocol {proto} dengan settings.clients")
 
-    if not updated:
-      raise SystemExit(f"Tidak menemukan inbound protocol {proto} dengan settings.clients")
+with open(dst, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+  f.write("\n")
 
-    save_json_atomic(src, cfg)
-    print("changed=1")
-  finally:
-    fcntl.flock(lf, fcntl.LOCK_UN)
+print("changed=1")
 PY
-)" || die "Gagal memproses inbounds untuk add user: ${email}"
+      )" || exit 1
 
-  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+      printf '%s\n' "${py_out}"
+      changed_local="$(xray_txn_changed_flag "${py_out}")"
+
+      if [[ "${changed_local}" == "1" ]]; then
+        xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp}" || {
+          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_INBOUNDS_CONF}" || true
+          exit 1
+        }
+
+        svc_restart xray || true
+        if ! svc_wait_active xray 20; then
+          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_INBOUNDS_CONF}" || true
+          systemctl restart xray || true
+          exit 86
+        fi
+      fi
+    ) 200>"${ROUTING_LOCK_FILE}"
+  )"
+  rc=$?
+  set -e
+
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal memproses inbounds untuk add user: ${email}" \
+    "xray tidak aktif setelah add user. Config di-rollback ke backup: ${backup}"
+
+  changed="$(xray_txn_changed_flag "${out}")"
   if [[ "${changed}" != "1" ]]; then
     return 0
   fi
-
-  # restart xray to apply
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_INBOUNDS_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah add user. Config di-rollback ke backup: ${backup}"
-  fi
+  return 0
 }
 
 xray_delete_client() {
@@ -2431,129 +2479,120 @@ xray_delete_client() {
   ensure_path_writable "${XRAY_INBOUNDS_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  local backup_inb backup_rt out changed
-  backup_inb="$(xray_backup_config "${XRAY_INBOUNDS_CONF}")"
-  backup_rt="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
-  out="$(python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${XRAY_ROUTING_CONF}" "${ROUTING_LOCK_FILE}" "${proto}" "${email}"
-import json
-import os
-import sys
-import tempfile
-import fcntl
+  local backup_inb backup_rt tmp_inb tmp_rt out changed rc
+  backup_inb="$(xray_backup_path_prepare "${XRAY_INBOUNDS_CONF}")"
+  backup_rt="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
+  tmp_inb="${WORK_DIR}/10-inbounds.delete.tmp"
+  tmp_rt="${WORK_DIR}/30-routing.delete.tmp"
 
-inb_src, rt_src, lock_file, proto, email = sys.argv[1:6]
-
-def save_json_atomic(path, data):
-  dirn = os.path.dirname(path) or "."
-  st = None
-  try:
-    st = os.stat(path)
-  except Exception:
-    st = None
-  fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
-  try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-      json.dump(data, f, ensure_ascii=False, indent=2)
-      f.write("\n")
-      f.flush()
-      os.fsync(f.fileno())
-    if st is not None:
-      try:
-        os.chmod(tmp, st.st_mode & 0o7777)
-      except Exception:
-        pass
-      try:
-        os.chown(tmp, st.st_uid, st.st_gid)
-      except Exception:
-        pass
-    os.replace(tmp, path)
-  finally:
-    try:
-      if os.path.exists(tmp):
-        os.remove(tmp)
-    except Exception:
-      pass
-
-os.makedirs(os.path.dirname(lock_file) or "/var/lock", exist_ok=True)
-with open(lock_file, "w", encoding="utf-8") as lf:
-  fcntl.flock(lf, fcntl.LOCK_EX)
-  try:
-    with open(inb_src, "r", encoding="utf-8") as f:
-      inb_cfg = json.load(f)
-    with open(rt_src, "r", encoding="utf-8") as f:
-      rt_cfg = json.load(f)
-
-    inbounds = inb_cfg.get("inbounds", [])
-    if not isinstance(inbounds, list):
-      raise SystemExit("Invalid inbounds config: inbounds is not a list")
-
-    removed = 0
-    for ib in inbounds:
-      if ib.get("protocol") != proto:
-        continue
-      st = ib.get("settings") or {}
-      clients = st.get("clients")
-      if not isinstance(clients, list):
-        continue
-      before = len(clients)
-      clients[:] = [c for c in clients if c.get("email") != email]
-      removed += (before - len(clients))
-      st["clients"] = clients
-      ib["settings"] = st
-
-    if removed == 0:
-      raise SystemExit(f"Tidak menemukan user untuk dihapus: {email} ({proto})")
-
-    routing = (rt_cfg.get("routing") or {})
-    rules = routing.get("rules")
-    if isinstance(rules, list):
-      markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user","dummy-warp-user","dummy-direct-user"}
-      speed_marker_prefix = "dummy-speed-user-"
-      for r in rules:
-        if not isinstance(r, dict):
-          continue
-        u = r.get("user")
-        if not isinstance(u, list):
-          continue
-        managed = any(m in u for m in markers)
-        if not managed:
-          managed = any(isinstance(x, str) and x.startswith(speed_marker_prefix) for x in u)
-        if not managed:
-          continue
-        r["user"] = [x for x in u if x != email]
-      routing["rules"] = rules
-      rt_cfg["routing"] = routing
-
-    save_json_atomic(inb_src, inb_cfg)
-    save_json_atomic(rt_src, rt_cfg)
-    print("changed=1")
-  finally:
-    fcntl.flock(lf, fcntl.LOCK_UN)
-PY
-)" || {
+  set +e
+  out="$(
     (
       flock -x 200
-      cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal memproses delete user (rollback ke backup): ${email}"
-  }
+      cp -a "${XRAY_INBOUNDS_CONF}" "${backup_inb}" || exit 1
+      cp -a "${XRAY_ROUTING_CONF}" "${backup_rt}" || exit 1
 
-  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+      py_out="$(
+        python3 - <<'PY' "${XRAY_INBOUNDS_CONF}" "${XRAY_ROUTING_CONF}" "${tmp_inb}" "${tmp_rt}" "${proto}" "${email}"
+import json
+import sys
+
+inb_src, rt_src, inb_dst, rt_dst, proto, email = sys.argv[1:7]
+
+with open(inb_src, "r", encoding="utf-8") as f:
+  inb_cfg = json.load(f)
+with open(rt_src, "r", encoding="utf-8") as f:
+  rt_cfg = json.load(f)
+
+inbounds = inb_cfg.get("inbounds", [])
+if not isinstance(inbounds, list):
+  raise SystemExit("Invalid inbounds config: inbounds is not a list")
+
+removed = 0
+for ib in inbounds:
+  if ib.get("protocol") != proto:
+    continue
+  st = ib.get("settings") or {}
+  clients = st.get("clients")
+  if not isinstance(clients, list):
+    continue
+  before = len(clients)
+  clients[:] = [c for c in clients if c.get("email") != email]
+  removed += (before - len(clients))
+  st["clients"] = clients
+  ib["settings"] = st
+
+if removed == 0:
+  raise SystemExit(f"Tidak menemukan user untuk dihapus: {email} ({proto})")
+
+routing = (rt_cfg.get("routing") or {})
+rules = routing.get("rules")
+if isinstance(rules, list):
+  markers = {"dummy-block-user","dummy-quota-user","dummy-limit-user","dummy-warp-user","dummy-direct-user"}
+  speed_marker_prefix = "dummy-speed-user-"
+  for r in rules:
+    if not isinstance(r, dict):
+      continue
+    u = r.get("user")
+    if not isinstance(u, list):
+      continue
+    managed = any(m in u for m in markers)
+    if not managed:
+      managed = any(isinstance(x, str) and x.startswith(speed_marker_prefix) for x in u)
+    if not managed:
+      continue
+    r["user"] = [x for x in u if x != email]
+  routing["rules"] = rules
+  rt_cfg["routing"] = routing
+
+with open(inb_dst, "w", encoding="utf-8") as f:
+  json.dump(inb_cfg, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+with open(rt_dst, "w", encoding="utf-8") as f:
+  json.dump(rt_cfg, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+
+print("changed=1")
+PY
+      )" || exit 1
+
+      printf '%s\n' "${py_out}"
+      changed_local="$(xray_txn_changed_flag "${py_out}")"
+
+      if [[ "${changed_local}" == "1" ]]; then
+        xray_write_file_atomic "${XRAY_INBOUNDS_CONF}" "${tmp_inb}" || {
+          [[ -f "${backup_inb}" ]] && cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}" || true
+          [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+          exit 1
+        }
+        xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}" || {
+          [[ -f "${backup_inb}" ]] && cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}" || true
+          [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+          exit 1
+        }
+
+        svc_restart xray || true
+        if ! svc_wait_active xray 20; then
+          [[ -f "${backup_inb}" ]] && cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}" || true
+          [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+          systemctl restart xray || true
+          exit 86
+        fi
+      fi
+    ) 200>"${ROUTING_LOCK_FILE}"
+  )"
+  rc=$?
+  set -e
+
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal memproses delete user (rollback ke backup): ${email}" \
+    "xray tidak aktif setelah delete user. Config di-rollback ke backup."
+
+  changed="$(xray_txn_changed_flag "${out}")"
   if [[ "${changed}" != "1" ]]; then
     return 0
   fi
-
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup_inb}" "${XRAY_INBOUNDS_CONF}"
-      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah delete user. Config di-rollback ke backup."
-  fi
+  return 0
 }
 
 xray_routing_set_user_in_marker() {
@@ -2571,128 +2610,113 @@ xray_routing_set_user_in_marker() {
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  local backup
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  local backup tmp out changed rc
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
+  tmp="${WORK_DIR}/30-routing.marker.tmp"
 
-  local out changed
-  # Load + modify + save dijalankan di lock yang sama agar tidak menimpa perubahan daemon.
-  out="$(python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${ROUTING_LOCK_FILE}" "${marker}" "${email}" "${state}" "${outbound_tag}"
-import json, sys, os, tempfile, fcntl
-src, lock_file, marker, email, state, outbound_tag = sys.argv[1:7]
-
-os.makedirs(os.path.dirname(lock_file) or "/var/lock", exist_ok=True)
-with open(lock_file, "w", encoding="utf-8") as lf:
-  fcntl.flock(lf, fcntl.LOCK_EX)
-  try:
-    with open(src, "r", encoding="utf-8") as f:
-      cfg = json.load(f)
-
-    routing = cfg.get("routing") or {}
-    rules = routing.get("rules")
-    if not isinstance(rules, list):
-      raise SystemExit("Invalid routing config: routing.rules is not a list")
-
-    target = None
-    for r in rules:
-      if not isinstance(r, dict):
-        continue
-      if r.get("type") != "field":
-        continue
-      if r.get("outboundTag") != outbound_tag:
-        continue
-      u = r.get("user")
-      if not isinstance(u, list):
-        continue
-      if marker in u:
-        target = r
-        break
-
-    if target is None:
-      raise SystemExit(f"Tidak menemukan routing rule outboundTag={outbound_tag} dengan marker: {marker}")
-
-    users = target.get("user") or []
-    if not isinstance(users, list):
-      users = []
-
-    if marker not in users:
-      users.insert(0, marker)
-    else:
-      users = [marker] + [x for x in users if x != marker]
-
-    changed = False
-    if state == "on":
-      if email not in users:
-        users.append(email)
-        changed = True
-    elif state == "off":
-      new_users = [x for x in users if x != email]
-      if new_users != users:
-        users = new_users
-        changed = True
-    else:
-      raise SystemExit("state harus 'on' atau 'off'")
-
-    target["user"] = users
-    routing["rules"] = rules
-    cfg["routing"] = routing
-
-    if changed:
-      dirn = os.path.dirname(src) or "."
-      st = None
-      try:
-        st = os.stat(src)
-      except Exception:
-        st = None
-      fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
-      try:
-        with os.fdopen(fd, "w", encoding="utf-8") as wf:
-          json.dump(cfg, wf, ensure_ascii=False, indent=2)
-          wf.write("\n")
-          wf.flush()
-          os.fsync(wf.fileno())
-        if st is not None:
-          try:
-            os.chmod(tmp, st.st_mode & 0o7777)
-          except Exception:
-            pass
-          try:
-            os.chown(tmp, st.st_uid, st.st_gid)
-          except Exception:
-            pass
-        os.replace(tmp, src)
-      finally:
-        try:
-          if os.path.exists(tmp):
-            os.remove(tmp)
-        except Exception:
-          pass
-
-    print("changed=1" if changed else "changed=0")
-  finally:
-    fcntl.flock(lf, fcntl.LOCK_UN)
-PY
-)" || {
+  # Load + modify + save + restart + rollback di lock yang sama agar tidak menimpa perubahan concurrent.
+  set +e
+  out="$(
     (
       flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal memproses routing: ${XRAY_ROUTING_CONF}"
-  }
+      cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
 
-  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+      py_out="$(
+        python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${email}" "${state}" "${outbound_tag}"
+import json, sys
+src, dst, marker, email, state, outbound_tag = sys.argv[1:7]
+
+with open(src, "r", encoding="utf-8") as f:
+  cfg = json.load(f)
+
+routing = cfg.get("routing") or {}
+rules = routing.get("rules")
+if not isinstance(rules, list):
+  raise SystemExit("Invalid routing config: routing.rules is not a list")
+
+target = None
+for r in rules:
+  if not isinstance(r, dict):
+    continue
+  if r.get("type") != "field":
+    continue
+  if r.get("outboundTag") != outbound_tag:
+    continue
+  u = r.get("user")
+  if not isinstance(u, list):
+    continue
+  if marker in u:
+    target = r
+    break
+
+if target is None:
+  raise SystemExit(f"Tidak menemukan routing rule outboundTag={outbound_tag} dengan marker: {marker}")
+
+users = target.get("user") or []
+if not isinstance(users, list):
+  users = []
+
+if marker not in users:
+  users.insert(0, marker)
+else:
+  users = [marker] + [x for x in users if x != marker]
+
+changed = False
+if state == "on":
+  if email not in users:
+    users.append(email)
+    changed = True
+elif state == "off":
+  new_users = [x for x in users if x != email]
+  if new_users != users:
+    users = new_users
+    changed = True
+else:
+  raise SystemExit("state harus 'on' atau 'off'")
+
+target["user"] = users
+routing["rules"] = rules
+cfg["routing"] = routing
+
+if changed:
+  with open(dst, "w", encoding="utf-8") as wf:
+    json.dump(cfg, wf, ensure_ascii=False, indent=2)
+    wf.write("\n")
+
+print("changed=1" if changed else "changed=0")
+PY
+      )" || exit 1
+
+      printf '%s\n' "${py_out}"
+      changed_local="$(xray_txn_changed_flag "${py_out}")"
+
+      if [[ "${changed_local}" == "1" ]]; then
+        xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+          exit 1
+        }
+
+        svc_restart xray || true
+        if ! svc_wait_active xray 20; then
+          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+          systemctl restart xray || true
+          exit 86
+        fi
+      fi
+    ) 200>"${ROUTING_LOCK_FILE}"
+  )"
+  rc=$?
+  set -e
+
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal memproses routing: ${XRAY_ROUTING_CONF}" \
+    "xray tidak aktif setelah update routing. Routing di-rollback ke backup: ${backup}"
+
+  changed="$(xray_txn_changed_flag "${out}")"
   if [[ "${changed}" != "1" ]]; then
     return 0
   fi
-
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update routing. Routing di-rollback ke backup: ${backup}"
-  fi
+  return 0
 }
 
 
@@ -2910,14 +2934,17 @@ speed_policy_sync_xray() {
   ensure_path_writable "${XRAY_OUTBOUNDS_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  local backup_out backup_rt tmp_out tmp_rt
-  backup_out="$(xray_backup_config "${XRAY_OUTBOUNDS_CONF}")"
-  backup_rt="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  local backup_out backup_rt tmp_out tmp_rt rc
+  backup_out="$(xray_backup_path_prepare "${XRAY_OUTBOUNDS_CONF}")"
+  backup_rt="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp_out="${WORK_DIR}/20-outbounds.json.tmp"
   tmp_rt="${WORK_DIR}/30-routing-speed.json.tmp"
 
+  set +e
   (
     flock -x 200
+    cp -a "${XRAY_OUTBOUNDS_CONF}" "${backup_out}" || exit 1
+    cp -a "${XRAY_ROUTING_CONF}" "${backup_rt}" || exit 1
     python3 - <<'PY' \
       "${SPEED_POLICY_ROOT}" \
       "${XRAY_OUTBOUNDS_CONF}" \
@@ -3260,28 +3287,32 @@ routing["balancers"] = clean_balancers
 rt_cfg["routing"] = routing
 dump_json(rt_dst, rt_cfg)
 PY
-    xray_write_file_atomic "${XRAY_OUTBOUNDS_CONF}" "${tmp_out}"
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
-      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    return 1
-  }
+    xray_write_file_atomic "${XRAY_OUTBOUNDS_CONF}" "${tmp_out}" || {
+      [[ -f "${backup_out}" ]] && cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}" || true
+      [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp_rt}" || {
+      [[ -f "${backup_out}" ]] && cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}" || true
+      [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
 
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}"
-      cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    return 1
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup_out}" ]] && cp -a "${backup_out}" "${XRAY_OUTBOUNDS_CONF}" || true
+      [[ -f "${backup_rt}" ]] && cp -a "${backup_rt}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
+
+  if (( rc == 0 )); then
+    return 0
   fi
-  return 0
+  return 1
 }
 
 rollback_new_user_after_speed_failure() {
@@ -4210,7 +4241,10 @@ user_menu() {
     echo "  4. List users (read-only)"
     echo "  0. Back (kembali)"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) user_add_menu ;;
       2) user_del_menu ;;
@@ -4917,7 +4951,10 @@ quota_edit_flow() {
     echo " 10) Speed Limit Enable/Disable (toggle)"
     echo "  0) Back (kembali)"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     if is_back_choice "${c}"; then
       return 0
     fi
@@ -5121,7 +5158,10 @@ quota_menu() {
     echo "  next / previous"
     echo "  kembali) Back"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
 
     if is_back_choice "${c}"; then
       break
@@ -5378,18 +5418,20 @@ PY
 xray_routing_default_rule_set() {
   # args: mode direct|warp|balancer
   local mode="$1"
-  local tmp backup
+  local tmp backup rc
   need_python3
 
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
+  set +e
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${SPEED_OUTBOUND_TAG_PREFIX}"
+    cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${SPEED_OUTBOUND_TAG_PREFIX}" || exit 1
 import json, sys
 src, ob_src, dst, mode, speed_out_prefix = sys.argv[1:6]
 with open(src,'r',encoding='utf-8') as f:
@@ -5537,32 +5579,30 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update routing (rollback ke backup: ${backup})"
-  }
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
 
-  if ! xray_confdir_syntax_test; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Konfigurasi xray invalid setelah update routing default. Config di-rollback ke backup: ${backup}"
-  fi
+    if ! xray_confdir_syntax_test; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 87
+    fi
 
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update routing default. Config di-rollback ke backup: ${backup}"
-  fi
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
+
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update routing (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update routing default. Config di-rollback ke backup: ${backup}" \
+    "Konfigurasi xray invalid setelah update routing default. Config di-rollback ke backup: ${backup}"
 
   speed_policy_resync_after_egress_change || return 1
 }
@@ -5600,18 +5640,20 @@ PY
 xray_routing_balancer_set_strategy() {
   # args: strategy type
   local stype="$1"
-  local tmp backup
+  local tmp backup rc
   need_python3
 
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
+  set +e
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${stype}"
+    cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${stype}" || exit 1
 import json, sys
 src, dst, stype = sys.argv[1:4]
 allowed={"random","roundRobin","leastPing","leastLoad"}
@@ -5645,24 +5687,23 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update balancer (rollback ke backup: ${backup})"
-  }
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update balancer strategy. Config di-rollback ke backup: ${backup}"
-  fi
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update balancer (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update balancer strategy. Config di-rollback ke backup: ${backup}"
 
   speed_policy_resync_after_egress_change || return 1
 }
@@ -5670,19 +5711,21 @@ PY
 xray_routing_balancer_set_selector_from_outbounds() {
   # args: comma-separated or "auto"
   local mode="${1:-auto}"
-  local tmp backup
+  local tmp backup rc
   need_python3
 
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   [[ -f "${XRAY_OUTBOUNDS_CONF}" ]] || die "Xray outbounds conf tidak ditemukan: ${XRAY_OUTBOUNDS_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
 
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
+  set +e
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${SPEED_OUTBOUND_TAG_PREFIX}"
+    cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${SPEED_OUTBOUND_TAG_PREFIX}" || exit 1
 import json, sys
 rt_src, ob_src, dst, mode, speed_out_prefix = sys.argv[1:6]
 with open(rt_src,'r',encoding='utf-8') as f:
@@ -5757,24 +5800,23 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update selector balancer (rollback ke backup: ${backup})"
-  }
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update balancer selector. Config di-rollback ke backup: ${backup}"
-  fi
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update selector balancer (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update balancer selector. Config di-rollback ke backup: ${backup}"
 
   speed_policy_resync_after_egress_change || return 1
 }
@@ -5816,7 +5858,7 @@ xray_observatory_set_basic() {
   local probe="$1"
   local interval="$2"
   local conc="$3"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
 
@@ -5827,10 +5869,14 @@ xray_observatory_set_basic() {
   fi
 
   ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
-  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_OBSERVATORY_CONF}")"
   tmp="${WORK_DIR}/60-observatory.json.tmp"
 
-  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${probe}" "${interval}" "${conc}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_OBSERVATORY_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${probe}" "${interval}" "${conc}"
 import json, sys
 src, dst, probe, interval, conc = sys.argv[1:6]
 conc = str(conc).lower() in ("1","true","yes","y","on")
@@ -5853,20 +5899,31 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${OBS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
-    die "Gagal update observatory (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update observatory (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update observatory. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 
 xray_observatory_set_probe_url() {
   # args: probeURL
   local probe="$1"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
 
@@ -5876,10 +5933,14 @@ xray_observatory_set_probe_url() {
   fi
 
   ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
-  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_OBSERVATORY_CONF}")"
   tmp="${WORK_DIR}/60-observatory.json.tmp"
 
-  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${probe}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_OBSERVATORY_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${probe}"
 import json, sys
 src, dst, probe = sys.argv[1:4]
 probe = str(probe).strip()
@@ -5905,19 +5966,30 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${OBS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
-    die "Gagal update probeURL (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory probeURL"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update probeURL (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update observatory probeURL. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_observatory_set_interval() {
   # args: interval (contoh: 30s / 10m)
   local interval="$1"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
 
@@ -5927,10 +5999,14 @@ xray_observatory_set_interval() {
   fi
 
   ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
-  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_OBSERVATORY_CONF}")"
   tmp="${WORK_DIR}/60-observatory.json.tmp"
 
-  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${interval}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_OBSERVATORY_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}" "${interval}"
 import json, sys
 src, dst, interval = sys.argv[1:4]
 interval = str(interval).strip()
@@ -5956,17 +6032,28 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${OBS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
-    die "Gagal update interval (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory interval"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update interval (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update observatory interval. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_observatory_toggle_concurrency() {
-  local tmp backup
+  local tmp backup rc
   need_python3
 
   if [[ ! -f "${XRAY_OBSERVATORY_CONF}" ]]; then
@@ -5975,10 +6062,14 @@ xray_observatory_toggle_concurrency() {
   fi
 
   ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
-  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_OBSERVATORY_CONF}")"
   tmp="${WORK_DIR}/60-observatory.json.tmp"
 
-  python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_OBSERVATORY_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_OBSERVATORY_CONF}" "${tmp}"
 import json, sys
 src, dst = sys.argv[1:3]
 
@@ -6003,17 +6094,28 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${OBS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
-    die "Gagal toggle concurrency (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory concurrency"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal toggle concurrency (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah toggle observatory concurrency. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_observatory_sync_subject_selector_from_balancer() {
-  local tmp backup
+  local tmp backup rc
   need_python3
 
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
@@ -6023,10 +6125,14 @@ xray_observatory_sync_subject_selector_from_balancer() {
   fi
 
   ensure_path_writable "${XRAY_OBSERVATORY_CONF}"
-  backup="$(xray_backup_config "${XRAY_OBSERVATORY_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_OBSERVATORY_CONF}")"
   tmp="${WORK_DIR}/60-observatory.json.tmp"
 
-  python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OBSERVATORY_CONF}" "${tmp}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_OBSERVATORY_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OBSERVATORY_CONF}" "${tmp}"
 import json, sys
 rt, obs_src, dst = sys.argv[1:4]
 with open(rt,'r',encoding='utf-8') as f:
@@ -6054,13 +6160,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${OBS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_OBSERVATORY_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_OBSERVATORY_CONF}"
-    die "Gagal sync subjectSelector (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_OBSERVATORY_CONF}" "${backup}" "observatory subjectSelector"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal sync subjectSelector (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah sync observatory subjectSelector. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_routing_rule_toggle_user_outbound() {
@@ -6069,17 +6186,19 @@ xray_routing_rule_toggle_user_outbound() {
   local outbound="$2"
   local email="$3"
   local onoff="$4"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
+  set +e
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${email}" "${onoff}"
+    cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${email}" "${onoff}" || exit 1
 import json, sys
 src, dst, marker, outbound, email, onoff = sys.argv[1:7]
 enable = (onoff.lower() == 'on')
@@ -6158,24 +6277,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update routing (rollback ke backup: ${backup})"
-  }
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update routing per-user warp/direct. Config di-rollback ke backup: ${backup}"
-  fi
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update routing (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update routing per-user warp/direct. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_routing_rule_toggle_inbounds_outbound() {
@@ -6184,17 +6303,19 @@ xray_routing_rule_toggle_inbounds_outbound() {
   local outbound="$2"
   local tags_csv="$3"
   local onoff="$4"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
+  set +e
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${tags_csv}" "${onoff}"
+    cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${marker}" "${outbound}" "${tags_csv}" "${onoff}" || exit 1
 import json, sys
 src, dst, marker, outbound, tags_csv, onoff = sys.argv[1:7]
 enable = (onoff.lower() == 'on')
@@ -6268,24 +6389,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update routing (rollback ke backup: ${backup})"
-  }
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update routing per-inbound warp/direct. Config di-rollback ke backup: ${backup}"
-  fi
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update routing (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update routing per-inbound warp/direct. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_list_inbounds_tags_by_protocol() {
@@ -6387,7 +6508,10 @@ egress_menu() {
     echo "  8) Observatory: sync subjectSelector dari balancer selector"
     echo "  0) Back"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) xray_routing_default_rule_set direct ; log "Default egress: DIRECT" ; pause ;;
       2) xray_routing_default_rule_set warp ; log "Default egress: WARP" ; pause ;;
@@ -6480,7 +6604,10 @@ egress_set_mode_menu() {
     echo "  3) BALANCER"
     echo "  0) Back"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1)
         xray_routing_default_rule_set direct
@@ -7040,16 +7167,18 @@ xray_routing_custom_domain_entry_set_mode() {
   # args: mode direct|warp|off entry
   local mode="$1"
   local ent="$2"
-  local tmp backup
+  local tmp backup rc
   need_python3
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   ensure_path_writable "${XRAY_ROUTING_CONF}"
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing.json.tmp"
 
+  set +e
   (
     flock -x 200
-    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}" "${ent}"
+    cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${mode}" "${ent}" || exit 1
 import json, sys
 src, dst, mode, ent = sys.argv[1:5]
 mode=mode.lower().strip()
@@ -7191,23 +7320,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-  ) 200>"${ROUTING_LOCK_FILE}" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update routing (rollback ke backup: ${backup})"
-  }
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update custom domain mode. Config di-rollback ke backup: ${backup}"
-  fi
+    xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${ROUTING_LOCK_FILE}"
+  rc=$?
+  set -e
+
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update routing (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update custom domain mode. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_routing_adblock_rule_get() {
@@ -7289,20 +7419,23 @@ adblock_custom_dat_status_get() {
 xray_routing_adblock_rule_set() {
   # args: blocked|direct|warp|balancer|off
   local mode="${1:-}"
-  local backup tmp out changed
+  local backup tmp out changed rc
   need_python3
   [[ -f "${XRAY_ROUTING_CONF}" ]] || die "Xray routing conf tidak ditemukan: ${XRAY_ROUTING_CONF}"
   if [[ "${mode,,}" == "balancer" ]]; then
     [[ -f "${XRAY_OUTBOUNDS_CONF}" ]] || die "Xray outbounds conf tidak ditemukan: ${XRAY_OUTBOUNDS_CONF}"
   fi
   ensure_path_writable "${XRAY_ROUTING_CONF}"
-  backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
   tmp="${WORK_DIR}/30-routing-adblock.json.tmp"
 
+  set +e
   out="$(
     (
       flock -x 200
-      python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${ADBLOCK_GEOSITE_ENTRY}" "${ADBLOCK_BALANCER_TAG}" || exit 1
+      cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+      py_out="$(
+        python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${XRAY_OUTBOUNDS_CONF}" "${tmp}" "${mode}" "${ADBLOCK_GEOSITE_ENTRY}" "${ADBLOCK_BALANCER_TAG}"
 import json
 import sys
 
@@ -7491,30 +7624,37 @@ with open(dst, "w", encoding="utf-8") as f:
   json.dump(cfg, f, ensure_ascii=False, indent=2)
   f.write("\n")
 PY
-      xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-  )" || {
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    die "Gagal update adblock routing (rollback ke backup: ${backup})"
-  }
+      )" || exit 1
+      printf '%s\n' "${py_out}"
+      changed_local="$(xray_txn_changed_flag "${py_out}")"
 
-  changed="$(printf '%s\n' "${out}" | tail -n 1 | awk -F'=' '/^changed=/{print $2; exit}')"
+      xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+        [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+        exit 1
+      }
+
+      if [[ "${changed_local}" == "1" ]]; then
+        svc_restart xray || true
+        if ! svc_wait_active xray 20; then
+          [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+          systemctl restart xray || true
+          exit 86
+        fi
+      fi
+    ) 200>"${ROUTING_LOCK_FILE}"
+  )"
+  rc=$?
+  set -e
+
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update adblock routing (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update adblock routing. Config di-rollback ke backup: ${backup}"
+
+  changed="$(xray_txn_changed_flag "${out}")"
   if [[ "${changed}" != "1" ]]; then
     return 0
   fi
-
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    (
-      flock -x 200
-      cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-    ) 200>"${ROUTING_LOCK_FILE}"
-    systemctl restart xray || true
-    die "xray tidak aktif setelah update adblock routing. Config di-rollback ke backup: ${backup}"
-  fi
+  return 0
 }
 
 adblock_menu() {
@@ -8717,12 +8857,14 @@ PY
         fi
         need_python3
         ensure_path_writable "${XRAY_ROUTING_CONF}"
-        local backup tmp
-        backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+        local backup tmp rc
+        backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
         tmp="${WORK_DIR}/30-routing.json.tmp"
+        set +e
         (
           flock -x 200
-          python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${ent}"
+          cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+          python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${ent}" || exit 1
 import json, sys
 src, dst, ent = sys.argv[1:4]
 with open(src,'r',encoding='utf-8') as f:
@@ -8777,23 +8919,22 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-          xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-        ) 200>"${ROUTING_LOCK_FILE}" || {
-          (
-            flock -x 200
-            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-          ) 200>"${ROUTING_LOCK_FILE}"
-          die "Gagal update routing (rollback ke backup: ${backup})"
-        }
-        svc_restart xray || true
-        if ! svc_wait_active xray 20; then
-          (
-            flock -x 200
-            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-          ) 200>"${ROUTING_LOCK_FILE}"
-          systemctl restart xray || true
-          die "xray tidak aktif setelah tambah custom domain direct. Config di-rollback ke backup: ${backup}"
-        fi
+          xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            exit 1
+          }
+          svc_restart xray || true
+          if ! svc_wait_active xray 20; then
+            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            systemctl restart xray || true
+            exit 86
+          fi
+        ) 200>"${ROUTING_LOCK_FILE}"
+        rc=$?
+        set -e
+        xray_txn_rc_or_die "${rc}" \
+          "Gagal update routing (rollback ke backup: ${backup})" \
+          "xray tidak aktif setelah tambah custom domain direct. Config di-rollback ke backup: ${backup}"
         log "Entry ditambahkan: ${ent}"
         pause
         ;;
@@ -8809,12 +8950,14 @@ PY
         fi
         need_python3
         ensure_path_writable "${XRAY_ROUTING_CONF}"
-        local backup tmp
-        backup="$(xray_backup_config "${XRAY_ROUTING_CONF}")"
+        local backup tmp rc
+        backup="$(xray_backup_path_prepare "${XRAY_ROUTING_CONF}")"
         tmp="${WORK_DIR}/30-routing.json.tmp"
+        set +e
         (
           flock -x 200
-          python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${no}"
+          cp -a "${XRAY_ROUTING_CONF}" "${backup}" || exit 1
+          python3 - <<'PY' "${XRAY_ROUTING_CONF}" "${tmp}" "${no}" || exit 1
 import json, sys
 src, dst, no = sys.argv[1:4]
 no=int(no)
@@ -8859,23 +9002,22 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
-          xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}"
-        ) 200>"${ROUTING_LOCK_FILE}" || {
-          (
-            flock -x 200
-            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-          ) 200>"${ROUTING_LOCK_FILE}"
-          die "Gagal update routing (rollback ke backup: ${backup})"
-        }
-        svc_restart xray || true
-        if ! svc_wait_active xray 20; then
-          (
-            flock -x 200
-            cp -a "${backup}" "${XRAY_ROUTING_CONF}"
-          ) 200>"${ROUTING_LOCK_FILE}"
-          systemctl restart xray || true
-          die "xray tidak aktif setelah hapus custom domain direct. Config di-rollback ke backup: ${backup}"
-        fi
+          xray_write_file_atomic "${XRAY_ROUTING_CONF}" "${tmp}" || {
+            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            exit 1
+          }
+          svc_restart xray || true
+          if ! svc_wait_active xray 20; then
+            [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_ROUTING_CONF}" || true
+            systemctl restart xray || true
+            exit 86
+          fi
+        ) 200>"${ROUTING_LOCK_FILE}"
+        rc=$?
+        set -e
+        xray_txn_rc_or_die "${rc}" \
+          "Gagal update routing (rollback ke backup: ${backup})" \
+          "xray tidak aktif setelah hapus custom domain direct. Config di-rollback ke backup: ${backup}"
         log "Entry dihapus"
         pause
         ;;
@@ -8950,7 +9092,7 @@ PY
 
 xray_dns_set_primary() {
   local val="$1"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
 
@@ -8960,10 +9102,14 @@ xray_dns_set_primary() {
   fi
 
   ensure_path_writable "${XRAY_DNS_CONF}"
-  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_DNS_CONF}")"
   tmp="${WORK_DIR}/02-dns.json.tmp"
 
-  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_DNS_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
 import json, sys
 
 src, dst, val = sys.argv[1:4]
@@ -9004,18 +9150,29 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${DNS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_DNS_CONF}"
-    die "Gagal update Primary DNS (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns primary"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update Primary DNS (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update dns primary. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_dns_set_secondary() {
   local val="$1"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
 
@@ -9025,10 +9182,14 @@ xray_dns_set_secondary() {
   fi
 
   ensure_path_writable "${XRAY_DNS_CONF}"
-  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_DNS_CONF}")"
   tmp="${WORK_DIR}/02-dns.json.tmp"
 
-  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_DNS_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
 import json, sys
 
 src, dst, val = sys.argv[1:4]
@@ -9072,18 +9233,29 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${DNS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_DNS_CONF}"
-    die "Gagal update Secondary DNS (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns secondary"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update Secondary DNS (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update dns secondary. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_dns_set_query_strategy() {
   local val="$1"
-  local tmp backup
+  local tmp backup rc
 
   need_python3
 
@@ -9093,10 +9265,14 @@ xray_dns_set_query_strategy() {
   fi
 
   ensure_path_writable "${XRAY_DNS_CONF}"
-  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_DNS_CONF}")"
   tmp="${WORK_DIR}/02-dns.json.tmp"
 
-  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_DNS_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}" "${val}"
 import json, sys
 
 src, dst, val = sys.argv[1:4]
@@ -9123,17 +9299,28 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${DNS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_DNS_CONF}"
-    die "Gagal update Query Strategy (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns queryStrategy"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal update Query Strategy (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update dns queryStrategy. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 xray_dns_toggle_cache() {
-  local tmp backup
+  local tmp backup rc
   need_python3
 
   if [[ ! -f "${XRAY_DNS_CONF}" ]]; then
@@ -9142,10 +9329,14 @@ xray_dns_toggle_cache() {
   fi
 
   ensure_path_writable "${XRAY_DNS_CONF}"
-  backup="$(xray_backup_config "${XRAY_DNS_CONF}")"
+  backup="$(xray_backup_path_prepare "${XRAY_DNS_CONF}")"
   tmp="${WORK_DIR}/02-dns.json.tmp"
 
-  python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}"
+  set +e
+  (
+    flock -x 200
+    cp -a "${XRAY_DNS_CONF}" "${backup}" || exit 1
+    python3 - <<'PY' "${XRAY_DNS_CONF}" "${tmp}"
 import json, sys
 
 src, dst = sys.argv[1:3]
@@ -9170,13 +9361,24 @@ with open(dst,'w',encoding='utf-8') as f:
   json.dump(cfg,f,ensure_ascii=False,indent=2)
   f.write("\n")
 PY
+    xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      exit 1
+    }
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      [[ -f "${backup}" ]] && cp -a "${backup}" "${XRAY_DNS_CONF}" || true
+      systemctl restart xray || true
+      exit 86
+    fi
+  ) 200>"${DNS_LOCK_FILE}"
+  rc=$?
+  set -e
 
-  xray_write_file_atomic "${XRAY_DNS_CONF}" "${tmp}" || {
-    cp -a "${backup}" "${XRAY_DNS_CONF}"
-    die "Gagal toggle DNS cache (rollback ke backup: ${backup})"
-  }
-
-  xray_restart_or_rollback_file "${XRAY_DNS_CONF}" "${backup}" "dns cache"
+  xray_txn_rc_or_die "${rc}" \
+    "Gagal toggle DNS cache (rollback ke backup: ${backup})" \
+    "xray tidak aktif setelah update dns cache. Config di-rollback ke backup: ${backup}"
+  return 0
 }
 
 dns_show_status() {
@@ -9384,7 +9586,10 @@ network_menu() {
     echo "  6) Adblock (Custom Geosite)"
     echo "  0) Back (kembali)"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) egress_menu_simple ;;
       2) warp_controls_menu ;;
@@ -9466,7 +9671,10 @@ speedtest_menu() {
     echo "  2) Show Speedtest Version"
     echo "  0) Back (kembali)"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) speedtest_run_now ;;
       2) speedtest_show_version ;;
@@ -10172,7 +10380,10 @@ fail2ban_menu() {
     echo "  4) Security Overview"
     echo "  0) Back"
     hr
-    read -r -p "Pilih: " c
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
     case "${c}" in
       1) security_tls_menu ;;
       2) security_fail2ban_menu ;;
@@ -10248,7 +10459,10 @@ wireproxy_status_menu() {
   echo "  1) Lihat log wireproxy (20 baris)"
   echo "  0) Back"
   hr
-  read -r -p "Pilih: " c
+  if ! read -r -p "Pilih: " c; then
+    echo
+    return 0
+  fi
   case "${c}" in
     1) daemon_log_tail_show wireproxy 20 ;;
     0|kembali|k|back|b) : ;;
@@ -10296,8 +10510,19 @@ install_discord_bot_menu() {
   echo "Kerangka menu Install BOT Discord sudah disiapkan."
   echo "Fungsi instalasi belum diimplementasikan (placeholder)."
   echo
+  local self_path base_dir installer_path
+  self_path="${BASH_SOURCE[0]}"
+  if command -v readlink >/dev/null 2>&1; then
+    self_path="$(readlink -f "${self_path}" 2>/dev/null || echo "${self_path}")"
+  fi
+  base_dir="$(cd -- "$(dirname -- "${self_path}")" >/dev/null 2>&1 && pwd -P)"
+  installer_path="${base_dir}/install-discord-bot.sh"
+
   echo "Placeholder script:"
-  echo "  /opt/xray-core_discord/install-discord-bot.sh"
+  echo "  ${installer_path}"
+  if [[ ! -f "${installer_path}" ]]; then
+    warn "File installer tidak ditemukan di path di atas."
+  fi
   hr
   pause
 }
