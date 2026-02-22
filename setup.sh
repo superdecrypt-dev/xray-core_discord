@@ -144,10 +144,91 @@ check_os() {
   fi
 }
 
+ensure_dpkg_consistent() {
+  wait_for_dpkg_lock || die "Timeout menunggu lock dpkg/apt."
+
+  local audit
+  audit="$(dpkg --audit 2>/dev/null || true)"
+  if [[ -n "${audit//[[:space:]]/}" ]]; then
+    warn "Status dpkg tidak konsisten. Menjalankan pemulihan: dpkg --configure -a"
+    dpkg --configure -a || die "Gagal memulihkan status dpkg."
+  fi
+
+  # Coba perbaiki dependency yang belum tuntas tanpa menghentikan flow jika tidak perlu.
+  apt_get_with_lock_retry -f install -y >/dev/null 2>&1 || true
+}
+
+wait_for_dpkg_lock() {
+  local timeout="${1:-300}"
+  local waited=0
+  local step=3
+  local lock_files=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/lib/apt/lists/lock
+    /var/cache/apt/archives/lock
+  )
+
+  command -v fuser >/dev/null 2>&1 || return 0
+
+  while true; do
+    local busy=0
+    local lf
+    for lf in "${lock_files[@]}"; do
+      if [[ -e "$lf" ]] && fuser "$lf" >/dev/null 2>&1; then
+        busy=1
+        break
+      fi
+    done
+
+    if [[ "$busy" -eq 0 ]]; then
+      return 0
+    fi
+
+    if (( waited >= timeout )); then
+      return 1
+    fi
+
+    sleep "$step"
+    waited=$((waited + step))
+  done
+}
+
+apt_get_with_lock_retry() {
+  local max_attempts=8
+  local attempt=1
+  local tmp rc
+
+  while (( attempt <= max_attempts )); do
+    wait_for_dpkg_lock || true
+    tmp="$(mktemp)"
+
+    if apt-get "$@" > >(tee "$tmp") 2> >(tee -a "$tmp" >&2); then
+      rm -f "$tmp" >/dev/null 2>&1 || true
+      return 0
+    fi
+
+    rc=$?
+    if grep -qiE "Could not get lock|Unable to acquire the dpkg frontend lock|Unable to lock the administration directory" "$tmp"; then
+      warn "APT lock masih dipakai proses lain. Retry ${attempt}/${max_attempts} ..."
+      rm -f "$tmp" >/dev/null 2>&1 || true
+      sleep 3
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return "$rc"
+  done
+
+  return 1
+}
+
 install_base_deps() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y curl ca-certificates unzip openssl socat cron gpg lsb-release python3 iproute2 jq dnsutils
+  ensure_dpkg_consistent
+  apt_get_with_lock_retry update -y
+  apt_get_with_lock_retry install -y curl ca-certificates unzip openssl socat cron gpg lsb-release python3 iproute2 jq dnsutils
   ok "Dependency dasar terpasang."
 }
 
@@ -158,8 +239,9 @@ need_python3() {
 
   warn "python3 belum terpasang. Memasang python3..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y python3 || die "Gagal memasang python3."
+  ensure_dpkg_consistent
+  apt_get_with_lock_retry update -y
+  apt_get_with_lock_retry install -y python3 || die "Gagal memasang python3."
 }
 
 
@@ -593,7 +675,8 @@ install_nginx_official_repo() {
   [[ -n "$codename" ]] || codename="$(lsb_release -sc 2>/dev/null || true)"
   [[ -n "$codename" ]] || die "Gagal mendeteksi codename OS."
 
-  apt-get remove -y nginx nginx-common nginx-full nginx-core 2>/dev/null || true
+  ensure_dpkg_consistent
+  apt_get_with_lock_retry remove -y nginx nginx-common nginx-full nginx-core 2>/dev/null || true
 
   mkdir -p /usr/share/keyrings
   local key_tmp key_gpg_tmp
@@ -625,8 +708,8 @@ Pin: origin nginx.org
 Pin-Priority: 900
 EOF
 
-apt-get update -y
-apt-get install -y nginx jq
+apt_get_with_lock_retry update -y
+apt_get_with_lock_retry install -y nginx jq
 ok "Nginx terpasang dari repo resmi nginx.org (mainline)."
 }
 
@@ -759,6 +842,13 @@ write_xray_config() {
   P_TROJAN_GRPC="$(pick_port)"
   P_API="10080"
 
+  if ! is_port_free "$P_API"; then
+    warn "Port API Xray (${P_API}) sedang dipakai. Mencoba stop service xray lama..."
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl stop xray >/dev/null 2>&1 || true
+      sleep 1
+    fi
+  fi
   is_port_free "$P_API" || die "Port API Xray ($P_API) sedang dipakai. Bebaskan port ini atau ubah konfigurasi."
 
   local I_VLESS_WS I_VMESS_WS I_TROJAN_WS
@@ -1416,6 +1506,8 @@ write_nginx_main_conf() {
 
   # Hindari konflik dari default server bawaan paket nginx.org
   rm -f /etc/nginx/conf.d/default.conf 2>/dev/null || true
+  # Hindari warning/konflik dari xray.conf lama saat validasi nginx -t awal.
+  rm -f "${NGINX_CONF}" 2>/dev/null || true
 
   cat > /etc/nginx/nginx.conf <<EOF
 user ${nginx_user};
@@ -1627,7 +1719,8 @@ install_extra_deps() {
   # Hindari warning dpkg-statoverride saat install chrony di beberapa distro.
   mkdir -p /var/log/chrony
 
-  apt-get install -y jq fail2ban chrony tar expect logrotate nftables
+  ensure_dpkg_consistent
+  apt_get_with_lock_retry install -y jq fail2ban chrony tar expect logrotate nftables
   ok "Dependency tambahan terpasang (jq, fail2ban, chrony, expect, logrotate, nftables)."
 }
 
