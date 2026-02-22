@@ -325,7 +325,14 @@ deploy_or_update_files() {
   src_root="$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
   [[ -n "${src_root}" ]] || die "Tidak menemukan root folder hasil extract."
 
-  src_dir="${src_root}/bot-discord"
+  # Support dua layout archive:
+  # 1) Repo archive: <root>/bot-discord/...
+  # 2) Bot-only archive: <root>/gateway-ts, <root>/backend-py, ...
+  if [[ -d "${src_root}/bot-discord" ]]; then
+    src_dir="${src_root}/bot-discord"
+  else
+    src_dir="${src_root}"
+  fi
   validate_source_tree "${src_dir}"
 
   mkdir -p "${BOT_HOME}" "${BOT_STATE_DIR}" "${BOT_LOG_DIR}" "${BOT_ENV_DIR}"
