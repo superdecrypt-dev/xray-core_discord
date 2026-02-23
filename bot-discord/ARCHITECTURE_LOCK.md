@@ -4,7 +4,7 @@ Dokumen ini menjadi acuan tetap implementasi bot Discord standalone pada repo in
 
 ## 1) Prinsip Dasar
 - Bot Discord berdiri sendiri dan **tidak mengeksekusi `manage.sh`**.
-- Perilaku menu mengikuti struktur CLI `manage.sh` (menu 1-9), tetapi eksekusi action dilakukan oleh backend bot.
+- Perilaku menu mengikuti struktur CLI `manage.sh` (menu 1-8), tetapi eksekusi action dilakukan oleh backend bot.
 - UI Discord meminimalkan slash command (entry point `/panel`) dan menggunakan button/modal untuk interaksi utama.
 
 ## 2) Struktur Direktori Bot
@@ -43,11 +43,16 @@ bot-discord/
 │  └─ tmp/
 ├─ systemd/
 │  ├─ xray-discord-backend.service.tpl
-│  └─ xray-discord-gateway.service.tpl
+│  ├─ xray-discord-gateway.service.tpl
+│  ├─ xray-discord-monitor.service.tpl
+│  └─ xray-discord-monitor.timer.tpl
 └─ scripts/
    ├─ dev-up.sh
    ├─ dev-down.sh
-   └─ smoke-test.sh
+   ├─ smoke-test.sh
+   ├─ gate-all.sh
+   ├─ rotate-discord-token.sh
+   └─ monitor-lite.sh
 ```
 
 ## 3) Kontrak Menu Installer
@@ -72,7 +77,19 @@ Ringkasan fungsi:
 - `4` update token aman (`read -s`, konfirmasi ulang, permission file env 600).
 - `5` deploy dari archive GitHub lalu `rsync` ke target.
 - `6` memasang template systemd untuk backend dan gateway.
-- `7-9` operasional service (restart/status/log).
+- `6` juga memasang monitor ringan (`xray-discord-monitor.timer`).
+- `7-9` operasional service (restart/status/log) termasuk status monitor timer.
+
+Script test otomatis:
+- `scripts/gate-all.sh local` menjalankan Gate 1-3.
+- `scripts/gate-all.sh prod` menjalankan Gate 3.1, 5, 6.
+- `scripts/gate-all.sh all` menjalankan Gate 1-6 (Gate 4 via `STAGING_INSTANCE`).
+
+Script keamanan:
+- `scripts/rotate-discord-token.sh` untuk rotasi `DISCORD_BOT_TOKEN` via prompt tersembunyi, update env file, lalu restart gateway.
+
+Script monitoring:
+- `scripts/monitor-lite.sh` mengecek backend/gateway/health dan mencatat ringkas ke `/var/log/xray-discord-bot/monitor-lite.log`.
 
 ## 4) Lokasi Deploy & Integrasi Root Script
 - Lokasi bot terpasang: `/opt/bot-discord`

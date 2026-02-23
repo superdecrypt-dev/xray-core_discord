@@ -1,6 +1,6 @@
 # Bot Discord Standalone (UI Button + Modal)
 
-Bot ini berdiri sendiri dan tidak menjalankan `manage.sh`. Perilaku menunya dibuat mirip struktur `manage.sh` (menu 1-9), tetapi seluruh aksi dieksekusi lewat backend sendiri.
+Bot ini berdiri sendiri dan tidak menjalankan `manage.sh`. Perilaku menunya dibuat mirip struktur `manage.sh` (menu 1-8), tetapi seluruh aksi dieksekusi lewat backend sendiri.
 
 ## Arsitektur
 - `gateway-ts/`: Discord gateway (`discord.js`) untuk slash command minimal (`/panel`), tombol, modal, dan select.
@@ -10,7 +10,7 @@ Bot ini berdiri sendiri dan tidak menjalankan `manage.sh`. Perilaku menunya dibu
 
 ## Alur Interaksi
 1. Admin jalankan `/panel`.
-2. Gateway kirim panel menu utama (button 1-9).
+2. Gateway kirim panel menu utama (button 1-8).
 3. User pilih action via button/modal.
 4. Gateway memanggil backend (`/api/menu/{id}/action`) dengan secret internal.
 5. Backend menjalankan aksi dan mengembalikan hasil ke Discord.
@@ -32,6 +32,55 @@ npm install
 npm run dev
 ```
 
+## Otomasi Pengujian Gate
+Satu command untuk menjalankan paket uji bertahap:
+
+```bash
+cd bot-discord
+./scripts/gate-all.sh local   # Gate 1,2,3 (local/staging non-produksi)
+./scripts/gate-all.sh prod    # Gate 3.1,5,6 (produksi via LXC)
+./scripts/gate-all.sh all     # Gate 1-6 (Gate 4 pakai STAGING_INSTANCE)
+```
+
+Override target instance jika perlu:
+
+```bash
+PROD_INSTANCE=xray-itg-1771777921 STAGING_INSTANCE=xray-stg-gate3-1771864485 ./scripts/gate-all.sh all
+```
+
+## Rotasi Token Discord (Aman)
+Jalankan langsung di VPS agar token tidak terkirim ke chat/log:
+
+```bash
+cd /opt/bot-discord
+./scripts/rotate-discord-token.sh
+```
+
+Script akan:
+- meminta token baru dengan input tersembunyi,
+- update `DISCORD_BOT_TOKEN` di env file deploy,
+- restart `xray-discord-gateway`,
+- menampilkan status service setelah restart.
+
+## Monitoring Ringan (Timer)
+Deploy terbaru memasang timer `xray-discord-monitor.timer` (interval 5 menit) yang menjalankan:
+
+```bash
+/opt/bot-discord/scripts/monitor-lite.sh
+```
+
+Cakupan cek:
+- status `xray-discord-backend`,
+- status `xray-discord-gateway`,
+- endpoint `GET /health` backend.
+
+Lihat status timer:
+
+```bash
+systemctl status xray-discord-monitor.timer --no-pager
+tail -n 50 /var/log/xray-discord-bot/monitor-lite.log
+```
+
 ## Menu yang Didukung (Mirip manage.sh)
 - `1) Status & Diagnostics`
 - `2) User Management`
@@ -41,7 +90,6 @@ npm run dev
 - `6) Speedtest`
 - `7) Security`
 - `8) Maintenance`
-- `9) Install BOT Discord`
 
 ## Catatan Keamanan
 - Simpan token hanya di env file (`/etc/xray-discord-bot/bot.env` saat deploy).

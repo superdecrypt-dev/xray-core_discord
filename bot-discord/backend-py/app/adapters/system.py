@@ -619,12 +619,3 @@ def op_restart_service(service: str) -> tuple[bool, str, str]:
     if ok:
         return True, "Maintenance - Restart", f"Restart {service} berhasil.\nState: {state}"
     return False, "Maintenance - Restart", f"Restart {service} gagal.\n{out}\nState: {state}"
-
-
-def op_tail_log(service: str, lines: int = 80) -> tuple[bool, str, str]:
-    if service not in ALLOWED_SERVICES:
-        return False, "Maintenance - Tail Log", f"Service tidak diizinkan: {service}"
-    ok, out = run_cmd(["journalctl", "-u", service, "-n", str(lines), "--no-pager"], timeout=25)
-    if ok:
-        return True, f"Maintenance - Log {service}", out
-    return False, f"Maintenance - Log {service}", f"Gagal ambil log {service}:\n{out}"

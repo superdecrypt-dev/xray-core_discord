@@ -18,6 +18,13 @@ Gunakan Bash strict mode (`set -euo pipefail`) dan pola defensif yang sudah ada 
 ## Panduan Testing
 Minimum sebelum merge: syntax check + lint shell + smoke check layanan terkait. Untuk perubahan runtime Xray, verifikasi `systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-pager` dan `xray run -test -confdir /usr/local/etc/xray/conf.d`. Untuk bot Discord, uji `backend-py` health endpoint dan alur `/panel` -> button -> modal di server Discord staging.
 
+## Environment Separation (Wajib)
+Gunakan pemisahan environment agar perubahan aman:
+- `Staging environment`: khusus test/R&D, validasi gate, smoke, failure, dan eksperimen.
+- `Production environment`: khusus layanan running/live user.
+- Alur rilis wajib: uji di staging dulu, baru promote ke production.
+- Selalu siapkan snapshot/rollback sebelum perubahan besar di production.
+
 ## Commit & Pull Request
 Ikuti konvensi commit yang sudah dipakai: `feat`, `fix`, `docs`, `chore`, `refactor`, `style`, `security` (opsional dengan scope, contoh `feat(bot): ...`). PR wajib memuat ringkasan perubahan, risiko/rollback, command validasi yang dijalankan, serta bukti hasil (log/screenshot) untuk perubahan interaksi menu.
 

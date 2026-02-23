@@ -27,6 +27,7 @@ BOT_LOG_DIR="${BOT_LOG_DIR:-/var/log/xray-discord-bot}"
 
 BACKEND_SERVICE="xray-discord-backend"
 GATEWAY_SERVICE="xray-discord-gateway"
+MONITOR_SERVICE="xray-discord-monitor"
 
 SRC_OWNER="${BOT_SOURCE_OWNER:-superdecrypt-dev}"
 SRC_REPO="${BOT_SOURCE_REPO:-xray-core_discord}"
@@ -288,6 +289,11 @@ validate_required_env() {
 service_unit_exists() {
   local svc="$1"
   systemctl cat "${svc}.service" >/dev/null 2>&1
+}
+
+timer_unit_exists() {
+  local timer="$1"
+  systemctl cat "${timer}.timer" >/dev/null 2>&1
 }
 
 show_service_status() {
@@ -562,11 +568,16 @@ install_or_update_systemd() {
   need_root
   command_exists systemctl || die "systemctl tidak tersedia di host ini."
 
-  local backend_tpl gateway_tpl backend_dst gateway_dst
+  local backend_tpl gateway_tpl monitor_tpl monitor_timer_tpl
+  local backend_dst gateway_dst monitor_dst monitor_timer_dst
   backend_tpl="${BOT_HOME}/systemd/xray-discord-backend.service.tpl"
   gateway_tpl="${BOT_HOME}/systemd/xray-discord-gateway.service.tpl"
+  monitor_tpl="${BOT_HOME}/systemd/${MONITOR_SERVICE}.service.tpl"
+  monitor_timer_tpl="${BOT_HOME}/systemd/${MONITOR_SERVICE}.timer.tpl"
   backend_dst="/etc/systemd/system/${BACKEND_SERVICE}.service"
   gateway_dst="/etc/systemd/system/${GATEWAY_SERVICE}.service"
+  monitor_dst="/etc/systemd/system/${MONITOR_SERVICE}.service"
+  monitor_timer_dst="/etc/systemd/system/${MONITOR_SERVICE}.timer"
 
   [[ -f "${backend_tpl}" ]] || die "Template tidak ditemukan: ${backend_tpl}"
   [[ -f "${gateway_tpl}" ]] || die "Template tidak ditemukan: ${gateway_tpl}"
@@ -581,14 +592,37 @@ install_or_update_systemd() {
     -e "s#/etc/xray-discord-bot/bot.env#${BOT_ENV_FILE}#g" \
     "${gateway_tpl}" > "${gateway_dst}"
 
+  if [[ -f "${monitor_tpl}" ]]; then
+    sed \
+      -e "s#/opt/bot-discord#${BOT_HOME}#g" \
+      -e "s#/etc/xray-discord-bot/bot.env#${BOT_ENV_FILE}#g" \
+      "${monitor_tpl}" > "${monitor_dst}"
+  fi
+
+  if [[ -f "${monitor_timer_tpl}" ]]; then
+    sed \
+      -e "s#/opt/bot-discord#${BOT_HOME}#g" \
+      -e "s#/etc/xray-discord-bot/bot.env#${BOT_ENV_FILE}#g" \
+      "${monitor_timer_tpl}" > "${monitor_timer_dst}"
+  fi
+
   chmod 644 "${backend_dst}" "${gateway_dst}"
+  [[ -f "${monitor_dst}" ]] && chmod 644 "${monitor_dst}"
+  [[ -f "${monitor_timer_dst}" ]] && chmod 644 "${monitor_timer_dst}"
 
   systemctl daemon-reload
   systemctl enable "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
+  if [[ -f "${monitor_dst}" && -f "${monitor_timer_dst}" ]]; then
+    systemctl enable "${MONITOR_SERVICE}.timer" >/dev/null 2>&1 || true
+    systemctl restart "${MONITOR_SERVICE}.timer" >/dev/null 2>&1 || true
+  fi
 
   ok "Systemd service terpasang/terupdate."
   show_service_status "${BACKEND_SERVICE}"
   show_service_status "${GATEWAY_SERVICE}"
+  if [[ -f "${monitor_dst}" && -f "${monitor_timer_dst}" ]]; then
+    show_service_status "${MONITOR_SERVICE}.timer"
+  fi
 }
 
 start_or_restart_services() {
@@ -600,10 +634,16 @@ start_or_restart_services() {
 
   systemctl restart "${BACKEND_SERVICE}"
   systemctl restart "${GATEWAY_SERVICE}"
+  if timer_unit_exists "${MONITOR_SERVICE}"; then
+    systemctl restart "${MONITOR_SERVICE}.timer" >/dev/null 2>&1 || true
+  fi
 
   ok "Service bot di-restart."
   show_service_status "${BACKEND_SERVICE}"
   show_service_status "${GATEWAY_SERVICE}"
+  if timer_unit_exists "${MONITOR_SERVICE}"; then
+    show_service_status "${MONITOR_SERVICE}.timer"
+  fi
 }
 
 status_services() {
@@ -614,6 +654,9 @@ status_services() {
   hr
   show_service_status "${BACKEND_SERVICE}"
   show_service_status "${GATEWAY_SERVICE}"
+  if timer_unit_exists "${MONITOR_SERVICE}"; then
+    show_service_status "${MONITOR_SERVICE}.timer"
+  fi
   hr
 
   local token
@@ -665,7 +708,7 @@ uninstall_bot() {
   command_exists systemctl || die "systemctl tidak tersedia di host ini."
 
   echo "Anda akan menghapus instalasi bot Discord secara bersih dari sistem ini."
-  echo "- Service: ${BACKEND_SERVICE}, ${GATEWAY_SERVICE}"
+  echo "- Service: ${BACKEND_SERVICE}, ${GATEWAY_SERVICE}, ${MONITOR_SERVICE}.timer"
   echo "- Bot home: ${BOT_HOME}"
   echo "- Env file: ${BOT_ENV_FILE}"
   echo "- Runtime : ${BOT_STATE_DIR}, ${BOT_LOG_DIR}"
@@ -681,18 +724,23 @@ uninstall_bot() {
   }
 
   systemctl stop "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
-  systemctl disable "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
+  systemctl stop "${MONITOR_SERVICE}.timer" "${MONITOR_SERVICE}" >/dev/null 2>&1 || true
+  systemctl disable "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" "${MONITOR_SERVICE}.timer" >/dev/null 2>&1 || true
 
   rm -f \
     "/etc/systemd/system/${BACKEND_SERVICE}.service" \
-    "/etc/systemd/system/${GATEWAY_SERVICE}.service" >/dev/null 2>&1 || true
+    "/etc/systemd/system/${GATEWAY_SERVICE}.service" \
+    "/etc/systemd/system/${MONITOR_SERVICE}.service" \
+    "/etc/systemd/system/${MONITOR_SERVICE}.timer" >/dev/null 2>&1 || true
 
   rm -rf \
     "/etc/systemd/system/${BACKEND_SERVICE}.service.d" \
-    "/etc/systemd/system/${GATEWAY_SERVICE}.service.d" >/dev/null 2>&1 || true
+    "/etc/systemd/system/${GATEWAY_SERVICE}.service.d" \
+    "/etc/systemd/system/${MONITOR_SERVICE}.service.d" \
+    "/etc/systemd/system/${MONITOR_SERVICE}.timer.d" >/dev/null 2>&1 || true
 
   systemctl daemon-reload || true
-  systemctl reset-failed "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
+  systemctl reset-failed "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" "${MONITOR_SERVICE}" >/dev/null 2>&1 || true
 
   assert_safe_delete_target "${BOT_HOME}" "BOT_HOME"
   assert_safe_delete_target "${BOT_ENV_DIR}" "BOT_ENV_DIR"
