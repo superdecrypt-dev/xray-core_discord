@@ -864,6 +864,21 @@ confirm_yn() {
   done
 }
 
+confirm_yn_or_back() {
+  # return: 0=yes, 1=no, 2=back
+  local prompt="$1"
+  local ans
+  while true; do
+    read -r -p "${prompt} (y/n/kembali): " ans
+    case "${ans,,}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      0|kembali|k|back|b) return 2 ;;
+      *) echo "Input tidak valid. Jawab y/n/kembali." ;;
+    esac
+  done
+}
+
 get_public_ipv4() {
   local ip=""
   ip="$(curl -4fsSL https://api.ipify.org 2>/dev/null || true)"
@@ -1040,11 +1055,18 @@ cf_prepare_subdomain_a_record() {
 
       if [[ "$any_same" == "1" ]]; then
         warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
-        if confirm_yn "Lanjut menggunakan domain ini?"; then
+        local ask_rc=0
+        if confirm_yn_or_back "Lanjut menggunakan domain ini?"; then
           log "Lanjut."
           return 0
         fi
-        die "Dibatalkan oleh user."
+        ask_rc=$?
+        if (( ask_rc == 2 )); then
+          warn "Dibatalkan oleh user (kembali)."
+          return 2
+        fi
+        warn "Dibatalkan oleh user."
+        return 1
       fi
 
       if [[ "$any_diff" == "1" ]]; then
@@ -1078,13 +1100,15 @@ domain_menu_v2() {
   echo "============================================"
   echo "1. input domain sendiri"
   echo "2. gunakan domain yang disediakan"
+  echo "0. kembali"
   echo
 
   local choice=""
   while true; do
-    read -r -p "Pilih opsi (1-2): " choice
+    read -r -p "Pilih opsi (1-2/0/kembali): " choice
     case "$choice" in
       1|2) break ;;
+      0|kembali|k|back|b) return 2 ;;
       *) echo "Pilihan tidak valid." ;;
     esac
   done
@@ -1092,7 +1116,10 @@ domain_menu_v2() {
   if [[ "$choice" == "1" ]]; then
     local re='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$'
     while true; do
-      read -r -p "Masukkan domain: " DOMAIN
+      read -r -p "Masukkan domain (atau kembali): " DOMAIN
+      if is_back_choice "${DOMAIN}"; then
+        return 2
+      fi
       DOMAIN="${DOMAIN,,}"
 
       [[ -n "${DOMAIN:-}" ]] || {
@@ -1129,7 +1156,10 @@ domain_menu_v2() {
 
   local pick=""
   while true; do
-    read -r -p "Pilih nomor domain induk (1-${#PROVIDED_ROOT_DOMAINS[@]}): " pick
+    read -r -p "Pilih nomor domain induk (1-${#PROVIDED_ROOT_DOMAINS[@]}/kembali): " pick
+    if is_back_choice "${pick}"; then
+      return 2
+    fi
     [[ "$pick" =~ ^[0-9]+$ ]] || { echo "Input harus angka."; continue; }
     [[ "$pick" -ge 1 && "$pick" -le ${#PROVIDED_ROOT_DOMAINS[@]} ]] || { echo "Di luar range."; continue; }
     break
@@ -1150,9 +1180,10 @@ domain_menu_v2() {
 
   local mth=""
   while true; do
-    read -r -p "Pilih opsi (1-2): " mth
+    read -r -p "Pilih opsi (1-2/kembali): " mth
     case "$mth" in
       1|2) break ;;
+      0|kembali|k|back|b) return 2 ;;
       *) echo "Pilihan tidak valid." ;;
     esac
   done
@@ -1163,7 +1194,10 @@ domain_menu_v2() {
     log "Subdomain generated: $sub"
   else
     while true; do
-      read -r -p "Masukkan nama subdomain: " sub
+      read -r -p "Masukkan nama subdomain (atau kembali): " sub
+      if is_back_choice "${sub}"; then
+        return 2
+      fi
       sub="${sub,,}"
       if validate_subdomain "$sub"; then
         log "Subdomain valid: $sub"
@@ -1174,10 +1208,16 @@ domain_menu_v2() {
   fi
 
   echo
-  if confirm_yn "Aktifkan Cloudflare proxy (orange cloud) untuk DNS A record?"; then
+  local proxy_rc=0
+  if confirm_yn_or_back "Aktifkan Cloudflare proxy (orange cloud) untuk DNS A record?"; then
     CF_PROXIED="true"
     log "Cloudflare proxy: ON (proxied=true)"
   else
+    proxy_rc=$?
+    if (( proxy_rc == 2 )); then
+      warn "Input domain dibatalkan, kembali ke menu Domain Control."
+      return 2
+    fi
     CF_PROXIED="false"
     log "Cloudflare proxy: OFF (proxied=false)"
   fi
@@ -1185,7 +1225,14 @@ domain_menu_v2() {
   DOMAIN="${sub}.${ACME_ROOT_DOMAIN}"
   log "Domain final: $DOMAIN"
 
-  cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"
+  if ! cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"; then
+    local cf_rc=$?
+    if (( cf_rc == 1 || cf_rc == 2 )); then
+      warn "Input domain dibatalkan, kembali ke menu Domain Control."
+      return 2
+    fi
+    return "${cf_rc}"
+  fi
 
   ACME_CERT_MODE="dns_cf_wildcard"
   log "Mode sertifikat: wildcard dns_cf untuk ${DOMAIN} (meliputi *.$DOMAIN)"
@@ -1369,7 +1416,16 @@ domain_control_set_domain_now() {
   have_cmd curl || die "curl tidak ditemukan."
   have_cmd jq || die "jq tidak ditemukan."
 
-  domain_menu_v2
+  if domain_menu_v2; then
+    :
+  else
+    local domain_input_rc=$?
+    if (( domain_input_rc == 2 )); then
+      warn "Set Domain dibatalkan. Kembali ke menu Domain Control."
+      return 0
+    fi
+    return "${domain_input_rc}"
+  fi
   install_acme_and_issue_cert
   domain_control_apply_nginx_domain "${DOMAIN}"
   MAIN_INFO_CACHE_TS=0
@@ -1994,6 +2050,9 @@ account_search_flow() {
 
   echo "Cari keyword (case-sensitive, gunakan regex bila perlu)."
   read -r -p "Query: " q
+  if is_back_choice "${q}"; then
+    return 0
+  fi
   if [[ -z "${q}" ]]; then
     warn "Query kosong"
     pause
@@ -4542,8 +4601,16 @@ PY
   echo "  Expiry lama : ${current_expiry}"
   echo "  Expiry baru : ${new_expiry}"
   hr
-  read -r -p "Konfirmasi simpan? (y/n): " confirm
-  if ! is_yes "${confirm}"; then
+  local confirm_rc=0
+  if confirm_yn_or_back "Konfirmasi simpan?"; then
+    :
+  else
+    confirm_rc=$?
+    if (( confirm_rc == 2 )); then
+      warn "Dibatalkan (kembali)."
+      pause
+      return 0
+    fi
     warn "Dibatalkan."
     pause
     return 0
@@ -5560,7 +5627,10 @@ quota_edit_flow() {
         speed_up_now="$(quota_get_status_number "${qf}" "speed_up_mbit")"
 
         if ! speed_mbit_is_positive "${speed_down_now}"; then
-          read -r -p "Speed Download (Mbps) (contoh: 20 atau 20mbit): " speed_down_now
+          read -r -p "Speed Download (Mbps) (contoh: 20 atau 20mbit) (atau kembali): " speed_down_now
+          if is_back_choice "${speed_down_now}"; then
+            continue
+          fi
           speed_down_now="$(normalize_speed_mbit_input "${speed_down_now}")"
           if [[ -z "${speed_down_now}" ]] || ! speed_mbit_is_positive "${speed_down_now}"; then
             warn "Speed download tidak valid. Speed limit tetap OFF."
@@ -5569,7 +5639,10 @@ quota_edit_flow() {
           fi
         fi
         if ! speed_mbit_is_positive "${speed_up_now}"; then
-          read -r -p "Speed Upload (Mbps) (contoh: 10 atau 10mbit): " speed_up_now
+          read -r -p "Speed Upload (Mbps) (contoh: 10 atau 10mbit) (atau kembali): " speed_up_now
+          if is_back_choice "${speed_up_now}"; then
+            continue
+          fi
           speed_up_now="$(normalize_speed_mbit_input "${speed_up_now}")"
           if [[ -z "${speed_up_now}" ]] || ! speed_mbit_is_positive "${speed_up_now}"; then
             warn "Speed upload tidak valid. Speed limit tetap OFF."
@@ -10966,30 +11039,52 @@ daemon_log_tail_show() {
 }
 
 install_discord_bot_menu() {
-  title
-  echo "9) Install BOT Discord"
-  hr
   local installer_cmd="/usr/local/bin/install-discord-bot"
-
-  if [[ ! -x "${installer_cmd}" ]]; then
-    warn "Installer bot Discord tidak ditemukan / tidak executable:"
-    echo "  ${installer_cmd}"
-    echo
-    echo "Hint: jalankan ulang run.sh agar installer ikut dipasang."
+  while true; do
+    title
+    echo "9) Install BOT Discord"
     hr
-    pause
-    return 0
-  fi
 
-  echo "Menjalankan installer:"
-  echo "  ${installer_cmd}"
-  hr
-  if ! "${installer_cmd}" menu; then
-    warn "Installer bot Discord keluar dengan status error."
+    if [[ ! -x "${installer_cmd}" ]]; then
+      warn "Installer bot Discord tidak ditemukan / tidak executable:"
+      echo "  ${installer_cmd}"
+      echo
+      echo "Hint: jalankan ulang run.sh agar installer ikut dipasang."
+      hr
+      pause
+      return 0
+    fi
+
+    echo "  1) Jalankan installer bot Discord"
+    echo "  0) Back (kembali)"
+    echo "  kembali) Back"
     hr
-    pause
-  fi
-  return 0
+    if ! read -r -p "Pilih (1/0/kembali): " c; then
+      echo
+      return 0
+    fi
+    if is_back_choice "${c}"; then
+      return 0
+    fi
+
+    case "${c}" in
+      1)
+        echo "Menjalankan installer:"
+        echo "  ${installer_cmd}"
+        hr
+        if ! "${installer_cmd}" menu; then
+          warn "Installer bot Discord keluar dengan status error."
+          hr
+          pause
+        fi
+        return 0
+        ;;
+      *)
+        warn "Pilihan tidak valid"
+        sleep 1
+        ;;
+    esac
+  done
 }
 
 daemon_status_menu() {

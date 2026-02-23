@@ -5,7 +5,12 @@ SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 PATH="${SAFE_PATH}"
 export PATH
 
-trap 'rc=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2; exit ${rc}' ERR
+on_err() {
+  local rc="$?"
+  echo "[ERROR] line ${BASH_LINENO[0]}: ${BASH_COMMAND} (exit ${rc})" >&2
+  exit "${rc}"
+}
+trap on_err ERR
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -47,6 +52,8 @@ log() { echo -e "${CYAN}[bot-installer]${NC} $*"; }
 ok() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 die() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+BACK_INPUT_SENTINEL="__BACK__$(date +%s%N)_${RANDOM}_${RANDOM}__"
+CONFIGURE_ENV_CANCELLED=0
 
 hr() { echo "------------------------------------------------------------"; }
 
@@ -60,12 +67,56 @@ pause() {
   read -r -p "Tekan ENTER untuk lanjut..." _ || true
 }
 
+is_back_choice() {
+  local v="${1:-}"
+  v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${v}" == "0" || "${v}" == "kembali" || "${v}" == "k" || "${v}" == "back" || "${v}" == "b" ]]
+}
+
+cancel_env_config() {
+  CONFIGURE_ENV_CANCELLED=1
+  warn "Konfigurasi env dibatalkan (kembali)."
+}
+
 need_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Jalankan script sebagai root."
 }
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+normalize_path() {
+  local path="$1"
+  if command_exists realpath; then
+    realpath -m -- "${path}" 2>/dev/null || printf '%s\n' "${path}"
+    return 0
+  fi
+  if command_exists readlink; then
+    readlink -m -- "${path}" 2>/dev/null || printf '%s\n' "${path}"
+    return 0
+  fi
+  printf '%s\n' "${path}"
+}
+
+assert_safe_delete_target() {
+  local target="$1"
+  local label="${2:-path}"
+  local resolved
+
+  [[ -n "${target}" ]] || die "Path ${label} kosong; batalkan uninstall."
+  resolved="$(normalize_path "${target}")"
+  [[ -n "${resolved}" ]] || die "Path ${label} tidak valid: ${target}"
+  [[ "${resolved}" == /* ]] || die "Path ${label} harus absolut: ${resolved}"
+  if [[ "${resolved}" == *$'\n'* || "${resolved}" == *$'\r'* ]]; then
+    die "Path ${label} tidak valid (mengandung newline)."
+  fi
+
+  case "${resolved}" in
+    "/"|"/."|"/.."|"/bin"|"/boot"|"/dev"|"/etc"|"/home"|"/lib"|"/lib64"|"/media"|"/mnt"|"/opt"|"/proc"|"/root"|"/run"|"/sbin"|"/srv"|"/sys"|"/tmp"|"/usr"|"/var")
+      die "Path ${label} terlalu berbahaya untuk dihapus: ${resolved}"
+      ;;
+  esac
 }
 
 mask_secret() {
@@ -96,6 +147,10 @@ set_env_value() {
   local file="$3"
   local tmp
 
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    die "Nilai env untuk ${key} tidak valid (mengandung newline)."
+  fi
+
   mkdir -p "$(dirname "$file")"
   [[ -f "$file" ]] || touch "$file"
 
@@ -119,6 +174,18 @@ prompt_with_default() {
   echo "${out:-$def}"
 }
 
+prompt_with_default_or_back() {
+  local prompt="$1"
+  local def="$2"
+  local out
+  read -r -p "${prompt} [${def}] (atau kembali): " out || true
+  if is_back_choice "${out}"; then
+    echo "${BACK_INPUT_SENTINEL}"
+    return 0
+  fi
+  echo "${out:-$def}"
+}
+
 prompt_yes_no() {
   local prompt="$1"
   local ans
@@ -132,12 +199,40 @@ prompt_yes_no() {
   done
 }
 
+prompt_yes_no_or_back() {
+  local prompt="$1"
+  local ans
+  while true; do
+    read -r -p "${prompt} (y/n/kembali): " ans || true
+    case "${ans,,}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      0|kembali|k|back|b) return 2 ;;
+      *) echo "Masukkan y, n, atau kembali." ;;
+    esac
+  done
+}
+
 prompt_secret() {
   local prompt="$1"
   local out
   read -r -s -p "${prompt}: " out || true
-  echo
-  echo "$out"
+  # Tampilkan newline prompt ke stderr agar command substitution tidak menangkapnya.
+  printf '\n' >&2
+  printf '%s\n' "$out"
+}
+
+prompt_secret_or_back() {
+  local prompt="$1"
+  local out
+  read -r -s -p "${prompt} (atau kembali): " out || true
+  # Tampilkan newline prompt ke stderr agar command substitution tidak menangkapnya.
+  printf '\n' >&2
+  if is_back_choice "${out}"; then
+    printf '%s\n' "${BACK_INPUT_SENTINEL}"
+    return 0
+  fi
+  printf '%s\n' "$out"
 }
 
 generate_secret() {
@@ -227,45 +322,89 @@ install_dependencies() {
 configure_env_interactive() {
   need_root
   ensure_env_file
+  CONFIGURE_ENV_CANCELLED=0
 
-  local current_token current_secret token app_id guild_id role_ids user_ids dangerous secret_input
+  local current_token current_secret current_app_id current_guild_id current_role_ids current_user_ids current_dangerous
+  local token app_id guild_id role_ids user_ids dangerous secret_input
+  local final_token final_secret staged_env
 
   current_token="$(get_env_value DISCORD_BOT_TOKEN "${BOT_ENV_FILE}")"
   current_secret="$(get_env_value INTERNAL_SHARED_SECRET "${BOT_ENV_FILE}")"
+  current_app_id="$(get_env_value DISCORD_APPLICATION_ID "${BOT_ENV_FILE}")"
+  current_guild_id="$(get_env_value DISCORD_GUILD_ID "${BOT_ENV_FILE}")"
+  current_role_ids="$(get_env_value DISCORD_ADMIN_ROLE_IDS "${BOT_ENV_FILE}")"
+  current_user_ids="$(get_env_value DISCORD_ADMIN_USER_IDS "${BOT_ENV_FILE}")"
+  current_dangerous="$(get_env_value ENABLE_DANGEROUS_ACTIONS "${BOT_ENV_FILE}")"
 
   echo "Konfigurasi env: ${BOT_ENV_FILE}"
   echo "- DISCORD_BOT_TOKEN: $(mask_secret "${current_token}")"
   echo "- INTERNAL_SHARED_SECRET: $(mask_secret "${current_secret}")"
 
-  token="$(prompt_secret "Masukkan DISCORD_BOT_TOKEN (kosong=pertahankan yang lama)")"
+  token="$(prompt_secret_or_back "Masukkan DISCORD_BOT_TOKEN (kosong=pertahankan yang lama)")"
+  if [[ "${token}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
   if [[ -n "${token}" ]]; then
-    set_env_value DISCORD_BOT_TOKEN "${token}" "${BOT_ENV_FILE}"
-    ok "DISCORD_BOT_TOKEN diperbarui."
+    final_token="${token}"
+  else
+    final_token="${current_token}"
   fi
 
-  if [[ -z "$(get_env_value INTERNAL_SHARED_SECRET "${BOT_ENV_FILE}")" ]]; then
+  app_id="$(prompt_with_default_or_back "DISCORD_APPLICATION_ID" "${current_app_id}")"
+  if [[ "${app_id}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
+  guild_id="$(prompt_with_default_or_back "DISCORD_GUILD_ID" "${current_guild_id}")"
+  if [[ "${guild_id}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
+  role_ids="$(prompt_with_default_or_back "DISCORD_ADMIN_ROLE_IDS (opsional, pisahkan koma)" "${current_role_ids}")"
+  if [[ "${role_ids}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
+  user_ids="$(prompt_with_default_or_back "DISCORD_ADMIN_USER_IDS (opsional, pisahkan koma)" "${current_user_ids}")"
+  if [[ "${user_ids}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
+  dangerous="$(prompt_with_default_or_back "ENABLE_DANGEROUS_ACTIONS (true/false)" "${current_dangerous}")"
+  if [[ "${dangerous}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
+
+  if [[ -z "${current_secret}" ]]; then
     secret_input="$(generate_secret)"
-    set_env_value INTERNAL_SHARED_SECRET "${secret_input}" "${BOT_ENV_FILE}"
+    final_secret="${secret_input}"
     ok "INTERNAL_SHARED_SECRET digenerate otomatis."
+  else
+    final_secret="${current_secret}"
   fi
 
-  app_id="$(prompt_with_default "DISCORD_APPLICATION_ID" "$(get_env_value DISCORD_APPLICATION_ID "${BOT_ENV_FILE}")")"
-  guild_id="$(prompt_with_default "DISCORD_GUILD_ID" "$(get_env_value DISCORD_GUILD_ID "${BOT_ENV_FILE}")")"
-  role_ids="$(prompt_with_default "DISCORD_ADMIN_ROLE_IDS (opsional, pisahkan koma)" "$(get_env_value DISCORD_ADMIN_ROLE_IDS "${BOT_ENV_FILE}")")"
-  user_ids="$(prompt_with_default "DISCORD_ADMIN_USER_IDS (opsional, pisahkan koma)" "$(get_env_value DISCORD_ADMIN_USER_IDS "${BOT_ENV_FILE}")")"
-  dangerous="$(prompt_with_default "ENABLE_DANGEROUS_ACTIONS (true/false)" "$(get_env_value ENABLE_DANGEROUS_ACTIONS "${BOT_ENV_FILE}")")"
+  staged_env="$(mktemp "${BOT_ENV_DIR}/bot.env.staged.XXXXXX")"
+  if [[ -f "${BOT_ENV_FILE}" ]]; then
+    cp "${BOT_ENV_FILE}" "${staged_env}"
+  fi
 
-  [[ -n "${app_id}" ]] && set_env_value DISCORD_APPLICATION_ID "${app_id}" "${BOT_ENV_FILE}"
-  [[ -n "${guild_id}" ]] && set_env_value DISCORD_GUILD_ID "${guild_id}" "${BOT_ENV_FILE}"
-  set_env_value DISCORD_ADMIN_ROLE_IDS "${role_ids}" "${BOT_ENV_FILE}"
-  set_env_value DISCORD_ADMIN_USER_IDS "${user_ids}" "${BOT_ENV_FILE}"
-  set_env_value ENABLE_DANGEROUS_ACTIONS "${dangerous:-true}" "${BOT_ENV_FILE}"
+  set_env_value DISCORD_BOT_TOKEN "${final_token}" "${staged_env}"
+  set_env_value INTERNAL_SHARED_SECRET "${final_secret}" "${staged_env}"
+  [[ -n "${app_id}" ]] && set_env_value DISCORD_APPLICATION_ID "${app_id}" "${staged_env}"
+  [[ -n "${guild_id}" ]] && set_env_value DISCORD_GUILD_ID "${guild_id}" "${staged_env}"
+  set_env_value DISCORD_ADMIN_ROLE_IDS "${role_ids}" "${staged_env}"
+  set_env_value DISCORD_ADMIN_USER_IDS "${user_ids}" "${staged_env}"
+  set_env_value ENABLE_DANGEROUS_ACTIONS "${dangerous:-true}" "${staged_env}"
 
-  set_env_value BACKEND_BASE_URL "http://127.0.0.1:8080" "${BOT_ENV_FILE}"
-  set_env_value BACKEND_HOST "127.0.0.1" "${BOT_ENV_FILE}"
-  set_env_value BACKEND_PORT "8080" "${BOT_ENV_FILE}"
-  set_env_value COMMANDS_FILE "${BOT_HOME}/shared/commands.json" "${BOT_ENV_FILE}"
+  set_env_value BACKEND_BASE_URL "http://127.0.0.1:8080" "${staged_env}"
+  set_env_value BACKEND_HOST "127.0.0.1" "${staged_env}"
+  set_env_value BACKEND_PORT "8080" "${staged_env}"
+  set_env_value COMMANDS_FILE "${BOT_HOME}/shared/commands.json" "${staged_env}"
 
+  chmod 600 "${staged_env}" || true
+  mv -f "${staged_env}" "${BOT_ENV_FILE}"
   chmod 600 "${BOT_ENV_FILE}" || true
   validate_required_env || warn "Beberapa field wajib belum terisi."
   ok "Konfigurasi env selesai."
@@ -280,18 +419,32 @@ change_discord_token() {
   masked="$(mask_secret "${current}")"
 
   echo "Token saat ini: ${masked}"
-  new_token="$(prompt_secret "Masukkan token Discord baru")"
+  new_token="$(prompt_secret_or_back "Masukkan token Discord baru")"
+  if [[ "${new_token}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    warn "Ganti token dibatalkan (kembali)."
+    return 0
+  fi
   [[ -n "${new_token}" ]] || die "Token baru tidak boleh kosong."
 
-  confirm="$(prompt_secret "Ulangi token untuk konfirmasi")"
+  confirm="$(prompt_secret_or_back "Ulangi token untuk konfirmasi")"
+  if [[ "${confirm}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    warn "Ganti token dibatalkan (kembali)."
+    return 0
+  fi
   [[ "${new_token}" == "${confirm}" ]] || die "Konfirmasi token tidak sama."
 
   set_env_value DISCORD_BOT_TOKEN "${new_token}" "${BOT_ENV_FILE}"
   chmod 600 "${BOT_ENV_FILE}" || true
   ok "Token berhasil diperbarui di ${BOT_ENV_FILE}."
 
-  if prompt_yes_no "Restart service bot sekarang"; then
+  local restart_rc=0
+  if prompt_yes_no_or_back "Restart service bot sekarang"; then
     start_or_restart_services
+  else
+    restart_rc=$?
+    if (( restart_rc == 2 )); then
+      warn "Lewati restart service (kembali)."
+    fi
   fi
 }
 
@@ -449,6 +602,7 @@ view_logs_menu() {
   echo "  2) ${GATEWAY_SERVICE}"
   echo "  3) Keduanya"
   echo "  0) Kembali"
+  echo "  kembali) Back"
   read -r -p "Pilih: " c || true
 
   case "${c}" in
@@ -463,7 +617,7 @@ view_logs_menu() {
       hr
       journalctl -u "${GATEWAY_SERVICE}" --no-pager -n "${lines}" || true
       ;;
-    0)
+    0|back|kembali|k|b)
       return 0
       ;;
     *)
@@ -480,7 +634,11 @@ uninstall_bot() {
   echo "- Service: ${BACKEND_SERVICE}, ${GATEWAY_SERVICE}"
   echo "- Bot home: ${BOT_HOME}"
   echo "- Env file: ${BOT_ENV_FILE}"
-  read -r -p "Ketik HAPUS untuk lanjut: " confirm || true
+  read -r -p "Ketik HAPUS untuk lanjut (atau kembali): " confirm || true
+  if is_back_choice "${confirm}"; then
+    warn "Batal uninstall (kembali)."
+    return 0
+  fi
   [[ "${confirm}" == "HAPUS" ]] || {
     warn "Batal uninstall."
     return 0
@@ -495,19 +653,42 @@ uninstall_bot() {
 
   systemctl daemon-reload || true
 
-  if prompt_yes_no "Hapus folder bot (${BOT_HOME})"; then
+  local del_rc=0
+  if prompt_yes_no_or_back "Hapus folder bot (${BOT_HOME})"; then
+    assert_safe_delete_target "${BOT_HOME}" "BOT_HOME"
     rm -rf "${BOT_HOME}"
     ok "Folder bot dihapus."
+  else
+    del_rc=$?
+    if (( del_rc == 2 )); then
+      warn "Batal uninstall (kembali)."
+      return 0
+    fi
   fi
 
-  if prompt_yes_no "Hapus env (${BOT_ENV_DIR})"; then
+  if prompt_yes_no_or_back "Hapus env (${BOT_ENV_DIR})"; then
+    assert_safe_delete_target "${BOT_ENV_DIR}" "BOT_ENV_DIR"
     rm -rf "${BOT_ENV_DIR}"
     ok "Folder env dihapus."
+  else
+    del_rc=$?
+    if (( del_rc == 2 )); then
+      warn "Batal uninstall (kembali)."
+      return 0
+    fi
   fi
 
-  if prompt_yes_no "Hapus runtime state/log (${BOT_STATE_DIR}, ${BOT_LOG_DIR})"; then
+  if prompt_yes_no_or_back "Hapus runtime state/log (${BOT_STATE_DIR}, ${BOT_LOG_DIR})"; then
+    assert_safe_delete_target "${BOT_STATE_DIR}" "BOT_STATE_DIR"
+    assert_safe_delete_target "${BOT_LOG_DIR}" "BOT_LOG_DIR"
     rm -rf "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
     ok "Folder runtime dihapus."
+  else
+    del_rc=$?
+    if (( del_rc == 2 )); then
+      warn "Batal uninstall (kembali)."
+      return 0
+    fi
   fi
 
   ok "Uninstall selesai."
@@ -523,13 +704,25 @@ quick_setup_all_in_one() {
   echo "5) Start/restart service"
   hr
 
-  prompt_yes_no "Lanjutkan Quick Setup sekarang" || {
+  local quick_rc=0
+  if prompt_yes_no_or_back "Lanjutkan Quick Setup sekarang"; then
+    :
+  else
+    quick_rc=$?
+    if (( quick_rc == 2 )); then
+      warn "Quick setup dibatalkan (kembali)."
+      return 0
+    fi
     warn "Quick setup dibatalkan."
     return 0
-  }
+  fi
 
   install_dependencies
   configure_env_interactive
+  if (( CONFIGURE_ENV_CANCELLED == 1 )); then
+    warn "Quick setup dihentikan karena konfigurasi env dibatalkan (kembali)."
+    return 0
+  fi
   validate_required_env || die "Env belum lengkap. Isi dulu data wajib."
   deploy_or_update_files
   install_or_update_systemd

@@ -207,13 +207,18 @@ apt_get_with_lock_retry() {
   while (( attempt <= max_attempts )); do
     wait_for_dpkg_lock || true
     tmp="$(mktemp)"
-
-    if apt-get "$@" > >(tee "$tmp") 2> >(tee -a "$tmp" >&2); then
+    # Hindari process substitution tee karena bisa race saat baca file log lock.
+    # Simpan output dulu ke file, lalu tampilkan ulang agar grep lock deterministik.
+    set +e
+    apt-get "$@" >"$tmp" 2>&1
+    rc=$?
+    set -e
+    cat "$tmp"
+    if (( rc == 0 )); then
       rm -f "$tmp" >/dev/null 2>&1 || true
       return 0
     fi
 
-    rc=$?
     if grep -qiE "Could not get lock|Unable to acquire the dpkg frontend lock|Unable to lock the administration directory" "$tmp"; then
       warn "APT lock masih dipakai proses lain. Retry ${attempt}/${max_attempts} ..."
       rm -f "$tmp" >/dev/null 2>&1 || true
