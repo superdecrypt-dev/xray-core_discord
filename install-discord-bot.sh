@@ -32,8 +32,8 @@ SRC_OWNER="${BOT_SOURCE_OWNER:-superdecrypt-dev}"
 SRC_REPO="${BOT_SOURCE_REPO:-xray-core_discord}"
 SRC_REF="${BOT_SOURCE_REF:-main}"
 SRC_ARCHIVE_URL="${BOT_SOURCE_ARCHIVE_URL:-https://github.com/superdecrypt-dev/xray-core_discord/raw/main/bot-discord.tar.gz}"
-SRC_ARCHIVE_SHA256="${BOT_SOURCE_ARCHIVE_SHA256:-}"
-SRC_ARCHIVE_SHA256_URL="${BOT_SOURCE_ARCHIVE_SHA256_URL:-${SRC_ARCHIVE_URL}.sha256}"
+SRC_ARCHIVE_SHA256="${BOT_SOURCE_ARCHIVE_SHA256:-2385b9a3cd9f8bdea6fd9ac08c81f77b1be588842e4437a9812eb6c1f1842b25}"
+SRC_ARCHIVE_SHA256_URL="${BOT_SOURCE_ARCHIVE_SHA256_URL:-}"
 ALLOW_UNVERIFIED_ARCHIVE="${BOT_ALLOW_UNVERIFIED_ARCHIVE:-0}"
 
 OS_DEPS=(
@@ -466,7 +466,7 @@ resolve_archive_checksum() {
   local expected actual
 
   expected="$(echo "${SRC_ARCHIVE_SHA256}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-  if [[ -z "${expected}" ]]; then
+  if [[ -z "${expected}" && -n "${SRC_ARCHIVE_SHA256_URL}" ]]; then
     log "Download checksum file: ${SRC_ARCHIVE_SHA256_URL}"
     if curl -fsSL --connect-timeout 15 --max-time 60 "${SRC_ARCHIVE_SHA256_URL}" -o "${checksum_file}"; then
       expected="$(awk '{print tolower($1)}' "${checksum_file}" | grep -E '^[0-9a-f]{64}$' | head -n1 || true)"
@@ -480,7 +480,7 @@ resolve_archive_checksum() {
       warn "Checksum source tidak tersedia; lanjut TANPA verifikasi (BOT_ALLOW_UNVERIFIED_ARCHIVE=1)."
       return 0
     fi
-    die "Checksum source tidak tersedia. Set BOT_SOURCE_ARCHIVE_SHA256 atau sediakan BOT_SOURCE_ARCHIVE_SHA256_URL. Untuk bypass (tidak direkomendasikan), set BOT_ALLOW_UNVERIFIED_ARCHIVE=1."
+    die "Checksum source tidak tersedia. Set BOT_SOURCE_ARCHIVE_SHA256 (disarankan) atau BOT_SOURCE_ARCHIVE_SHA256_URL. Untuk bypass (tidak direkomendasikan), set BOT_ALLOW_UNVERIFIED_ARCHIVE=1."
   fi
 
   command_exists sha256sum || die "sha256sum tidak tersedia untuk verifikasi integritas source archive."
