@@ -3,7 +3,7 @@ import type { MenuDefinition } from "./types";
 export const menu2: MenuDefinition = {
   id: "2",
   label: "User Management",
-  description: "Add/Delete user, extend expiry, list, search, dan XRAY ACCOUNT INFO.",
+  description: "Kelola pengguna, masa aktif, pencarian, dan informasi akun.",
   actions: [
     {
       id: "add_user",

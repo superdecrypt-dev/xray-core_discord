@@ -4,6 +4,7 @@ import {
   ButtonInteraction,
   ButtonStyle,
   EmbedBuilder,
+  MessageFlags,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -104,7 +105,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
     const [, menuId, actionId] = id.split(":");
     const action = findAction(menuId, actionId);
     if (!action || action.mode !== "modal" || !action.modal) {
-      await interaction.reply({ content: "Action modal tidak valid.", ephemeral: true });
+      await interaction.reply({ content: "Action modal tidak valid.", flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -131,7 +132,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
 
     const action = findAction(menuId, actionId);
     if (!action) {
-      await interaction.reply({ content: "Action tidak ditemukan.", ephemeral: true });
+      await interaction.reply({ content: "Action tidak ditemukan.", flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -140,7 +141,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
       return true;
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
       const res = await backend.runAction(menuId, actionId, {});
       await sendActionResult(interaction, res.title, res.message, res.ok);

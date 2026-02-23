@@ -13,7 +13,7 @@ function chunkButtons<T>(arr: T[], size: number): T[][] {
 export function buildMainMenuView() {
   const embed = new EmbedBuilder()
     .setTitle("Xray Discord Panel")
-    .setDescription("Pilih menu utama (mirip CLI manage.sh) lalu pilih action.")
+    .setDescription("Pilih menu dan tindakan yang akan dijalankan.")
     .setColor(0x2f81f7);
 
   const buttons = MENUS.map((menu) =>

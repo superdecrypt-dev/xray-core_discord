@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -22,7 +23,7 @@ const backend = new BackendClient(cfg.backendBaseUrl, cfg.sharedSecret);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 async function registerSlashCommands(): Promise<void> {
-  const commands = [new SlashCommandBuilder().setName("panel").setDescription("Buka panel bot Xray standalone").toJSON()];
+  const commands = [new SlashCommandBuilder().setName("panel").setDescription("Buka panel operasional Xray").toJSON()];
   const rest = new REST({ version: "10" }).setToken(cfg.token);
   await rest.put(Routes.applicationGuildCommands(cfg.applicationId, cfg.guildId), { body: commands });
 }
@@ -54,7 +55,7 @@ async function registerSlashCommandsWithRetry(maxAttempts = 5): Promise<boolean>
 async function assertAuthorized(interaction: ChatInputCommandInteraction): Promise<boolean> {
   const member = interaction.inGuild() ? interaction.member : null;
   if (!interaction.inGuild() || !isAuthorized(member as any, interaction.user.id, cfg)) {
-    await interaction.reply({ content: "Akses ditolak. Hubungi admin.", ephemeral: true });
+    await interaction.reply({ content: "Akses ditolak. Hubungi admin.", flags: MessageFlags.Ephemeral });
     return false;
   }
   return true;
@@ -80,45 +81,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isButton()) {
       if (!interaction.inGuild() || !isAuthorized(interaction.member as any, interaction.user.id, cfg)) {
-        await interaction.reply({ content: "Akses ditolak.", ephemeral: true });
+        await interaction.reply({ content: "Akses ditolak.", flags: MessageFlags.Ephemeral });
         return;
       }
       const handled = await handleButton(interaction, backend);
       if (!handled && !interaction.replied) {
-        await interaction.reply({ content: "Button tidak dikenali.", ephemeral: true });
+        await interaction.reply({ content: "Aksi tidak dikenali.", flags: MessageFlags.Ephemeral });
       }
       return;
     }
 
     if (interaction.isModalSubmit()) {
       if (!interaction.inGuild() || !isAuthorized(interaction.member as any, interaction.user.id, cfg)) {
-        await interaction.reply({ content: "Akses ditolak.", ephemeral: true });
+        await interaction.reply({ content: "Akses ditolak.", flags: MessageFlags.Ephemeral });
         return;
       }
       const handled = await handleModal(interaction, backend);
       if (!handled && !interaction.replied) {
-        await interaction.reply({ content: "Modal tidak dikenali.", ephemeral: true });
+        await interaction.reply({ content: "Form tidak dikenali.", flags: MessageFlags.Ephemeral });
       }
       return;
     }
 
     if (interaction.isStringSelectMenu()) {
       if (!interaction.inGuild() || !isAuthorized(interaction.member as any, interaction.user.id, cfg)) {
-        await interaction.reply({ content: "Akses ditolak.", ephemeral: true });
+        await interaction.reply({ content: "Akses ditolak.", flags: MessageFlags.Ephemeral });
         return;
       }
       const handled = await handleSelect(interaction);
       if (!handled && !interaction.replied) {
-        await interaction.reply({ content: "Select interaction belum diaktifkan untuk opsi ini.", ephemeral: true });
+        await interaction.reply({ content: "Opsi ini belum tersedia.", flags: MessageFlags.Ephemeral });
       }
     }
   } catch (err) {
-    const text = `Terjadi error: ${String(err)}`;
+    const text = `Terjadi kesalahan: ${String(err)}`;
     if (interaction.isRepliable()) {
       if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: text, ephemeral: true });
+        await interaction.followUp({ content: text, flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.reply({ content: text, ephemeral: true });
+        await interaction.reply({ content: text, flags: MessageFlags.Ephemeral });
       }
     }
   }

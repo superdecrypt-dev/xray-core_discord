@@ -20,6 +20,9 @@ trap 'rc=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2; ex
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[0;37m'
 NC='\033[0m'
 
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
@@ -103,6 +106,28 @@ safe_clear() {
   if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
     clear || true
   fi
+}
+
+ui_hr() {
+  local w="${COLUMNS:-80}"
+  local line
+  if [[ ! "${w}" =~ ^[0-9]+$ ]]; then
+    w=80
+  fi
+  if (( w < 60 )); then
+    w=60
+  fi
+  printf -v line '%*s' "${w}" ''
+  line="${line// /-}"
+  echo -e "${DIM}${line}${NC}"
+}
+
+ui_header() {
+  local text="$1"
+  safe_clear
+  ui_hr
+  echo -e "${BOLD}${CYAN}${text}${NC}"
+  ui_hr
 }
 
 download_file_or_die() {
@@ -497,12 +522,11 @@ ok "Membuat DNS A record: $fqdn -> $ip"
 cf_create_a_record "$zone_id" "$fqdn" "$ip" "$proxied"
 }
 domain_menu_v2() {
-  echo "============================================"
-  echo "   INPUT DOMAIN (TLS) 🌐"
-  echo "============================================"
-  echo "1. input domain sendiri"
-  echo "2. gunakan domain yang disediakan"
-  echo
+  ui_header "Konfigurasi Domain TLS"
+  echo -e "${DIM}Pilih metode domain untuk proses setup.${NC}"
+  echo -e "  ${CYAN}1)${NC} Input domain manual"
+  echo -e "  ${CYAN}2)${NC} Gunakan domain yang disediakan"
+  ui_hr
 
   local choice=""
   while true; do
@@ -545,11 +569,11 @@ ok "Public IPv4 VPS: $VPS_IPV4"
 [[ ${#PROVIDED_ROOT_DOMAINS[@]} -gt 0 ]] || die "Daftar domain induk (PROVIDED_ROOT_DOMAINS) kosong."
 
 echo
-echo "Pilih domain induk"
+echo -e "${BOLD}Pilih domain induk${NC}"
 local i=1
 local root=""
 for root in "${PROVIDED_ROOT_DOMAINS[@]}"; do
-  echo "  $i. $root"
+  echo -e "  ${CYAN}${i})${NC} $root"
   i=$((i+1))
 done
 
@@ -571,9 +595,9 @@ CF_ACCOUNT_ID="$(cf_get_account_id_by_zone "$CF_ZONE_ID" || true)"
 
 
 echo
-echo "Pilih metode pembuatan subdomain"
-echo "1. generate secara acak"
-echo "2. input sendiri"
+echo -e "${BOLD}Pilih metode pembuatan subdomain${NC}"
+echo -e "  ${CYAN}1)${NC} Generate acak"
+echo -e "  ${CYAN}2)${NC} Input manual"
 
 local mth=""
 while true; do
@@ -587,7 +611,7 @@ done
 local sub=""
 if [[ "$mth" == "1" ]]; then
   sub="$(gen_subdomain_random)"
-  ok "Subdomain generated: $sub"
+  ok "Subdomain acak: $sub"
 else
 while true; do
   read -r -p "Masukkan nama subdomain: " sub
@@ -596,7 +620,7 @@ while true; do
     ok "Subdomain valid: $sub"
     break
   fi
-  echo "Subdomain tidak valid. Hanya huruf kecil, angka, titik, dan strip (-). Tanpa spasi/kapital/karakter aneh."
+  echo "Subdomain tidak valid. Gunakan huruf kecil, angka, titik, dan strip (-)."
 done
 fi
 

@@ -1,10 +1,10 @@
-import { ChatInputCommandInteraction } from "discord.js";
+import { ChatInputCommandInteraction, MessageFlags } from "discord.js";
 
 import { buildMainMenuView } from "../views/main_menu";
 
 export async function handlePanelCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   await interaction.reply({
     ...buildMainMenuView(),
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }

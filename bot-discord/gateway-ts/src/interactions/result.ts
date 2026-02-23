@@ -1,6 +1,7 @@
-import { ButtonInteraction, ModalSubmitInteraction } from "discord.js";
+import { ButtonInteraction, MessageFlags, ModalSubmitInteraction } from "discord.js";
 
 const MAX_CHUNK = 1800;
+const MAX_RESULT_CHUNKS = 2;
 
 function splitText(input: string): string[] {
   const text = input.trim() || "(kosong)";
@@ -16,15 +17,24 @@ type Replyable = ButtonInteraction | ModalSubmitInteraction;
 
 export async function sendActionResult(interaction: Replyable, title: string, message: string, ok: boolean): Promise<void> {
   const chunks = splitText(message.replace(/```/g, "'''") );
+  const visibleChunks = chunks.slice(0, MAX_RESULT_CHUNKS);
+  const droppedChunks = Math.max(chunks.length - visibleChunks.length, 0);
   const prefix = ok ? "OK" : "ERROR";
 
   if (interaction.deferred || interaction.replied) {
-    await interaction.followUp({ content: `**${prefix}** ${title}`, ephemeral: true });
+    await interaction.followUp({ content: `**${prefix}** ${title}`, flags: MessageFlags.Ephemeral });
   } else {
-    await interaction.reply({ content: `**${prefix}** ${title}`, ephemeral: true });
+    await interaction.reply({ content: `**${prefix}** ${title}`, flags: MessageFlags.Ephemeral });
   }
 
-  for (const chunk of chunks) {
-    await interaction.followUp({ content: `\`\`\`text\n${chunk}\n\`\`\``, ephemeral: true });
+  for (const chunk of visibleChunks) {
+    await interaction.followUp({ content: `\`\`\`text\n${chunk}\n\`\`\``, flags: MessageFlags.Ephemeral });
+  }
+
+  if (droppedChunks > 0) {
+    await interaction.followUp({
+      content: `Output dipotong agar tidak spam. Bagian tersembunyi: ${droppedChunks} chunk.`,
+      flags: MessageFlags.Ephemeral,
+    });
   }
 }

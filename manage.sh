@@ -105,6 +105,25 @@ MAIN_INFO_CACHE_DOMAIN="-"
 # Cache metadata quota (proto:username -> "quota_gb|expired|created|ip_enabled|ip_limit")
 declare -Ag QUOTA_FIELDS_CACHE=()
 
+# -------------------------
+# UI styling (subtle)
+# -------------------------
+if [[ -t 1 ]]; then
+  UI_RESET='\033[0m'
+  UI_BOLD='\033[1m'
+  UI_ACCENT='\033[0;36m'
+  UI_MUTED='\033[0;37m'
+  UI_WARN='\033[1;33m'
+  UI_ERR='\033[0;31m'
+else
+  UI_RESET=''
+  UI_BOLD=''
+  UI_ACCENT=''
+  UI_MUTED=''
+  UI_WARN=''
+  UI_ERR=''
+fi
+
 init_runtime_dirs() {
   mkdir -p "${WORK_DIR}"
   chmod 700 "${WORK_DIR}"
@@ -352,15 +371,15 @@ PY
 # Util
 # -------------------------
 log() {
-  echo "[manage] $*"
+  echo -e "${UI_ACCENT}[manage]${UI_RESET} $*"
 }
 
 warn() {
-  echo "[manage][WARN] $*" >&2
+  echo -e "${UI_WARN}[manage][WARN]${UI_RESET} $*" >&2
 }
 
 die() {
-  echo "[manage][ERROR] $*" >&2
+  echo -e "${UI_ERR}[manage][ERROR]${UI_RESET} $*" >&2
   exit 1
 }
 
@@ -1460,11 +1479,11 @@ domain_control_show_info() {
 domain_control_menu() {
   while true; do
     title
-    echo "5) Domain Control"
+    echo -e "${UI_BOLD}${UI_ACCENT}5) Domain Control${UI_RESET}"
     hr
-    echo "  1) Set Domain + Issue Certificate (sama seperti setup.sh)"
-    echo "  2) Show Current Domain"
-    echo "  0) Kembali"
+    echo -e "  ${UI_ACCENT}1)${UI_RESET} Set Domain + Issue Certificate"
+    echo -e "  ${UI_ACCENT}2)${UI_RESET} Show Current Domain"
+    echo -e "  ${UI_ACCENT}0)${UI_RESET} Kembali"
     hr
     if ! read -r -p "Pilih (1-2/0/kembali): " c; then
       echo
@@ -1519,13 +1538,25 @@ run_action() {
 }
 
 hr() {
-  printf '%*s\n' "${COLUMNS:-80}" '' | tr ' ' '-'
+  local w="${COLUMNS:-80}"
+  local line
+  if [[ ! "${w}" =~ ^[0-9]+$ ]]; then
+    w=80
+  fi
+  if (( w < 60 )); then
+    w=60
+  fi
+  printf -v line '%*s' "${w}" ''
+  line="${line// /-}"
+  echo -e "${UI_MUTED}${line}${UI_RESET}"
 }
 
 title() {
-  clear || true
-  echo "HM Xray - CLI Menu Manajemen"
-  echo "File: ${0}"
+  if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
+    clear || true
+  fi
+  echo -e "${UI_BOLD}${UI_ACCENT}Xray Control Panel${UI_RESET}"
+  echo -e "${UI_MUTED}Host: $(hostname) | Script: ${0##*/}${UI_RESET}"
   hr
 }
 
@@ -11173,18 +11204,18 @@ main_menu() {
   while true; do
     title
     main_menu_info_header_print
-    echo "Main Menu"
+    echo -e "${UI_BOLD}${UI_ACCENT}Main Menu${UI_RESET}"
     hr
-    echo "  1) Status & Diagnostics"
-    echo "  2) User Management"
-    echo "  3) Quota & Access Control"
-    echo "  4) Network Controls"
-    echo "  5) Domain Control"
-    echo "  6) Speedtest"
-    echo "  7) Security"
-    echo "  8) Maintenance"
-    echo "  9) Install BOT Discord"
-    echo "  0) Keluar"
+    echo -e "  ${UI_ACCENT}1)${UI_RESET} Status & Diagnostics"
+    echo -e "  ${UI_ACCENT}2)${UI_RESET} User Management"
+    echo -e "  ${UI_ACCENT}3)${UI_RESET} Quota & Access Control"
+    echo -e "  ${UI_ACCENT}4)${UI_RESET} Network Controls"
+    echo -e "  ${UI_ACCENT}5)${UI_RESET} Domain Control"
+    echo -e "  ${UI_ACCENT}6)${UI_RESET} Speedtest"
+    echo -e "  ${UI_ACCENT}7)${UI_RESET} Security"
+    echo -e "  ${UI_ACCENT}8)${UI_RESET} Maintenance"
+    echo -e "  ${UI_ACCENT}9)${UI_RESET} Install BOT Discord"
+    echo -e "  ${UI_ACCENT}0)${UI_RESET} Keluar"
     hr
     if ! read -r -p "Pilih: " c; then
       echo

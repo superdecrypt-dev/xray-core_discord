@@ -3,7 +3,7 @@ import type { MenuDefinition } from "./types";
 export const menu3: MenuDefinition = {
   id: "3",
   label: "Quota & Access Control",
-  description: "Ringkasan, detail, dan kontrol quota/manual block/IP limit/speed limit per user.",
+  description: "Ringkasan kuota dan kontrol akses per pengguna.",
   actions: [
     { id: "summary", label: "Quota Summary", mode: "direct", style: "primary" },
     {

@@ -143,8 +143,33 @@ def op_xray_test() -> tuple[bool, str, str]:
     cmd = ["xray", "run", "-test", "-confdir", str(XRAY_CONFDIR)]
     ok, out = run_cmd(cmd, timeout=20)
     if ok:
-        return True, "Xray Config Test", f"SUCCESS\nCommand: {' '.join(cmd)}\n\n{out}"
-    return False, "Xray Config Test", f"FAILED\nCommand: {' '.join(cmd)}\n\n{out}"
+        return (
+            True,
+            "Xray Config Test",
+            "SUCCESS\n"
+            "- Konfigurasi Xray valid.\n"
+            "- Detail log tidak ditampilkan di Discord.",
+        )
+
+    error_hint = ""
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("[exit "):
+            continue
+        error_hint = line
+        break
+    if len(error_hint) > 180:
+        error_hint = error_hint[:177] + "..."
+
+    msg = (
+        "FAILED\n"
+        "- Konfigurasi Xray tidak valid.\n"
+        "- Detail log tidak ditampilkan di Discord.\n"
+        "- Cek manual via SSH: xray run -test -confdir /usr/local/etc/xray/conf.d"
+    )
+    if error_hint:
+        msg += f"\n- Ringkasan error: {error_hint}"
+    return False, "Xray Config Test", msg
 
 
 def op_tls_info() -> tuple[bool, str, str]:

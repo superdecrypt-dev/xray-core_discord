@@ -3,7 +3,7 @@
     {
       "id": "1",
       "label": "Status & Diagnostics",
-      "description": "Cek status server, tes config Xray, dan info TLS.",
+      "description": "Status server, validasi konfigurasi Xray, dan informasi TLS.",
       "actions": [
         { "id": "overview", "label": "Ringkasan Status", "mode": "direct", "style": "primary" },
         { "id": "xray_test", "label": "Test Config Xray", "mode": "direct", "style": "secondary" },
@@ -13,7 +13,7 @@
     {
       "id": "2",
       "label": "User Management",
-      "description": "Add/Delete user, extend expiry, list, search, dan XRAY ACCOUNT INFO.",
+      "description": "Kelola pengguna, masa aktif, pencarian, dan informasi akun.",
       "actions": [
         {
           "id": "add_user",
@@ -91,7 +91,7 @@
     {
       "id": "3",
       "label": "Quota & Access Control",
-      "description": "Ringkasan, detail, dan kontrol quota/manual block/IP limit/speed limit per user.",
+      "description": "Ringkasan kuota dan kontrol akses per pengguna.",
       "actions": [
         { "id": "summary", "label": "Quota Summary", "mode": "direct", "style": "primary" },
         {
@@ -237,7 +237,7 @@
     {
       "id": "4",
       "label": "Network Controls",
-      "description": "Ringkasan outbounds/routing, DNS, dan state network.",
+      "description": "Ringkasan outbound, routing, DNS, dan status network.",
       "actions": [
         { "id": "egress_summary", "label": "Egress Summary", "mode": "direct", "style": "primary" },
         { "id": "dns_summary", "label": "DNS Summary", "mode": "direct", "style": "secondary" },
@@ -247,12 +247,12 @@
     {
       "id": "5",
       "label": "Domain Control",
-      "description": "Wizard setup domain custom/Cloudflare + info domain aktif.",
+      "description": "Konfigurasi domain custom/Cloudflare dan informasi domain aktif.",
       "actions": [
         { "id": "cloudflare_root_list", "label": "Cloudflare Root List", "mode": "direct", "style": "secondary" },
         {
           "id": "setup_domain_custom",
-          "label": "Set Domain Custom (CLI #1)",
+          "label": "Set Domain Custom",
           "mode": "modal",
           "style": "danger",
           "confirm": true,
@@ -265,7 +265,7 @@
         },
         {
           "id": "setup_domain_cloudflare",
-          "label": "Set Domain Cloudflare (CLI #2)",
+          "label": "Set Domain Cloudflare",
           "mode": "modal",
           "style": "danger",
           "confirm": true,
@@ -273,10 +273,10 @@
             "title": "Cloudflare Domain Wizard",
             "fields": [
               { "id": "root_domain", "label": "Root Domain", "style": "short", "required": true, "placeholder": "1 atau vyxara1.web.id" },
-              { "id": "subdomain_mode", "label": "Subdomain Mode", "style": "short", "required": false, "placeholder": "auto / manual (default auto)" },
-              { "id": "subdomain", "label": "Subdomain", "style": "short", "required": false, "placeholder": "manual mode saja, contoh: vpn01" },
-              { "id": "proxied", "label": "Cloudflare Proxy", "style": "short", "required": false, "placeholder": "on / off (default off)" },
-              { "id": "allow_existing_same_ip", "label": "Lanjut jika A record sama?", "style": "short", "required": false, "placeholder": "on untuk lanjut, off untuk batal" }
+              { "id": "subdomain_mode", "label": "Subdomain Mode", "style": "short", "required": false, "placeholder": "auto / manual (default: auto)" },
+              { "id": "subdomain", "label": "Subdomain", "style": "short", "required": false, "placeholder": "Isi jika mode manual, contoh: vpn01" },
+              { "id": "proxied", "label": "Cloudflare Proxy", "style": "short", "required": false, "placeholder": "on / off (default: off)" },
+              { "id": "allow_existing_same_ip", "label": "Lanjut jika ada A record dengan IP sama?", "style": "short", "required": false, "placeholder": "on / off (default: off)" }
             ]
           }
         },
@@ -302,7 +302,7 @@
     {
       "id": "6",
       "label": "Speedtest",
-      "description": "Speedtest Ookla dan versi binary.",
+      "description": "Pengujian kecepatan jaringan dan versi binary.",
       "actions": [
         { "id": "run", "label": "Run Speedtest", "mode": "direct", "style": "primary" },
         { "id": "version", "label": "Speedtest Version", "mode": "direct", "style": "secondary" }
@@ -311,7 +311,7 @@
     {
       "id": "7",
       "label": "Security",
-      "description": "Status fail2ban dan ringkasan hardening kernel.",
+      "description": "Status fail2ban dan parameter hardening kernel.",
       "actions": [
         { "id": "fail2ban_status", "label": "Fail2ban Status", "mode": "direct", "style": "primary" },
         { "id": "sysctl_summary", "label": "Sysctl Summary", "mode": "direct", "style": "secondary" }
@@ -320,7 +320,7 @@
     {
       "id": "8",
       "label": "Maintenance",
-      "description": "Status service dan restart service.",
+      "description": "Status layanan dan restart layanan.",
       "actions": [
         { "id": "service_status", "label": "Service Status", "mode": "direct", "style": "primary" },
         { "id": "restart_xray", "label": "Restart Xray", "mode": "direct", "style": "danger", "confirm": true },
