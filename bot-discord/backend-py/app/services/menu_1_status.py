@@ -7,9 +7,13 @@ def handle(action: str, params: dict, settings) -> dict:
         title, msg = system.op_status_overview()
         return ok_response(title, msg)
     if action == "xray_test":
-        title, msg = system.op_xray_test()
-        return ok_response(title, msg)
+        ok, title, msg = system.op_xray_test()
+        if ok:
+            return ok_response(title, msg)
+        return error_response("xray_test_failed", title, msg)
     if action == "tls_info":
-        title, msg = system.op_tls_info()
-        return ok_response(title, msg)
+        ok, title, msg = system.op_tls_info()
+        if ok:
+            return ok_response(title, msg)
+        return error_response("tls_info_failed", title, msg)
     return error_response("unknown_action", "Status & Diagnostics", f"Action tidak dikenal: {action}")

@@ -139,17 +139,17 @@ def op_status_overview() -> tuple[str, str]:
     return "Status & Diagnostics", msg
 
 
-def op_xray_test() -> tuple[str, str]:
+def op_xray_test() -> tuple[bool, str, str]:
     cmd = ["xray", "run", "-test", "-confdir", str(XRAY_CONFDIR)]
     ok, out = run_cmd(cmd, timeout=20)
     if ok:
-        return "Xray Config Test", f"SUCCESS\nCommand: {' '.join(cmd)}\n\n{out}"
-    return "Xray Config Test", f"FAILED\nCommand: {' '.join(cmd)}\n\n{out}"
+        return True, "Xray Config Test", f"SUCCESS\nCommand: {' '.join(cmd)}\n\n{out}"
+    return False, "Xray Config Test", f"FAILED\nCommand: {' '.join(cmd)}\n\n{out}"
 
 
-def op_tls_info() -> tuple[str, str]:
+def op_tls_info() -> tuple[bool, str, str]:
     if not CERT_FULLCHAIN.exists():
-        return "TLS Certificate Info", f"File tidak ada: {CERT_FULLCHAIN}"
+        return False, "TLS Certificate Info", f"File tidak ada: {CERT_FULLCHAIN}"
     ok, out = run_cmd(
         [
             "openssl",
@@ -168,8 +168,8 @@ def op_tls_info() -> tuple[str, str]:
         timeout=10,
     )
     if ok:
-        return "TLS Certificate Info", out
-    return "TLS Certificate Info", f"Gagal membaca cert:\n{out}"
+        return True, "TLS Certificate Info", out
+    return False, "TLS Certificate Info", f"Gagal membaca cert:\n{out}"
 
 
 def list_accounts() -> list[tuple[str, str]]:
