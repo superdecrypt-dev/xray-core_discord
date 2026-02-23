@@ -32,6 +32,9 @@ SRC_OWNER="${BOT_SOURCE_OWNER:-superdecrypt-dev}"
 SRC_REPO="${BOT_SOURCE_REPO:-xray-core_discord}"
 SRC_REF="${BOT_SOURCE_REF:-main}"
 SRC_ARCHIVE_URL="${BOT_SOURCE_ARCHIVE_URL:-https://github.com/superdecrypt-dev/xray-core_discord/raw/main/bot-discord.tar.gz}"
+SRC_ARCHIVE_SHA256="${BOT_SOURCE_ARCHIVE_SHA256:-}"
+SRC_ARCHIVE_SHA256_URL="${BOT_SOURCE_ARCHIVE_SHA256_URL:-${SRC_ARCHIVE_URL}.sha256}"
+ALLOW_UNVERIFIED_ARCHIVE="${BOT_ALLOW_UNVERIFIED_ARCHIVE:-0}"
 
 OS_DEPS=(
   curl
@@ -457,6 +460,35 @@ validate_source_tree() {
   [[ -f "${src}/systemd/xray-discord-gateway.service.tpl" ]] || die "Source invalid: template gateway service tidak ditemukan"
 }
 
+resolve_archive_checksum() {
+  local archive="$1"
+  local checksum_file="$2"
+  local expected actual
+
+  expected="$(echo "${SRC_ARCHIVE_SHA256}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${expected}" ]]; then
+    log "Download checksum file: ${SRC_ARCHIVE_SHA256_URL}"
+    if curl -fsSL --connect-timeout 15 --max-time 60 "${SRC_ARCHIVE_SHA256_URL}" -o "${checksum_file}"; then
+      expected="$(awk '{print tolower($1)}' "${checksum_file}" | grep -E '^[0-9a-f]{64}$' | head -n1 || true)"
+    else
+      warn "Checksum file tidak bisa diunduh dari ${SRC_ARCHIVE_SHA256_URL}."
+    fi
+  fi
+
+  if [[ -z "${expected}" ]]; then
+    if [[ "${ALLOW_UNVERIFIED_ARCHIVE}" == "1" ]]; then
+      warn "Checksum source tidak tersedia; lanjut TANPA verifikasi (BOT_ALLOW_UNVERIFIED_ARCHIVE=1)."
+      return 0
+    fi
+    die "Checksum source tidak tersedia. Set BOT_SOURCE_ARCHIVE_SHA256 atau sediakan BOT_SOURCE_ARCHIVE_SHA256_URL. Untuk bypass (tidak direkomendasikan), set BOT_ALLOW_UNVERIFIED_ARCHIVE=1."
+  fi
+
+  command_exists sha256sum || die "sha256sum tidak tersedia untuk verifikasi integritas source archive."
+  actual="$(sha256sum "${archive}" | awk '{print tolower($1)}')"
+  [[ "${actual}" == "${expected}" ]] || die "Checksum source archive tidak cocok. expected=${expected}, actual=${actual}"
+  ok "Checksum source archive valid."
+}
+
 deploy_or_update_files() {
   need_root
 
@@ -465,12 +497,14 @@ deploy_or_update_files() {
     command_exists "${cmd}" || die "Dependency '${cmd}' belum tersedia. Jalankan menu 2) Install Dependencies."
   done
 
-  local tmp archive src_root src_dir
+  local tmp archive checksum_file src_root src_dir
   tmp="$(mktemp -d /tmp/bot-discord-src.XXXXXX)"
   archive="${tmp}/src.tar.gz"
+  checksum_file="${tmp}/src.tar.gz.sha256"
 
   log "Download source archive: ${SRC_ARCHIVE_URL}"
   curl -fsSL --connect-timeout 15 --max-time 180 "${SRC_ARCHIVE_URL}" -o "${archive}" || die "Gagal download archive source."
+  resolve_archive_checksum "${archive}" "${checksum_file}"
 
   log "Extract archive..."
   tar -xzf "${archive}" -C "${tmp}" || die "Gagal extract archive."

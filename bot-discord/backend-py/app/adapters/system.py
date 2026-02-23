@@ -558,24 +558,24 @@ def _speedtest_bin() -> str | None:
     return None
 
 
-def op_speedtest_run() -> tuple[str, str]:
+def op_speedtest_run() -> tuple[bool, str, str]:
     binary = _speedtest_bin()
     if not binary:
-        return "Speedtest", "Binary speedtest tidak ditemukan."
+        return False, "Speedtest", "Binary speedtest tidak ditemukan."
     ok, out = run_cmd([binary, "--accept-license", "--accept-gdpr"], timeout=120)
     if ok:
-        return "Speedtest - Run", out
-    return "Speedtest - Run", f"Gagal speedtest:\n{out}"
+        return True, "Speedtest - Run", out
+    return False, "Speedtest - Run", f"Gagal speedtest:\n{out}"
 
 
-def op_speedtest_version() -> tuple[str, str]:
+def op_speedtest_version() -> tuple[bool, str, str]:
     binary = _speedtest_bin()
     if not binary:
-        return "Speedtest", "Binary speedtest tidak ditemukan."
+        return False, "Speedtest", "Binary speedtest tidak ditemukan."
     ok, out = run_cmd([binary, "--version"], timeout=20)
     if ok:
-        return "Speedtest - Version", out
-    return "Speedtest - Version", f"Gagal membaca versi speedtest:\n{out}"
+        return True, "Speedtest - Version", out
+    return False, "Speedtest - Version", f"Gagal membaca versi speedtest:\n{out}"
 
 
 def op_fail2ban_status() -> tuple[str, str]:
@@ -611,20 +611,20 @@ def op_maintenance_status() -> tuple[str, str]:
     return "Maintenance - Service Status", "\n".join(lines)
 
 
-def op_restart_service(service: str) -> tuple[str, str]:
+def op_restart_service(service: str) -> tuple[bool, str, str]:
     if service not in ALLOWED_SERVICES:
-        return "Maintenance - Restart", f"Service tidak diizinkan: {service}"
+        return False, "Maintenance - Restart", f"Service tidak diizinkan: {service}"
     ok, out = run_cmd(["systemctl", "restart", service], timeout=25)
     state = service_state(service)
     if ok:
-        return "Maintenance - Restart", f"Restart {service} berhasil.\nState: {state}"
-    return "Maintenance - Restart", f"Restart {service} gagal.\n{out}\nState: {state}"
+        return True, "Maintenance - Restart", f"Restart {service} berhasil.\nState: {state}"
+    return False, "Maintenance - Restart", f"Restart {service} gagal.\n{out}\nState: {state}"
 
 
-def op_tail_log(service: str, lines: int = 80) -> tuple[str, str]:
+def op_tail_log(service: str, lines: int = 80) -> tuple[bool, str, str]:
     if service not in ALLOWED_SERVICES:
-        return "Maintenance - Tail Log", f"Service tidak diizinkan: {service}"
+        return False, "Maintenance - Tail Log", f"Service tidak diizinkan: {service}"
     ok, out = run_cmd(["journalctl", "-u", service, "-n", str(lines), "--no-pager"], timeout=25)
     if ok:
-        return f"Maintenance - Log {service}", out
-    return f"Maintenance - Log {service}", f"Gagal ambil log {service}:\n{out}"
+        return True, f"Maintenance - Log {service}", out
+    return False, f"Maintenance - Log {service}", f"Gagal ambil log {service}:\n{out}"
