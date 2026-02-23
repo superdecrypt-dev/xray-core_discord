@@ -1,4 +1,4 @@
-# Xray Core Discord
+# Autoscript
 
 > Auto setup + menu operasional harian untuk Xray-core di VPS Linux.
 
@@ -29,7 +29,7 @@ Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan int
 
 ## Quick Install (Root)
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/xray-core_discord/main/run.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/autoscript/main/run.sh)
 ```
 
 `run.sh` akan:

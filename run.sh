@@ -8,14 +8,14 @@ export PATH
 
 # ============================================================
 # run.sh — Installer otomatis Xray VPN Server
-# Repo: https://github.com/superdecrypt-dev/xray-core_discord
+# Repo: https://github.com/superdecrypt-dev/autoscript
 # ============================================================
 
 # -------------------------
 # Konstanta
 # -------------------------
-REPO_URL="https://github.com/superdecrypt-dev/xray-core_discord.git"
-REPO_DIR="/tmp/xray-core_discord_$$"
+REPO_URL="https://github.com/superdecrypt-dev/autoscript.git"
+REPO_DIR="/opt/autoscript"
 MANAGE_BIN="/usr/local/bin/manage"
 BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
 
@@ -38,16 +38,6 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 hr() { echo "------------------------------------------------------------"; }
-
-cleanup() {
-  if [[ -d "${REPO_DIR}" ]]; then
-    log "Membersihkan direktori sementara: ${REPO_DIR}"
-    rm -rf "${REPO_DIR}"
-  fi
-}
-
-# Jalankan cleanup saat script selesai (normal maupun error)
-trap cleanup EXIT
 
 # -------------------------
 # Validasi
@@ -102,6 +92,25 @@ check_deps() {
 # Langkah instalasi
 # -------------------------
 clone_repo() {
+  mkdir -p "$(dirname "${REPO_DIR}")"
+
+  if [[ -d "${REPO_DIR}" && ! -d "${REPO_DIR}/.git" ]]; then
+    if [[ -z "$(find "${REPO_DIR}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
+      rmdir "${REPO_DIR}" || true
+    else
+      die "Direktori ${REPO_DIR} sudah ada tetapi bukan git repo. Bersihkan/rename dulu lalu jalankan ulang."
+    fi
+  fi
+
+  if [[ -d "${REPO_DIR}/.git" ]]; then
+    log "Memperbarui repositori di ${REPO_DIR} ..."
+    if ! git -C "${REPO_DIR}" pull --ff-only origin main 2>&1; then
+      die "Gagal update repositori di ${REPO_DIR}. Pastikan repo bersih atau jalankan pada server baru."
+    fi
+    ok "Repositori berhasil diperbarui."
+    return 0
+  fi
+
   log "Mengkloning repositori ke ${REPO_DIR} ..."
   if ! git clone --depth=1 "${REPO_URL}" "${REPO_DIR}" 2>&1; then
     die "Gagal mengkloning repositori: ${REPO_URL}\n  Pastikan server memiliki koneksi internet dan URL repo benar."
