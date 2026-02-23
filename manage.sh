@@ -1057,15 +1057,15 @@ cf_prepare_subdomain_a_record() {
         warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
         local ask_rc=0
         if confirm_yn_or_back "Lanjut menggunakan domain ini?"; then
-          log "Lanjut."
+          log "Melanjutkan proses."
           return 0
         fi
         ask_rc=$?
         if (( ask_rc == 2 )); then
-          warn "Dibatalkan oleh user (kembali)."
+          warn "Dibatalkan oleh pengguna (kembali)."
           return 2
         fi
-        warn "Dibatalkan oleh user."
+        warn "Dibatalkan oleh pengguna."
         return 1
       fi
 
@@ -1464,8 +1464,7 @@ domain_control_menu() {
     hr
     echo "  1) Set Domain + Issue Certificate (sama seperti setup.sh)"
     echo "  2) Show Current Domain"
-    echo "  0) Back (kembali)"
-    echo "  kembali) Back"
+    echo "  0) Kembali"
     hr
     if ! read -r -p "Pilih (1-2/0/kembali): " c; then
       echo
@@ -2089,7 +2088,7 @@ account_search_flow() {
   done
   hr
   echo "  1) View salah satu hasil"
-  echo "  0) Back (kembali)"
+  echo "  0) Kembali"
   hr
   read -r -p "Pilih: " c
   case "${c}" in
@@ -4114,7 +4113,6 @@ user_add_menu() {
   echo "  1) vless"
   echo "  2) vmess"
   echo "  3) trojan"
-  echo "  kembali) Back"
   hr
   read -r -p "Protocol (1-3/kembali): " p
   if is_back_choice "${p}"; then
@@ -4353,7 +4351,6 @@ user_del_menu() {
   echo "  1) vless"
   echo "  2) vmess"
   echo "  3) trojan"
-  echo "  kembali) Back"
   hr
   read -r -p "Protocol (1-3/kembali): " p
   if is_back_choice "${p}"; then
@@ -4451,7 +4448,6 @@ user_extend_expiry_menu() {
   echo "  1) vless"
   echo "  2) vmess"
   echo "  3) trojan"
-  echo "  kembali) Back"
   hr
   read -r -p "Protocol (1-3/kembali): " p
   if is_back_choice "${p}"; then
@@ -4511,7 +4507,7 @@ PY
   hr
   echo "  1) Tambah hari (extend)"
   echo "  2) Set tanggal langsung (YYYY-MM-DD)"
-  echo "  0) Back (kembali)"
+  echo "  0) Kembali"
   hr
   read -r -p "Pilih mode: " mode
   if is_back_choice "${mode}"; then
@@ -4720,7 +4716,6 @@ user_list_menu() {
     echo "  next) Next page"
     echo "  previous) Previous page"
     echo "  refresh) Refresh"
-    echo "  kembali) Back"
     hr
     read -r -p "Pilih (view/search/next/previous/refresh/kembali): " c
 
@@ -4758,7 +4753,7 @@ user_menu() {
     echo "  2. Delete user"
     echo "  3. Extend/Set Expiry"
     echo "  4. List users (read-only)"
-    echo "  0. Back (kembali)"
+    echo "  0. Kembali"
     hr
     if ! read -r -p "Pilih: " c; then
       echo
@@ -5468,7 +5463,7 @@ quota_edit_flow() {
     echo "  8) Set Speed Download (Mbps)"
     echo "  9) Set Speed Upload (Mbps)"
     echo " 10) Speed Limit Enable/Disable (toggle)"
-    echo "  0) Back (kembali)"
+    echo "  0) Kembali"
     hr
     if ! read -r -p "Pilih: " c; then
       echo
@@ -5687,7 +5682,6 @@ quota_menu() {
     echo "  search) filter username"
     echo "  clear) hapus filter"
     echo "  next / previous"
-    echo "  kembali) Back"
     hr
     if ! read -r -p "Pilih: " c; then
       echo
@@ -10119,7 +10113,7 @@ network_menu() {
     echo "  4) DNS Advanced (Editor)"
     echo "  5) Diagnostics"
     echo "  6) Adblock (Custom Geosite)"
-    echo "  0) Back (kembali)"
+    echo "  0) Kembali"
     hr
     if ! read -r -p "Pilih: " c; then
       echo
@@ -10204,7 +10198,7 @@ speedtest_menu() {
     hr
     echo "  1) Run Speedtest (Ookla)"
     echo "  2) Show Speedtest Version"
-    echo "  0) Back (kembali)"
+    echo "  0) Kembali"
     hr
     if ! read -r -p "Pilih: " c; then
       echo
@@ -11151,7 +11145,7 @@ maintenance_menu() {
     echo "  6. Wireproxy (WARP) Status (ringkas)"
     echo "  7. Restart wireproxy (WARP)"
     echo "  8. Daemon Status & Restart (xray-expired / xray-quota / xray-limit-ip / xray-speed)"
-    echo "  0. Back (kembali)"
+    echo "  0. Kembali"
     hr
     if ! read -r -p "Pilih: " c; then
       echo
@@ -11190,7 +11184,7 @@ main_menu() {
     echo "  7) Security"
     echo "  8) Maintenance"
     echo "  9) Install BOT Discord"
-    echo "  0) Exit (kembali)"
+    echo "  0) Keluar"
     hr
     if ! read -r -p "Pilih: " c; then
       echo

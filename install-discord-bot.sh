@@ -68,7 +68,7 @@ safe_clear() {
 }
 
 pause() {
-  read -r -p "Tekan ENTER untuk lanjut..." _ || true
+  read -r -p "Tekan Enter untuk melanjutkan..." _ || true
 }
 
 is_back_choice() {
@@ -679,7 +679,6 @@ view_logs_menu() {
   echo "  2) ${GATEWAY_SERVICE}"
   echo "  3) Keduanya"
   echo "  0) Kembali"
-  echo "  kembali) Back"
   read -r -p "Pilih: " c || true
 
   case "${c}" in
@@ -793,7 +792,7 @@ quick_setup_all_in_one() {
 
 show_header() {
   safe_clear
-  echo -e "${BOLD}Install BOT Discord (Standalone)${NC}"
+  echo -e "${BOLD}Instal Bot Discord${NC}"
   echo "Target deploy : ${BOT_HOME}"
   echo "Env file      : ${BOT_ENV_FILE}"
   echo "Source archive: ${SRC_ARCHIVE_URL}"
@@ -814,7 +813,7 @@ menu_loop() {
     echo "  8) Status Services"
     echo "  9) View Logs"
     echo " 10) Uninstall Bot (Clean, keep packages)"
-    echo "  0) Back"
+    echo "  0) Kembali"
     hr
     read -r -p "Pilih: " c || true
 

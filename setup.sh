@@ -465,10 +465,10 @@ cf_prepare_subdomain_a_record() {
       if [[ "$any_same" == "1" ]]; then
         warn "A record sudah ada: $fqdn -> $ip (sama dengan IP VPS)"
         if confirm_yn "Lanjut menggunakan domain ini?"; then
-          ok "Lanjut."
+          ok "Melanjutkan proses."
           return 0
         fi
-        die "Dibatalkan oleh user."
+        die "Dibatalkan oleh pengguna."
       fi
 
       if [[ "$any_diff" == "1" ]]; then
