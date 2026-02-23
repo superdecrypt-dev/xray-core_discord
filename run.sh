@@ -58,6 +58,29 @@ check_root() {
   fi
 }
 
+check_os() {
+  [[ -f /etc/os-release ]] || die "Tidak menemukan /etc/os-release"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+
+  local id="${ID:-}"
+  local ver="${VERSION_ID:-}"
+  local codename="${VERSION_CODENAME:-}"
+
+  if [[ "${id}" == "ubuntu" ]]; then
+    local ok_ver
+    ok_ver="$(awk "BEGIN { print (\"${ver}\" + 0 >= 20.04) ? 1 : 0 }")"
+    [[ "${ok_ver}" == "1" ]] || die "Ubuntu minimal 20.04. Versi terdeteksi: ${ver}"
+    ok "OS: Ubuntu ${ver} (${codename})"
+  elif [[ "${id}" == "debian" ]]; then
+    local major="${ver%%.*}"
+    [[ "${major:-0}" -ge 11 ]] 2>/dev/null || die "Debian minimal 11. Versi terdeteksi: ${ver}"
+    ok "OS: Debian ${ver} (${codename})"
+  else
+    die "OS tidak didukung: ${id}. Hanya Ubuntu >=20.04 atau Debian >=11."
+  fi
+}
+
 check_deps() {
   local missing=()
   for cmd in git bash; do
@@ -126,6 +149,7 @@ main() {
   echo
 
   check_root
+  check_os
   check_deps
   clone_repo
   install_manage
