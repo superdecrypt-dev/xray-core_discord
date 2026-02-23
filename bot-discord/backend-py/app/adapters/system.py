@@ -12,6 +12,8 @@ NGINX_CONF = Path("/etc/nginx/conf.d/xray.conf")
 CERT_FULLCHAIN = Path("/opt/cert/fullchain.pem")
 NETWORK_STATE_FILE = Path("/var/lib/xray-manage/network_state.json")
 PROTOCOLS = ("vless", "vmess", "trojan")
+QUOTA_UNIT_DECIMAL = {"decimal", "gb", "1000", "gigabyte"}
+USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ALLOWED_SERVICES = (
     "xray",
     "nginx",
@@ -75,12 +77,7 @@ def memory_summary() -> str:
 
 
 def detect_domain() -> str:
-    for path in (Path("/etc/xray/domain"), Path("/usr/local/etc/xray/domain")):
-        if path.exists():
-            lines = [ln.strip() for ln in path.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()]
-            if lines:
-                return lines[0]
-
+    # Samakan prioritas dengan manage.sh: nginx server_name -> hostname -f -> hostname.
     if NGINX_CONF.exists():
         for line in NGINX_CONF.read_text(encoding="utf-8", errors="ignore").splitlines():
             m = re.match(r"^\s*server_name\s+([^;]+);", line)
@@ -88,6 +85,12 @@ def detect_domain() -> str:
                 token = m.group(1).strip().split()[0]
                 if token and token != "_":
                     return token
+    ok_fqdn, fqdn = run_cmd(["hostname", "-f"], timeout=8)
+    if ok_fqdn and fqdn.strip():
+        return fqdn.splitlines()[0].strip()
+    ok_host, host = run_cmd(["hostname"], timeout=8)
+    if ok_host and host.strip():
+        return host.splitlines()[0].strip()
     return "-"
 
 
@@ -175,12 +178,25 @@ def list_accounts() -> list[tuple[str, str]]:
         d = ACCOUNT_ROOT / proto
         if not d.exists():
             continue
+        selected: dict[str, Path] = {}
+        selected_has_at: dict[str, bool] = {}
         for path in sorted(d.glob("*.txt")):
             stem = path.stem
             suffix = f"@{proto}"
             username = stem[: -len(suffix)] if stem.endswith(suffix) else stem
-            if username:
-                records.append((proto, username))
+            if not username:
+                continue
+            has_at = "@" in stem
+            prev = selected.get(username)
+            if prev is not None:
+                if has_at and not selected_has_at.get(username, False):
+                    selected[username] = path
+                    selected_has_at[username] = True
+                continue
+            selected[username] = path
+            selected_has_at[username] = has_at
+        for username in sorted(selected.keys()):
+            records.append((proto, username))
     return records
 
 
@@ -222,6 +238,134 @@ def _quota_candidates(proto: str, username: str) -> list[Path]:
     ]
 
 
+def _account_candidates(proto: str, username: str) -> list[Path]:
+    return [
+        ACCOUNT_ROOT / proto / f"{username}@{proto}.txt",
+        ACCOUNT_ROOT / proto / f"{username}.txt",
+    ]
+
+
+def _is_valid_username(username: str) -> bool:
+    return bool(USERNAME_RE.match(username))
+
+
+def _to_int(v: object, default: int = 0) -> int:
+    try:
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, (int, float)):
+            return int(v)
+        s = str(v).strip()
+        if not s:
+            return default
+        return int(float(s))
+    except Exception:
+        return default
+
+
+def _to_float(v: object, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return float(int(v))
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip()
+        if not s:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
+
+def _fmt_number(value: float) -> str:
+    if value <= 0:
+        return "0"
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _fmt_quota_limit_gb(data: dict) -> str:
+    quota_limit = _to_int(data.get("quota_limit"), 0)
+    if quota_limit <= 0:
+        return "0 GB"
+    unit = str(data.get("quota_unit") or "binary").strip().lower()
+    bpg = 1000**3 if unit in QUOTA_UNIT_DECIMAL else 1024**3
+    return f"{_fmt_number(quota_limit / bpg)} GB"
+
+
+def _fmt_quota_used(data: dict) -> str:
+    used = _to_int(data.get("quota_used"), 0)
+    if used < 0:
+        used = 0
+    if used >= 1024**3:
+        return f"{used / (1024**3):.2f} GB"
+    if used >= 1024**2:
+        return f"{used / (1024**2):.2f} MB"
+    if used >= 1024:
+        return f"{used / 1024:.2f} KB"
+    return f"{used} B"
+
+
+def _status_block_reason(status: dict) -> str:
+    lock_reason = str(status.get("lock_reason") or "").strip().lower()
+    if bool(status.get("manual_block")) or lock_reason == "manual":
+        return "MANUAL"
+    if bool(status.get("quota_exhausted")) or lock_reason == "quota":
+        return "QUOTA"
+    if bool(status.get("ip_limit_locked")) or lock_reason == "ip_limit":
+        return "IP_LIMIT"
+    return "-"
+
+
+def _status_ip_limit(status: dict) -> str:
+    enabled = bool(status.get("ip_limit_enabled"))
+    limit = _to_int(status.get("ip_limit"), 0)
+    if not enabled:
+        return "OFF"
+    return f"ON({limit})" if limit > 0 else "ON"
+
+
+def _status_speed_limit(status: dict) -> str:
+    enabled = bool(status.get("speed_limit_enabled"))
+    if not enabled:
+        return "OFF"
+    down = _to_float(status.get("speed_down_mbit"), 0.0)
+    up = _to_float(status.get("speed_up_mbit"), 0.0)
+    if down <= 0 or up <= 0:
+        return "OFF"
+    return f"ON({_fmt_number(down)}/{_fmt_number(up)} Mbps)"
+
+
+def _iter_proto_quota_files(proto: str) -> list[tuple[str, Path]]:
+    d = QUOTA_ROOT / proto
+    if not d.exists():
+        return []
+
+    selected: dict[str, Path] = {}
+    selected_has_at: dict[str, bool] = {}
+    for path in sorted(d.glob("*.json")):
+        stem = path.stem
+        suffix = f"@{proto}"
+        username = stem[: -len(suffix)] if stem.endswith(suffix) else stem
+        if not username:
+            continue
+        has_at = "@" in stem
+        prev = selected.get(username)
+        if prev is not None:
+            if has_at and not selected_has_at.get(username, False):
+                selected[username] = path
+                selected_has_at[username] = True
+            continue
+        selected[username] = path
+        selected_has_at[username] = has_at
+    return [(u, selected[u]) for u in sorted(selected.keys())]
+
+
 def _pick_field(data: dict, keys: list[str], default: str = "-") -> str:
     for key in keys:
         if key in data and data[key] not in (None, ""):
@@ -233,23 +377,24 @@ def op_quota_summary() -> tuple[str, str]:
     lines: list[str] = []
     count = 0
     for proto in PROTOCOLS:
-        d = QUOTA_ROOT / proto
-        if not d.exists():
-            continue
-        for path in sorted(d.glob("*.json")):
+        for username, path in _iter_proto_quota_files(proto):
             ok, payload = read_json(path)
-            username = path.stem.replace(f"@{proto}", "")
             if not ok:
                 lines.append(f"- {proto}/{path.name}: invalid json")
                 count += 1
                 continue
 
             data = payload if isinstance(payload, dict) else {}
-            quota = _pick_field(data, ["quota_gb", "quota_limit_gb", "quotaLimitGb", "quota_limit", "limit_gb"])
-            used = _pick_field(data, ["quota_used_gb", "used_gb", "quota_used", "used"])
-            exp = _pick_field(data, ["expired_at", "expired", "expiry", "expires"])
-            blk = _pick_field(data, ["manual_block", "blocked", "lock_reason"], default="-")
-            lines.append(f"- {username} [{proto}] quota={quota} used={used} exp={exp} block={blk}")
+            status = data.get("status") if isinstance(data.get("status"), dict) else {}
+            exp = str(_pick_field(data, ["expired_at", "expired", "expiry", "expires"]))[:10]
+            quota = _fmt_quota_limit_gb(data)
+            used = _fmt_quota_used(data)
+            ip_limit = _status_ip_limit(status)
+            speed_limit = _status_speed_limit(status)
+            block = _status_block_reason(status)
+            lines.append(
+                f"- {username} [{proto}] limit={quota} used={used} exp={exp} ip={ip_limit} speed={speed_limit} block={block}"
+            )
             count += 1
             if count >= 200:
                 break
@@ -264,14 +409,56 @@ def op_quota_summary() -> tuple[str, str]:
 def op_quota_detail(proto: str, username: str) -> tuple[str, str]:
     if proto not in PROTOCOLS:
         return "Quota & Access Control - Detail", f"Proto tidak valid: {proto}"
+    if not _is_valid_username(username):
+        return "Quota & Access Control - Detail", "Username tidak valid. Gunakan huruf/angka/._- tanpa spasi."
     for candidate in _quota_candidates(proto, username):
         if not candidate.exists():
             continue
         ok, payload = read_json(candidate)
         if not ok:
             return "Quota & Access Control - Detail", str(payload)
-        return "Quota & Access Control - Detail", f"File: {candidate}\n\n" + json.dumps(payload, indent=2, ensure_ascii=False)
+        parts = [f"Quota File: {candidate}", "", json.dumps(payload, indent=2, ensure_ascii=False)]
+
+        account_file = next((p for p in _account_candidates(proto, username) if p.exists()), None)
+        if account_file is not None:
+            try:
+                account_text = account_file.read_text(encoding="utf-8", errors="ignore").strip()
+            except Exception as exc:
+                account_text = f"Gagal membaca {account_file}: {exc}"
+            parts.extend(
+                [
+                    "",
+                    f"XRAY ACCOUNT INFO File: {account_file}",
+                    "",
+                    account_text or "(kosong)",
+                ]
+            )
+        else:
+            parts.extend(["", "XRAY ACCOUNT INFO: file tidak ditemukan di /opt/account"])
+
+        return "Quota & Access Control - Detail", "\n".join(parts)
     return "Quota & Access Control - Detail", f"File quota tidak ditemukan untuk {username} [{proto}]"
+
+
+def op_account_info(proto: str, username: str) -> tuple[str, str]:
+    proto_n = proto.lower().strip()
+    user_n = username.strip()
+    if proto_n not in PROTOCOLS:
+        return "User Management - Account Info", f"Proto tidak valid: {proto}"
+    if not _is_valid_username(user_n):
+        return "User Management - Account Info", "Username tidak valid. Gunakan huruf/angka/._- tanpa spasi."
+
+    for candidate in _account_candidates(proto_n, user_n):
+        if not candidate.exists():
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception as exc:
+            return "User Management - Account Info", f"Gagal membaca file {candidate}: {exc}"
+        if not content:
+            content = "(kosong)"
+        return "User Management - Account Info", f"File: {candidate}\n\n{content}"
+    return "User Management - Account Info", f"File account tidak ditemukan untuk {user_n} [{proto_n}]"
 
 
 def op_network_outbound_summary() -> tuple[str, str]:

@@ -1372,6 +1372,13 @@ domain_control_set_domain_now() {
   domain_menu_v2
   install_acme_and_issue_cert
   domain_control_apply_nginx_domain "${DOMAIN}"
+  MAIN_INFO_CACHE_TS=0
+
+  if account_refresh_all_info_files "${DOMAIN}" "$(detect_public_ip_ipapi)"; then
+    log "XRAY ACCOUNT INFO berhasil disinkronkan ke domain baru."
+  else
+    warn "Sebagian XRAY ACCOUNT INFO gagal disinkronkan. Cek file di ${ACCOUNT_ROOT}."
+  fi
 
   hr
   log "Domain aktif sekarang: ${DOMAIN}"
@@ -3545,6 +3552,430 @@ PY
   chmod 600 "${acc_file}" "${quota_file}" || true
 }
 
+account_info_refresh_for_user() {
+  # args: protocol username [domain] [ip]
+  local proto="$1"
+  local username="$2"
+  local domain="${3:-}"
+  local ip="${4:-}"
+
+  ensure_account_quota_dirs
+  need_python3
+
+  local acc_file quota_file acc_legacy quota_legacy
+  acc_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
+  quota_file="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
+  acc_legacy="${ACCOUNT_ROOT}/${proto}/${username}.txt"
+  quota_legacy="${QUOTA_ROOT}/${proto}/${username}.json"
+
+  if [[ ! -f "${acc_file}" && -f "${acc_legacy}" ]]; then
+    acc_file="${acc_legacy}"
+  fi
+  if [[ ! -f "${quota_file}" && -f "${quota_legacy}" ]]; then
+    quota_file="${quota_legacy}"
+  fi
+
+  [[ -n "${domain}" ]] || domain="$(detect_domain)"
+  if [[ -z "${ip}" ]]; then
+    if [[ -f "${acc_file}" ]]; then
+      ip="$(grep -E '^IP[[:space:]]*:' "${acc_file}" | head -n1 | sed -E 's/^IP[[:space:]]*:[[:space:]]*//')"
+    fi
+    [[ -n "${ip}" ]] || ip="$(detect_public_ip)"
+  fi
+
+  local rc=0
+  set +e
+  python3 - <<'PY' "${acc_file}" "${quota_file}" "${XRAY_INBOUNDS_CONF}" "${domain}" "${ip}" "${username}" "${proto}"
+import base64
+import json
+import os
+import re
+import sys
+import urllib.parse
+from datetime import date, datetime
+
+acc_file, quota_file, inbounds_file, domain_arg, ip_arg, username, proto = sys.argv[1:8]
+email = f"{username}@{proto}"
+
+
+def to_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s = str(v).strip()
+    if not s:
+      return default
+    return int(float(s))
+  except Exception:
+    return default
+
+
+def to_float(v, default=0.0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return float(int(v))
+    if isinstance(v, (int, float)):
+      return float(v)
+    s = str(v).strip()
+    if not s:
+      return default
+    return float(s)
+  except Exception:
+    return default
+
+
+def fmt_gb(v):
+  try:
+    n = float(v)
+  except Exception:
+    return "0"
+  if n <= 0:
+    return "0"
+  if abs(n - round(n)) < 1e-9:
+    return str(int(round(n)))
+  return f"{n:.2f}".rstrip("0").rstrip(".")
+
+
+def fmt_mbit(v):
+  try:
+    n = float(v)
+  except Exception:
+    return "0"
+  if n <= 0:
+    return "0"
+  if abs(n - round(n)) < 1e-9:
+    return str(int(round(n)))
+  return f"{n:.2f}".rstrip("0").rstrip(".")
+
+
+def parse_date_only(raw):
+  s = str(raw or "").strip()
+  if not s:
+    return None
+  s = s[:10]
+  try:
+    return datetime.strptime(s, "%Y-%m-%d").date()
+  except Exception:
+    return None
+
+
+def read_account_fields(path):
+  fields = {}
+  if not os.path.isfile(path):
+    return fields
+  try:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+      for raw in f:
+        line = raw.strip()
+        if ":" not in line:
+          continue
+        k, v = line.split(":", 1)
+        fields[k.strip()] = v.strip()
+  except Exception:
+    return {}
+  return fields
+
+
+def parse_quota_bytes_from_text(s):
+  m = re.search(r"([0-9]+(?:\.[0-9]+)?)", str(s or ""))
+  if not m:
+    return 0
+  try:
+    gb = float(m.group(1))
+  except Exception:
+    return 0
+  if gb <= 0:
+    return 0
+  return int(round(gb * (1024 ** 3)))
+
+
+def parse_days_from_text(s):
+  m = re.search(r"([0-9]+)", str(s or ""))
+  if not m:
+    return None
+  try:
+    n = int(m.group(1))
+  except Exception:
+    return None
+  if n < 0:
+    return 0
+  return n
+
+
+def parse_ip_line(s):
+  text = str(s or "").strip().upper()
+  if not text.startswith("ON"):
+    return False, 0
+  m = re.search(r"\(([0-9]+)\)", text)
+  if not m:
+    return True, 0
+  return True, to_int(m.group(1), 0)
+
+
+def parse_speed_line(s):
+  text = str(s or "").strip()
+  if not text.upper().startswith("ON"):
+    return False, 0.0, 0.0
+  m = re.search(
+    r"DOWN\s*([0-9]+(?:\.[0-9]+)?)\s*Mbps\s*\|\s*UP\s*([0-9]+(?:\.[0-9]+)?)\s*Mbps",
+    text,
+    flags=re.IGNORECASE,
+  )
+  if not m:
+    return False, 0.0, 0.0
+  return True, to_float(m.group(1), 0.0), to_float(m.group(2), 0.0)
+
+
+existing = read_account_fields(acc_file)
+
+domain = str(domain_arg or "").strip() or str(existing.get("Domain") or "").strip() or "-"
+ip = str(ip_arg or "").strip() or str(existing.get("IP") or "").strip() or "0.0.0.0"
+
+meta = {}
+if os.path.isfile(quota_file):
+  try:
+    loaded = json.load(open(quota_file, "r", encoding="utf-8"))
+    if isinstance(loaded, dict):
+      meta = loaded
+  except Exception:
+    meta = {}
+
+status = meta.get("status")
+if not isinstance(status, dict):
+  status = {}
+
+quota_bytes = to_int(meta.get("quota_limit"), -1)
+if quota_bytes < 0:
+  quota_bytes = parse_quota_bytes_from_text(existing.get("Quota Limit", ""))
+if quota_bytes < 0:
+  quota_bytes = 0
+quota_gb_disp = fmt_gb(quota_bytes / (1024 ** 3)) if quota_bytes else "0"
+
+created_at = str(meta.get("created_at") or existing.get("Created") or "").strip()
+created_at = created_at[:10] if created_at else datetime.utcnow().strftime("%Y-%m-%d")
+expired_at = str(meta.get("expired_at") or existing.get("Valid Until") or "").strip()
+expired_at = expired_at[:10] if expired_at else "-"
+
+days = parse_days_from_text(existing.get("Expired", ""))
+if days is None:
+  d_created = parse_date_only(created_at)
+  d_expired = parse_date_only(expired_at)
+  if d_created and d_expired:
+    days = max(0, (d_expired - d_created).days)
+  elif d_expired:
+    days = max(0, (d_expired - date.today()).days)
+  else:
+    days = 0
+
+if "ip_limit_enabled" in status:
+  ip_enabled = bool(status.get("ip_limit_enabled"))
+  ip_limit_int = to_int(status.get("ip_limit"), 0)
+else:
+  ip_enabled, ip_limit_int = parse_ip_line(existing.get("IP Limit", ""))
+if not ip_enabled:
+  ip_limit_int = 0
+
+if "speed_limit_enabled" in status or "speed_down_mbit" in status or "speed_up_mbit" in status:
+  speed_enabled = bool(status.get("speed_limit_enabled"))
+  speed_down_mbit = to_float(status.get("speed_down_mbit"), 0.0)
+  speed_up_mbit = to_float(status.get("speed_up_mbit"), 0.0)
+else:
+  speed_enabled, speed_down_mbit, speed_up_mbit = parse_speed_line(existing.get("Speed Limit", ""))
+
+if not speed_enabled or speed_down_mbit <= 0 or speed_up_mbit <= 0:
+  speed_enabled = False
+  speed_down_mbit = 0.0
+  speed_up_mbit = 0.0
+
+cred = ""
+if os.path.isfile(inbounds_file):
+  try:
+    cfg = json.load(open(inbounds_file, "r", encoding="utf-8"))
+    for ib in cfg.get("inbounds") or []:
+      if not isinstance(ib, dict):
+        continue
+      if ib.get("protocol") != proto:
+        continue
+      clients = (ib.get("settings") or {}).get("clients") or []
+      if not isinstance(clients, list):
+        continue
+      for c in clients:
+        if not isinstance(c, dict):
+          continue
+        if str(c.get("email") or "") != email:
+          continue
+        v = c.get("password") if proto == "trojan" else c.get("id")
+        cred = str(v or "").strip()
+        if cred:
+          break
+      if cred:
+        break
+  except Exception:
+    cred = ""
+
+if not cred:
+  if proto == "trojan":
+    cred = str(existing.get("Password") or "").strip()
+  else:
+    cred = str(existing.get("UUID") or "").strip()
+if not cred:
+  raise SystemExit(20)
+
+PUBLIC_PATHS = {
+  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
+  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
+  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
+}
+
+
+def vless_link(net, val):
+  q = {"encryption": "none", "security": "tls", "type": net, "sni": domain}
+  if net in ("ws", "httpupgrade"):
+    q["path"] = val or "/"
+  elif net == "grpc" and val:
+    q["serviceName"] = val
+  return f"vless://{cred}@{domain}:443?{urllib.parse.urlencode(q)}#{urllib.parse.quote(username + '@' + proto)}"
+
+
+def trojan_link(net, val):
+  q = {"security": "tls", "type": net, "sni": domain}
+  if net in ("ws", "httpupgrade"):
+    q["path"] = val or "/"
+  elif net == "grpc" and val:
+    q["serviceName"] = val
+  return f"trojan://{cred}@{domain}:443?{urllib.parse.urlencode(q)}#{urllib.parse.quote(username + '@' + proto)}"
+
+
+def vmess_link(net, val):
+  obj = {
+    "v": "2",
+    "ps": username + "@" + proto,
+    "add": domain,
+    "port": "443",
+    "id": cred,
+    "aid": "0",
+    "net": net,
+    "type": "none",
+    "host": domain,
+    "tls": "tls",
+    "sni": domain,
+  }
+  if net in ("ws", "httpupgrade"):
+    obj["path"] = val or "/"
+  elif net == "grpc":
+    obj["path"] = val or ""
+    obj["type"] = "gun"
+  raw = json.dumps(obj, separators=(",", ":"))
+  return "vmess://" + base64.b64encode(raw.encode()).decode()
+
+
+links = {}
+public_proto = PUBLIC_PATHS.get(proto, {})
+for net in ("ws", "httpupgrade", "grpc"):
+  val = public_proto.get(net, "")
+  if proto == "vless":
+    links[net] = vless_link(net, val)
+  elif proto == "vmess":
+    links[net] = vmess_link(net, val)
+  elif proto == "trojan":
+    links[net] = trojan_link(net, val)
+
+lines = []
+lines.append("=== XRAY ACCOUNT INFO ===")
+lines.append(f"Domain      : {domain}")
+lines.append(f"IP          : {ip}")
+lines.append(f"Username    : {username}")
+lines.append(f"Protocol    : {proto}")
+if proto in ("vless", "vmess"):
+  lines.append(f"UUID        : {cred}")
+else:
+  lines.append(f"Password    : {cred}")
+lines.append(f"Quota Limit : {quota_gb_disp} GB")
+lines.append(f"Expired     : {days} days")
+lines.append(f"Valid Until : {expired_at}")
+lines.append(f"Created     : {created_at}")
+lines.append(f"IP Limit    : {'ON' if ip_enabled else 'OFF'}" + (f" ({ip_limit_int})" if ip_enabled else ""))
+if speed_enabled:
+  lines.append(f"Speed Limit : ON (DOWN {fmt_mbit(speed_down_mbit)} Mbps | UP {fmt_mbit(speed_up_mbit)} Mbps)")
+else:
+  lines.append("Speed Limit : OFF")
+lines.append("")
+lines.append("Links Import:")
+lines.append(f"  WebSocket   : {links.get('ws', '-')}")
+lines.append(f"  HTTPUpgrade : {links.get('httpupgrade', '-')}")
+lines.append(f"  gRPC        : {links.get('grpc', '-')}")
+lines.append("")
+
+os.makedirs(os.path.dirname(acc_file) or ".", exist_ok=True)
+with open(acc_file, "w", encoding="utf-8") as f:
+  f.write("\n".join(lines))
+PY
+  rc=$?
+  set -e
+
+  if (( rc == 20 )); then
+    warn "Credential ${username}@${proto} tidak ditemukan, skip refresh account info."
+    return 1
+  fi
+  if (( rc != 0 )); then
+    warn "Gagal refresh XRAY ACCOUNT INFO untuk ${username}@${proto}"
+    return 1
+  fi
+
+  chmod 600 "${acc_file}" 2>/dev/null || true
+  return 0
+}
+
+account_info_refresh_warn() {
+  # args: protocol username
+  local proto="$1"
+  local username="$2"
+  if ! account_info_refresh_for_user "${proto}" "${username}"; then
+    warn "XRAY ACCOUNT INFO belum sinkron untuk ${username}@${proto}"
+    return 1
+  fi
+  return 0
+}
+
+account_refresh_all_info_files() {
+  # args: [domain] [ip]
+  local domain="${1:-}"
+  local ip="${2:-}"
+
+  ensure_account_quota_dirs
+  [[ -n "${domain}" ]] || domain="$(detect_domain)"
+  [[ -n "${ip}" ]] || ip="$(detect_public_ip_ipapi)"
+
+  account_collect_files
+  if (( ${#ACCOUNT_FILES[@]} == 0 )); then
+    return 0
+  fi
+
+  local i proto username updated=0 failed=0
+  for i in "${!ACCOUNT_FILES[@]}"; do
+    proto="${ACCOUNT_FILE_PROTOS[$i]}"
+    username="$(account_parse_username_from_file "${ACCOUNT_FILES[$i]}" "${proto}")"
+    [[ -n "${username}" ]] || continue
+    if account_info_refresh_for_user "${proto}" "${username}" "${domain}" "${ip}"; then
+      updated=$((updated + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done
+
+  log "Refresh XRAY ACCOUNT INFO: updated=${updated}, failed=${failed}"
+  if (( failed > 0 )); then
+    return 1
+  fi
+  return 0
+}
+
 
 delete_one_file() {
   local f="$1"
@@ -5047,6 +5478,7 @@ quota_edit_flow() {
           svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
           log "IP limit: ON"
         fi
+        account_info_refresh_warn "${proto}" "${speed_username}" || true
         pause
         ;;
       6)
@@ -5062,6 +5494,7 @@ quota_edit_flow() {
         quota_atomic_update_file "${qf}" "d.setdefault('status',{}); d['status']['ip_limit']=int(${lim})"
         svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP limit diubah: ${lim}"
+        account_info_refresh_warn "${proto}" "${speed_username}" || true
         pause
         ;;
       7)
@@ -5089,6 +5522,7 @@ quota_edit_flow() {
           quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
         fi
         log "Speed download diubah: ${speed_down_input} Mbps"
+        account_info_refresh_warn "${proto}" "${speed_username}" || true
         pause
         ;;
       9)
@@ -5107,6 +5541,7 @@ quota_edit_flow() {
           quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
         fi
         log "Speed upload diubah: ${speed_up_input} Mbps"
+        account_info_refresh_warn "${proto}" "${speed_username}" || true
         pause
         ;;
       10)
@@ -5116,6 +5551,7 @@ quota_edit_flow() {
           quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_limit_enabled']=False"
           quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
           log "Speed limit: OFF"
+          account_info_refresh_warn "${proto}" "${speed_username}" || true
           pause
           continue
         fi
@@ -5145,6 +5581,7 @@ quota_edit_flow() {
         quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_down_mbit']=float(${speed_down_now}); st['speed_up_mbit']=float(${speed_up_now}); st['speed_limit_enabled']=True"
         quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
         log "Speed limit: ON"
+        account_info_refresh_warn "${proto}" "${speed_username}" || true
         pause
         ;;
       *)

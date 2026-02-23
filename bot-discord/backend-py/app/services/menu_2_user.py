@@ -15,4 +15,14 @@ def handle(action: str, params: dict, settings) -> dict:
         title, msg = system.op_user_search(query_or_err)
         return ok_response(title, msg)
 
+    if action == "account_info":
+        ok_p, proto_or_err = require_param(params, "proto", "User Management - Account Info")
+        if not ok_p:
+            return proto_or_err
+        ok_u, user_or_err = require_param(params, "username", "User Management - Account Info")
+        if not ok_u:
+            return user_or_err
+        title, msg = system.op_account_info(proto_or_err.lower(), user_or_err)
+        return ok_response(title, msg)
+
     return error_response("unknown_action", "User Management", f"Action tidak dikenal: {action}")
