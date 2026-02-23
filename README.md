@@ -7,9 +7,10 @@
 ![Xray](https://img.shields.io/badge/Xray-Core-Operational-1F6FEB)
 ![Mode](https://img.shields.io/badge/Mode-Menu%20Driven-2EA043)
 
-`setup.sh` dipakai sekali untuk provisioning. `manage.sh` dipakai terus untuk operasi harian.
+`setup.sh` dipakai sekali untuk provisioning. `manage.sh` dipakai terus untuk operasi harian.  
+Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan interaksi tombol dan modal.
 
-[Quick Install](#quick-install-root) | [Fitur manage.sh](#fitur-unggulan-managesh) | [Daemon Runtime](#daemon-runtime) | [Troubleshooting](#troubleshooting-cepat)
+[Quick Install](#quick-install-root) | [Fitur Utama](#fitur-utama-highlight) | [Fitur manage.sh](#fitur-unggulan-managesh) | [Bot Discord](#fitur-bot-discord-standalone) | [Troubleshooting](#troubleshooting-cepat)
 
 ## Kenapa Project Ini
 | Nilai Utama | Penjelasan Singkat |
@@ -18,6 +19,13 @@
 | Operasional terpusat | User, quota, speed, routing, domain, dan security di satu panel |
 | Aman untuk runtime changes | Ada validasi config, lock file, dan pemisahan setup vs daily operations |
 | Ramah admin | Status realtime server tampil di header menu utama |
+
+## Fitur Utama (Highlight)
+- One-time provisioning lengkap via `setup.sh`: Xray, Nginx, TLS, WARP, daemon runtime.
+- Operasional harian terpusat via `manage.sh` menu 1-9 (status, user, quota, network, security, maintenance).
+- Bot Discord standalone dengan UX interaktif tombol/modal (`/panel` sebagai entry point minimal).
+- Installer bot terpisah (`install-discord-bot.sh`) dengan mode menu + quick setup all-in-one.
+- Deploy source bot memakai verifikasi checksum archive sebelum extract (lebih aman dari archive corrupt/tampered).
 
 ## Quick Install (Root)
 ```bash
@@ -43,7 +51,7 @@ flowchart LR
 | `setup.sh` | One-time setup dari nol sampai service aktif |
 | `manage.sh` | Menu operasional harian (runtime changes) |
 | `run.sh` | Bootstrap installer cepat |
-| `tc-limit.sh` | Helper pembatasan bandwidth berbasis tc |
+| `install-discord-bot.sh` | Installer bot Discord standalone (menu + quick setup) |
 
 ## Fitur Unggulan `manage.sh`
 `manage.sh` adalah pusat kontrol runtime untuk pekerjaan harian admin.
@@ -80,7 +88,7 @@ Header realtime di Main Menu menampilkan:
 | `6) Speedtest` | Jalankan Ookla speedtest + cek versi | Verifikasi performa jaringan cepat |
 | `7) Security` | TLS ops, fail2ban, hardening status | Meningkatkan keamanan operasional |
 | `8) Maintenance` | Restart service/daemon, tail log, wireproxy status | Maintenance tanpa keluar panel |
-| `9) Install BOT Discord` | Placeholder menu integrasi bot | Slot ekspansi fitur berikutnya |
+| `9) Install BOT Discord` | Launcher installer bot standalone (`/usr/local/bin/install-discord-bot`) | Setup, deploy, update, restart, dan uninstall bot dari menu |
 
 ### Detail Penting: `3) Quota & Access Control`
 ```text
@@ -111,6 +119,16 @@ Status detail akun menampilkan:
 - WARP controls: global, per-user, per-protocol inbound, per-domain/geosite
 - WARP tier management: `Target Tier` dan `Live Tier`
 - DNS settings + advanced DNS editor
+
+## Fitur Bot Discord (Standalone)
+Bot Discord berada di `bot-discord/` dan sengaja berdiri sendiri (tidak mengeksekusi `manage.sh`).
+
+Highlight kemampuan:
+- UX Discord: dominan button/modal, slash command minimal (`/panel`).
+- Cakupan menu mengikuti pola `manage.sh` (menu 1-9) agar familiar untuk admin.
+- Arsitektur terpisah gateway TypeScript (`discord.js`) + backend Python (`FastAPI`).
+- Role-based access lewat `DISCORD_ADMIN_ROLE_IDS` dan `DISCORD_ADMIN_USER_IDS`.
+- Deploy produksi via `install-discord-bot.sh` ke `/opt/bot-discord` + systemd service terpisah.
 
 ## Ringkasan `setup.sh` (One-Time)
 `setup.sh` menangani provisioning awal end-to-end:
