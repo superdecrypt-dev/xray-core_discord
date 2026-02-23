@@ -4,7 +4,7 @@
 
 ![Shell](https://img.shields.io/badge/Shell-Bash-121011?logo=gnu-bash)
 ![OS](https://img.shields.io/badge/OS-Ubuntu%20%2F%20Debian-0B3D91)
-![Xray](https://img.shields.io/badge/Xray-Core-Operational-1F6FEB)
+![Xray](https://img.shields.io/badge/Xray%20Core-Operational-1F6FEB)
 ![Mode](https://img.shields.io/badge/Mode-Menu%20Driven-2EA043)
 
 `setup.sh` dipakai sekali untuk provisioning. `manage.sh` dipakai terus untuk operasi harian.  
