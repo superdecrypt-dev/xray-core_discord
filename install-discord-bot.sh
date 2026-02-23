@@ -12,12 +12,23 @@ on_err() {
 }
 trap on_err ERR
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+if [[ -t 1 ]]; then
+  UI_RESET='\033[0m'
+  UI_BOLD='\033[1m'
+  UI_ACCENT='\033[0;36m'
+  UI_MUTED='\033[0;37m'
+  UI_WARN='\033[1;33m'
+  UI_ERR='\033[0;31m'
+  UI_OK='\033[0;32m'
+else
+  UI_RESET=''
+  UI_BOLD=''
+  UI_ACCENT=''
+  UI_MUTED=''
+  UI_WARN=''
+  UI_ERR=''
+  UI_OK=''
+fi
 
 BOT_HOME="${BOT_HOME:-/opt/bot-discord}"
 BOT_ENV_DIR="${BOT_ENV_DIR:-/etc/xray-discord-bot}"
@@ -52,14 +63,26 @@ OS_DEPS=(
   npm
 )
 
-log() { echo -e "${CYAN}[bot-installer]${NC} $*"; }
-ok() { echo -e "${GREEN}[OK]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
-die() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+log() { echo -e "${UI_ACCENT}[bot-installer]${UI_RESET} $*"; }
+ok() { echo -e "${UI_OK}[OK]${UI_RESET} $*"; }
+warn() { echo -e "${UI_WARN}[WARN]${UI_RESET} $*" >&2; }
+die() { echo -e "${UI_ERR}[ERROR]${UI_RESET} $*" >&2; exit 1; }
 BACK_INPUT_SENTINEL="__BACK__$(date +%s%N)_${RANDOM}_${RANDOM}__"
 CONFIGURE_ENV_CANCELLED=0
 
-hr() { echo "------------------------------------------------------------"; }
+hr() {
+  local w="${COLUMNS:-80}"
+  local line
+  if [[ ! "${w}" =~ ^[0-9]+$ ]]; then
+    w=80
+  fi
+  if (( w < 60 )); then
+    w=60
+  fi
+  printf -v line '%*s' "${w}" ''
+  line="${line// /-}"
+  echo -e "${UI_MUTED}${line}${UI_RESET}"
+}
 
 safe_clear() {
   if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
@@ -68,7 +91,25 @@ safe_clear() {
 }
 
 pause() {
-  read -r -p "Tekan Enter untuk melanjutkan..." _ || true
+  read -r -p "Tekan ENTER untuk kembali..." _ || true
+}
+
+run_action() {
+  # Jalankan aksi dalam subshell agar error tidak langsung menutup menu.
+  # args: label cmd...
+  local label="$1"
+  shift || true
+
+  local rc=0
+  set +e
+  ( set -euo pipefail; "$@" )
+  rc=$?
+  set -euo pipefail
+
+  if (( rc != 0 )); then
+    warn "${label} gagal (rc=${rc})."
+  fi
+  return 0
 }
 
 is_back_choice() {
@@ -792,10 +833,13 @@ quick_setup_all_in_one() {
 
 show_header() {
   safe_clear
-  echo -e "${BOLD}Instal Bot Discord${NC}"
-  echo "Target deploy : ${BOT_HOME}"
-  echo "Env file      : ${BOT_ENV_FILE}"
-  echo "Source archive: ${SRC_ARCHIVE_URL}"
+  echo -e "${UI_BOLD}${UI_ACCENT}Xray Discord Bot Installer${UI_RESET}"
+  echo -e "${UI_MUTED}Host: $(hostname) | Script: ${0##*/}${UI_RESET}"
+  hr
+  echo -e "${UI_BOLD}${UI_ACCENT}Main Menu${UI_RESET}"
+  echo -e "${UI_MUTED}Target deploy : ${BOT_HOME}${UI_RESET}"
+  echo -e "${UI_MUTED}Env file      : ${BOT_ENV_FILE}${UI_RESET}"
+  echo -e "${UI_MUTED}Source archive: ${SRC_ARCHIVE_URL}${UI_RESET}"
   hr
 }
 
@@ -803,31 +847,34 @@ menu_loop() {
   need_root
   while true; do
     show_header
-    echo "  1) Quick Setup Bot Discord (All-in-One)"
-    echo "  2) Install Dependencies"
-    echo "  3) Configure Bot (.env)"
-    echo "  4) Ganti Discord Bot Token"
-    echo "  5) Deploy/Update Bot Files"
-    echo "  6) Install/Update systemd Services"
-    echo "  7) Start/Restart Services"
-    echo "  8) Status Services"
-    echo "  9) View Logs"
-    echo " 10) Uninstall Bot (Clean, keep packages)"
-    echo "  0) Kembali"
+    echo -e "  ${UI_ACCENT}1)${UI_RESET} Quick Setup Bot Discord (All-in-One)"
+    echo -e "  ${UI_ACCENT}2)${UI_RESET} Install Dependencies"
+    echo -e "  ${UI_ACCENT}3)${UI_RESET} Configure Bot (.env)"
+    echo -e "  ${UI_ACCENT}4)${UI_RESET} Ganti Discord Bot Token"
+    echo -e "  ${UI_ACCENT}5)${UI_RESET} Deploy/Update Bot Files"
+    echo -e "  ${UI_ACCENT}6)${UI_RESET} Install/Update systemd Services"
+    echo -e "  ${UI_ACCENT}7)${UI_RESET} Start/Restart Services"
+    echo -e "  ${UI_ACCENT}8)${UI_RESET} Status Services"
+    echo -e "  ${UI_ACCENT}9)${UI_RESET} View Logs"
+    echo -e " ${UI_ACCENT}10)${UI_RESET} Uninstall Bot (Clean, keep packages)"
+    echo -e "  ${UI_ACCENT}0)${UI_RESET} Kembali"
     hr
-    read -r -p "Pilih: " c || true
+    if ! read -r -p "Pilih: " c; then
+      echo
+      return 0
+    fi
 
     case "${c}" in
-      1) quick_setup_all_in_one; pause ;;
-      2) install_dependencies; pause ;;
-      3) configure_env_interactive; pause ;;
-      4) change_discord_token; pause ;;
-      5) deploy_or_update_files; pause ;;
-      6) install_or_update_systemd; pause ;;
-      7) start_or_restart_services; pause ;;
-      8) status_services; pause ;;
-      9) view_logs_menu; pause ;;
-      10) uninstall_bot; pause ;;
+      1) run_action "Quick Setup Bot Discord" quick_setup_all_in_one; pause ;;
+      2) run_action "Install Dependencies" install_dependencies; pause ;;
+      3) run_action "Configure Bot (.env)" configure_env_interactive; pause ;;
+      4) run_action "Ganti Discord Bot Token" change_discord_token; pause ;;
+      5) run_action "Deploy/Update Bot Files" deploy_or_update_files; pause ;;
+      6) run_action "Install/Update systemd Services" install_or_update_systemd; pause ;;
+      7) run_action "Start/Restart Services" start_or_restart_services; pause ;;
+      8) run_action "Status Services" status_services; pause ;;
+      9) run_action "View Logs" view_logs_menu; pause ;;
+      10) run_action "Uninstall Bot" uninstall_bot; pause ;;
       0|back|kembali|k|b) return 0 ;;
       *) warn "Pilihan tidak valid."; sleep 1 ;;
     esac
