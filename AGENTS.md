@@ -1,10 +1,10 @@
 # Repository Guidelines
 
 ## Struktur Proyek & Organisasi Modul
-Repositori ini memiliki dua area utama. Area root berisi skrip operasional server: `setup.sh` (provisioning awal), `manage.sh` (menu harian), `run.sh` (bootstrap installer), `tc-limit.sh` (traffic shaping), dan `install-discord-bot.sh` (installer bot Discord). Area `bot-discord/` adalah stack bot standalone dengan `gateway-ts/` (UI Discord tombol/modal), `backend-py/` (API FastAPI per menu 1-9), `shared/` (kontrak action), `systemd/`, dan `scripts/`.
+Repositori ini memiliki dua area utama. Area root berisi skrip operasional server: `setup.sh` (provisioning awal), `manage.sh` (menu harian), `run.sh` (bootstrap installer), dan `install-discord-bot.sh` (installer bot Discord). Area `bot-discord/` adalah stack bot standalone dengan `gateway-ts/` (UI Discord tombol/modal), `backend-py/` (API FastAPI per menu 1-9), `shared/` (kontrak action), `systemd/`, dan `scripts/`.
 
 ## Build, Test, dan Command Pengembangan
-- `bash -n setup.sh manage.sh run.sh tc-limit.sh install-discord-bot.sh`: validasi syntax skrip shell.
+- `bash -n setup.sh manage.sh run.sh install-discord-bot.sh`: validasi syntax skrip shell.
 - `shellcheck *.sh`: lint shell di root.
 - `sudo bash run.sh`: instalasi cepat (pasang `manage` + `install-discord-bot` ke `/usr/local/bin` lalu jalankan setup).
 - `sudo manage`: buka menu operasional utama.
