@@ -11040,51 +11040,29 @@ daemon_log_tail_show() {
 
 install_discord_bot_menu() {
   local installer_cmd="/usr/local/bin/install-discord-bot"
-  while true; do
-    title
-    echo "9) Install BOT Discord"
+  title
+  echo "9) Install BOT Discord"
+  hr
+
+  if [[ ! -x "${installer_cmd}" ]]; then
+    warn "Installer bot Discord tidak ditemukan / tidak executable:"
+    echo "  ${installer_cmd}"
+    echo
+    echo "Hint: jalankan ulang run.sh agar installer ikut dipasang."
     hr
+    pause
+    return 0
+  fi
 
-    if [[ ! -x "${installer_cmd}" ]]; then
-      warn "Installer bot Discord tidak ditemukan / tidak executable:"
-      echo "  ${installer_cmd}"
-      echo
-      echo "Hint: jalankan ulang run.sh agar installer ikut dipasang."
-      hr
-      pause
-      return 0
-    fi
-
-    echo "  1) Jalankan installer bot Discord"
-    echo "  0) Back (kembali)"
-    echo "  kembali) Back"
+  echo "Menjalankan installer:"
+  echo "  ${installer_cmd} menu"
+  hr
+  if ! "${installer_cmd}" menu; then
+    warn "Installer bot Discord keluar dengan status error."
     hr
-    if ! read -r -p "Pilih (1/0/kembali): " c; then
-      echo
-      return 0
-    fi
-    if is_back_choice "${c}"; then
-      return 0
-    fi
-
-    case "${c}" in
-      1)
-        echo "Menjalankan installer:"
-        echo "  ${installer_cmd}"
-        hr
-        if ! "${installer_cmd}" menu; then
-          warn "Installer bot Discord keluar dengan status error."
-          hr
-          pause
-        fi
-        return 0
-        ;;
-      *)
-        warn "Pilihan tidak valid"
-        sleep 1
-        ;;
-    esac
-  done
+    pause
+  fi
+  return 0
 }
 
 daemon_status_menu() {
