@@ -2,6 +2,12 @@
 
 Dokumen ini menjadi acuan tetap implementasi bot Discord standalone pada repo ini.
 
+## 0) Status Baseline Terkini
+- Identitas repo utama: `superdecrypt-dev/autoscript`.
+- Bootstrap source server oleh `run.sh`: clone/update ke `/opt/autoscript`.
+- Deploy runtime bot tetap terpisah di `/opt/bot-discord` (tidak berubah).
+- Installer bot default mengunduh archive dari repo `autoscript`.
+
 ## 1) Prinsip Dasar
 - Bot Discord berdiri sendiri dan **tidak mengeksekusi `manage.sh`**.
 - Perilaku menu mengikuti struktur CLI `manage.sh` (menu 1-8), tetapi eksekusi action dilakukan oleh backend bot.
@@ -84,12 +90,18 @@ Script test otomatis:
 - `scripts/gate-all.sh local` menjalankan Gate 1-3.
 - `scripts/gate-all.sh prod` menjalankan Gate 3.1, 5, 6.
 - `scripts/gate-all.sh all` menjalankan Gate 1-6 (Gate 4 via `STAGING_INSTANCE`).
+- SOP lengkap pengujian lintas shell script + bot Discord terdokumentasi di `../TESTING_PLAYBOOK.md`.
 
 Script keamanan:
 - `scripts/rotate-discord-token.sh` untuk rotasi `DISCORD_BOT_TOKEN` via prompt tersembunyi, update env file, lalu restart gateway.
 
 Script monitoring:
 - `scripts/monitor-lite.sh` mengecek backend/gateway/health dan mencatat ringkas ke `/var/log/xray-discord-bot/monitor-lite.log`.
+
+Ketentuan UX gateway (terkini):
+- Respons private interaction menggunakan `flags: MessageFlags.Ephemeral` (menghindari warning deprecate).
+- Output action panjang dipotong per chunk agar tidak spam di perangkat mobile.
+- Menu bot hanya operasional 1-8; instalasi bot tetap melalui CLI installer terpisah.
 
 ## 4) Lokasi Deploy & Integrasi Root Script
 - Lokasi bot terpasang: `/opt/bot-discord`

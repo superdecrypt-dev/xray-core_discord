@@ -1,5 +1,41 @@
 # Release Notes
 
+## Update Handoff 2026-02-23
+
+### Ringkasan
+Update ini mencatat perubahan identitas proyek ke `autoscript`, pembaruan source path installer, dan perapihan UX bot Discord agar lebih profesional dan minim spam output.
+
+### Perubahan Utama
+1. Rebranding Proyek ke Autoscript
+- Remote/identitas repo dipindah ke `superdecrypt-dev/autoscript`.
+- Referensi URL source pada `run.sh`, `install-discord-bot.sh`, dan `README.md` disesuaikan.
+
+2. Perubahan Source Working Directory Installer
+- `run.sh` kini memakai source kerja persist di `/opt/autoscript`.
+- Pola clone/update source diperbarui untuk mode deploy server yang lebih konsisten.
+
+3. Perapihan UX Bot Discord
+- Gateway interaction memakai `flags: MessageFlags.Ephemeral` (mengganti opsi lama yang deprecated).
+- Output result dipotong agar tidak spam panjang di Discord mobile.
+- Copywriting menu/error dipoles agar lebih profesional dan ringkas.
+
+4. Dokumentasi SOP Testing
+- Ditambahkan `TESTING_PLAYBOOK.md` sebagai panduan tunggal pengujian:
+  preflight, smoke, negative/failure, integration, dan gate bot Discord.
+- Dokumen ini dijadikan referensi utama untuk proses handoff agent baru.
+
+### Validasi Tambahan
+- `bash -n run.sh install-discord-bot.sh`: PASS.
+- Build gateway TypeScript: PASS.
+- Gate staging yang terakhir dijalankan:
+  - Gate 4 (Negative/Failure): PASS
+  - Gate 5 (Discord command check): PASS
+  - Gate 6 (Regression read-only menu smoke): PASS
+
+### Catatan Operasional
+- Baseline handoff saat ini mengacu pada repo `autoscript`.
+- Deploy bot tetap di `/opt/bot-discord`; env di `/etc/xray-discord-bot/bot.env`.
+
 ## Rilis 2026-02-23
 
 ### Ringkasan

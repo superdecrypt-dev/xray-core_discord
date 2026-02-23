@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## Identitas Proyek (Terkini)
+- Nama proyek/repo aktif: `autoscript`
+- Remote utama: `https://github.com/superdecrypt-dev/autoscript`
+- Source kerja installer `run.sh` di VPS: `/opt/autoscript`
+- Deploy bot Discord tetap: `/opt/bot-discord`
+
 ## Struktur Proyek & Organisasi Modul
 Repositori ini memiliki dua area utama. Area root berisi skrip operasional server: `setup.sh` (provisioning awal), `manage.sh` (menu harian), `run.sh` (bootstrap installer), dan `install-discord-bot.sh` (installer bot Discord). Area `bot-discord/` adalah stack bot standalone dengan `gateway-ts/` (UI Discord tombol/modal), `backend-py/` (API FastAPI per menu 1-9), `shared/` (kontrak action), `systemd/`, dan `scripts/`.
 
@@ -11,12 +17,14 @@ Repositori ini memiliki dua area utama. Area root berisi skrip operasional serve
 - `sudo /usr/local/bin/install-discord-bot menu`: buka installer bot Discord.
 - `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py')`: cek syntax backend bot.
 - `cd bot-discord/gateway-ts && npm run build`: validasi build gateway TypeScript.
+- `TESTING_PLAYBOOK.md`: SOP pengujian lengkap untuk shell script + bot Discord (preflight, smoke, negative, integration, gate).
 
 ## Gaya Kode & Konvensi Penamaan
 Gunakan Bash strict mode (`set -euo pipefail`) dan pola defensif yang sudah ada (`ok`, `warn`, `die`). Indentasi utama 2 spasi untuk shell. Nama fungsi `snake_case`, konstanta/env `UPPER_SNAKE_CASE`, nama skrip `kebab-case.sh`. Untuk Python/TypeScript bot, gunakan nama modul yang deskriptif per domain menu (`menu_1_status`, `menu_8_maintenance`, dst).
 
 ## Panduan Testing
 Minimum sebelum merge: syntax check + lint shell + smoke check layanan terkait. Untuk perubahan runtime Xray, verifikasi `systemctl status xray xray-expired xray-quota xray-limit-ip xray-speed --no-pager` dan `xray run -test -confdir /usr/local/etc/xray/conf.d`. Untuk bot Discord, uji `backend-py` health endpoint dan alur `/panel` -> button -> modal di server Discord staging.
+Gunakan `TESTING_PLAYBOOK.md` sebagai sumber langkah testing yang baku sebelum rilis.
 
 ## Environment Separation (Wajib)
 Gunakan pemisahan environment agar perubahan aman:
@@ -32,3 +40,14 @@ Ikuti konvensi commit yang sudah dipakai: `feat`, `fix`, `docs`, `chore`, `refac
 Jangan commit token/secret/key. Simpan rahasia pada env file (contoh: `/etc/xray-discord-bot/bot.env`) dan gunakan masking saat ditampilkan. Semua skrip diasumsikan berjalan sebagai root; selalu uji dulu di VPS non-produksi sebelum rollout ke produksi.
 Standar OAuth2 invite bot Discord: gunakan scope `bot` + `applications.commands`, dengan permissions minimum `View Channels`, `Send Messages`, `Embed Links`, `Read Message History` (permission integer `84992`). Hindari permission `Administrator`; tambahkan `Attach Files` hanya jika fitur kirim file log memang dipakai.
 Catatan khusus proyek ini: temuan hardcoded Cloudflare token pada lokasi legacy tertentu diperlakukan sebagai by design (accepted risk) dan diabaikan dalam review rutin, kecuali ada instruksi eksplisit untuk mengubahnya.
+
+## Catatan Handoff (Ringkas)
+- Bot Discord dijaga standalone dan tidak mengeksekusi `manage.sh` secara langsung.
+- Target UX bot: profesional, minim teks tidak perlu, dan anti-spam output panjang.
+- Update gateway terbaru memakai `flags: MessageFlags.Ephemeral` (bukan `ephemeral: true`).
+- Rilis dilakukan lewat staging terlebih dulu; production hanya setelah validasi gate/smoke selesai.
+- SOP validasi lintas shell+bot terpusat di `TESTING_PLAYBOOK.md`.
+
+## Kalimat Anchor Owner (Wajib Lanjutkan Dari Sini)
+- Kalimat referensi wajib: "oke saat ini kamu mengingatnya bahwa menggunakan repo superdecrypt-dev/autoscript".
+- Semua agent baru harus menganggap kalimat di atas sebagai baseline konteks proyek.
