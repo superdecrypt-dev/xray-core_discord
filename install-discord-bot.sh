@@ -31,7 +31,7 @@ GATEWAY_SERVICE="xray-discord-gateway"
 SRC_OWNER="${BOT_SOURCE_OWNER:-superdecrypt-dev}"
 SRC_REPO="${BOT_SOURCE_REPO:-xray-core_discord}"
 SRC_REF="${BOT_SOURCE_REF:-main}"
-SRC_ARCHIVE_URL="${BOT_SOURCE_ARCHIVE_URL:-https://codeload.github.com/${SRC_OWNER}/${SRC_REPO}/tar.gz/${SRC_REF}}"
+SRC_ARCHIVE_URL="${BOT_SOURCE_ARCHIVE_URL:-https://github.com/superdecrypt-dev/xray-core_discord/raw/main/bot-discord.tar.gz}"
 
 OS_DEPS=(
   curl
@@ -630,10 +630,12 @@ uninstall_bot() {
   need_root
   command_exists systemctl || die "systemctl tidak tersedia di host ini."
 
-  echo "Anda akan menghapus instalasi bot Discord dari sistem ini."
+  echo "Anda akan menghapus instalasi bot Discord secara bersih dari sistem ini."
   echo "- Service: ${BACKEND_SERVICE}, ${GATEWAY_SERVICE}"
   echo "- Bot home: ${BOT_HOME}"
   echo "- Env file: ${BOT_ENV_FILE}"
+  echo "- Runtime : ${BOT_STATE_DIR}, ${BOT_LOG_DIR}"
+  echo "- Package OS/runtime (python/node/npm/dll): TIDAK dihapus"
   read -r -p "Ketik HAPUS untuk lanjut (atau kembali): " confirm || true
   if is_back_choice "${confirm}"; then
     warn "Batal uninstall (kembali)."
@@ -651,47 +653,22 @@ uninstall_bot() {
     "/etc/systemd/system/${BACKEND_SERVICE}.service" \
     "/etc/systemd/system/${GATEWAY_SERVICE}.service" >/dev/null 2>&1 || true
 
+  rm -rf \
+    "/etc/systemd/system/${BACKEND_SERVICE}.service.d" \
+    "/etc/systemd/system/${GATEWAY_SERVICE}.service.d" >/dev/null 2>&1 || true
+
   systemctl daemon-reload || true
+  systemctl reset-failed "${BACKEND_SERVICE}" "${GATEWAY_SERVICE}" >/dev/null 2>&1 || true
 
-  local del_rc=0
-  if prompt_yes_no_or_back "Hapus folder bot (${BOT_HOME})"; then
-    assert_safe_delete_target "${BOT_HOME}" "BOT_HOME"
-    rm -rf "${BOT_HOME}"
-    ok "Folder bot dihapus."
-  else
-    del_rc=$?
-    if (( del_rc == 2 )); then
-      warn "Batal uninstall (kembali)."
-      return 0
-    fi
-  fi
+  assert_safe_delete_target "${BOT_HOME}" "BOT_HOME"
+  assert_safe_delete_target "${BOT_ENV_DIR}" "BOT_ENV_DIR"
+  assert_safe_delete_target "${BOT_STATE_DIR}" "BOT_STATE_DIR"
+  assert_safe_delete_target "${BOT_LOG_DIR}" "BOT_LOG_DIR"
 
-  if prompt_yes_no_or_back "Hapus env (${BOT_ENV_DIR})"; then
-    assert_safe_delete_target "${BOT_ENV_DIR}" "BOT_ENV_DIR"
-    rm -rf "${BOT_ENV_DIR}"
-    ok "Folder env dihapus."
-  else
-    del_rc=$?
-    if (( del_rc == 2 )); then
-      warn "Batal uninstall (kembali)."
-      return 0
-    fi
-  fi
+  rm -rf "${BOT_HOME}" "${BOT_ENV_DIR}" "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
+  rm -rf /tmp/bot-discord-src.* >/dev/null 2>&1 || true
 
-  if prompt_yes_no_or_back "Hapus runtime state/log (${BOT_STATE_DIR}, ${BOT_LOG_DIR})"; then
-    assert_safe_delete_target "${BOT_STATE_DIR}" "BOT_STATE_DIR"
-    assert_safe_delete_target "${BOT_LOG_DIR}" "BOT_LOG_DIR"
-    rm -rf "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
-    ok "Folder runtime dihapus."
-  else
-    del_rc=$?
-    if (( del_rc == 2 )); then
-      warn "Batal uninstall (kembali)."
-      return 0
-    fi
-  fi
-
-  ok "Uninstall selesai."
+  ok "Uninstall bersih selesai (package OS/runtime tetap terpasang)."
 }
 
 quick_setup_all_in_one() {
@@ -754,7 +731,7 @@ menu_loop() {
     echo "  7) Start/Restart Services"
     echo "  8) Status Services"
     echo "  9) View Logs"
-    echo " 10) Uninstall Bot"
+    echo " 10) Uninstall Bot (Clean, keep packages)"
     echo "  0) Back"
     hr
     read -r -p "Pilih: " c || true

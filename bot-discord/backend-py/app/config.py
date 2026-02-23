@@ -1,5 +1,17 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+BOT_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_ENV_FILE = BOT_ROOT / ".env"
+
+# In local development, allow reading bot-discord/.env without overriding
+# variables that were already injected by systemd/environment.
+if LOCAL_ENV_FILE.exists():
+    load_dotenv(LOCAL_ENV_FILE, override=False)
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -21,6 +33,13 @@ class Settings:
 _SETTINGS: Settings | None = None
 
 
+def _default_commands_file() -> str:
+    local_commands = BOT_ROOT / "shared" / "commands.json"
+    if local_commands.exists():
+        return str(local_commands)
+    return "/opt/bot-discord/shared/commands.json"
+
+
 def get_settings() -> Settings:
     global _SETTINGS
     if _SETTINGS is None:
@@ -28,7 +47,7 @@ def get_settings() -> Settings:
             internal_shared_secret=os.getenv("INTERNAL_SHARED_SECRET", "").strip(),
             backend_host=os.getenv("BACKEND_HOST", "127.0.0.1").strip(),
             backend_port=int(os.getenv("BACKEND_PORT", "8080")),
-            commands_file=os.getenv("COMMANDS_FILE", "/opt/bot-discord/shared/commands.json").strip(),
+            commands_file=os.getenv("COMMANDS_FILE", _default_commands_file()).strip(),
             enable_dangerous_actions=_get_bool("ENABLE_DANGEROUS_ACTIONS", True),
         )
     return _SETTINGS

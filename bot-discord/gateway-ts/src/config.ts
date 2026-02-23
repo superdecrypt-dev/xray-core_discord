@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import dotenv from "dotenv";
 
 export interface AppConfig {
   token: string;
@@ -11,6 +12,21 @@ export interface AppConfig {
   adminUserIds: Set<string>;
   commandsFile: string;
 }
+
+function loadEnv(): void {
+  const candidates = [
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(__dirname, "../../.env"),
+  ];
+  for (const envPath of candidates) {
+    if (fs.existsSync(envPath)) {
+      dotenv.config({ path: envPath, override: false });
+      return;
+    }
+  }
+}
+
+loadEnv();
 
 function parseSet(input: string | undefined): Set<string> {
   const out = new Set<string>();
