@@ -22,6 +22,7 @@ import { sendActionResult } from "./result";
 import { createUserContextToken } from "./user_context_state";
 
 const USER_SELECT_PAGE_SIZE = 25;
+const INVALID_INTERACTION_MSG = "Pilihan tidak valid atau kadaluarsa. Silakan ulangi dari menu.";
 
 function toButtonStyle(style: MenuActionDef["style"]): ButtonStyle {
   switch (style) {
@@ -253,7 +254,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
     const [, menuId, actionId, protoRaw, pageRaw = "0"] = id.split(":");
     const proto = String(protoRaw || "").trim().toLowerCase();
     if (!isXrayProtocol(proto)) {
-      await interaction.reply({ content: "Protocol tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
     const page = Number.parseInt(pageRaw, 10);
@@ -271,7 +272,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
     const [, menuId, actionId] = id.split(":");
     const action = findAction(menuId, actionId);
     if (!action || action.mode !== "modal" || !action.modal) {
-      await interaction.reply({ content: "Action modal tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
     const hasProto = actionHasProtoField(action);
@@ -308,7 +309,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
 
     const action = findAction(menuId, actionId);
     if (!action) {
-      await interaction.reply({ content: "Action tidak ditemukan.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -332,7 +333,7 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
     const token = id.split(":")[1] || "";
     const pending = consumePendingConfirm(token);
     if (!pending) {
-      await interaction.reply({ content: "Konfirmasi kadaluarsa. Ulangi aksi dari menu.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
 

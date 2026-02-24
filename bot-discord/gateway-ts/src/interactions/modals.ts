@@ -21,6 +21,7 @@ type ParsedFormCustomId = {
   presetUsername: string;
   presetSelectToken: string;
 };
+const INVALID_INTERACTION_MSG = "Pilihan tidak valid atau kadaluarsa. Silakan ulangi dari menu.";
 
 function parseFormCustomId(customId: string): ParsedFormCustomId | null {
   if (!customId.startsWith("form:")) {
@@ -114,7 +115,7 @@ export async function handleModal(interaction: ModalSubmitInteraction, backend: 
   const { menuId, actionId, presetProto, presetUsername, presetSelectToken } = parsedId;
   const action = findAction(menuId, actionId);
   if (!action || action.mode !== "modal" || !action.modal) {
-    await interaction.reply({ content: "Modal action tidak valid.", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
     return true;
   }
 
@@ -152,7 +153,7 @@ export async function handleModal(interaction: ModalSubmitInteraction, backend: 
 
   if (needsProtocolSelect) {
     if (!isXrayProtocol(selectedProto)) {
-      await interaction.reply({ content: "Protocol tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
     params.proto = selectedProto;
@@ -161,17 +162,17 @@ export async function handleModal(interaction: ModalSubmitInteraction, backend: 
   if (needsUsernameSelect) {
     const selectedUsernameRaw = String(presetUsername || params.username || "").trim();
     if (!selectedUsernameRaw) {
-      await interaction.reply({ content: "Username tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
     const resolvedUser = resolveUserContext(selectedUsernameRaw, selectedProto);
     if (isUserContextToken(selectedUsernameRaw) && !resolvedUser) {
-      await interaction.reply({ content: "Context username kadaluarsa. Ulangi aksi dari menu.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
     const selectedUsername = String(resolvedUser?.username || selectedUsernameRaw).trim();
     if (!selectedUsername) {
-      await interaction.reply({ content: "Username tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
     if (!selectedProto && resolvedUser?.proto) {

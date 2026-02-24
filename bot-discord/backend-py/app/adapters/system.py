@@ -143,34 +143,62 @@ def op_status_overview() -> tuple[str, str]:
 def op_xray_test() -> tuple[bool, str, str]:
     cmd = ["xray", "run", "-test", "-confdir", str(XRAY_CONFDIR)]
     ok, out = run_cmd(cmd, timeout=20)
+    title = "Xray Config Test"
+
+    lines = [line.strip() for line in str(out or "").splitlines() if line.strip()]
+    deprec_re = re.compile(r"common/errors:\s*The feature .* is deprecated", re.IGNORECASE)
+    deprec_lines = [line for line in lines if deprec_re.search(line)]
+    normal_lines = [line for line in lines if not deprec_re.search(line) and not line.startswith("[exit ")]
+
     if ok:
-        return (
-            True,
-            "Xray Config Test",
+        msg = (
             "SUCCESS\n"
             "- Konfigurasi Xray valid.\n"
-            "- Detail log tidak ditampilkan di Discord.",
+            "- Detail log tidak ditampilkan di Discord."
+        )
+        if deprec_lines:
+            msg += (
+                f"\n- Ditemukan {len(deprec_lines)} warning deprecation transport legacy "
+                "(WS/HUP/gRPC/VMess/Trojan)."
+            )
+        return True, title, msg
+
+    lower_out = str(out or "").lower()
+    if "command tidak ditemukan: xray" in lower_out:
+        return (
+            False,
+            title,
+            "FAILED\n"
+            "- Binary `xray` tidak ditemukan di host.\n"
+            "- Periksa instalasi Xray dan PATH service backend.",
         )
 
-    error_hint = ""
-    for line in out.splitlines():
-        line = line.strip()
-        if not line or line.startswith("[exit "):
-            continue
-        error_hint = line
-        break
+    if "timeout:" in lower_out:
+        return (
+            False,
+            title,
+            "FAILED\n"
+            "- Test config Xray timeout.\n"
+            "- Coba ulang saat beban server lebih rendah atau cek health service xray.",
+        )
+
+    error_hint = normal_lines[0] if normal_lines else ""
     if len(error_hint) > 180:
         error_hint = error_hint[:177] + "..."
 
     msg = (
         "FAILED\n"
-        "- Konfigurasi Xray tidak valid.\n"
+        "- Test config Xray gagal dijalankan atau konfigurasi tidak valid.\n"
         "- Detail log tidak ditampilkan di Discord.\n"
         "- Cek manual via SSH: xray run -test -confdir /usr/local/etc/xray/conf.d"
     )
+    if deprec_lines:
+        msg += (
+            f"\n- Catatan: terdeteksi {len(deprec_lines)} warning deprecation transport legacy."
+        )
     if error_hint:
         msg += f"\n- Ringkasan error: {error_hint}"
-    return False, "Xray Config Test", msg
+    return False, title, msg
 
 
 def op_tls_info() -> tuple[bool, str, str]:

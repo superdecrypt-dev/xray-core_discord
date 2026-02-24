@@ -1111,14 +1111,14 @@ def _dns_toggle_cache(cfg: dict[str, Any]) -> tuple[bool, str]:
 
 def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str, str]:
     public_paths = {
-        "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
-        "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
-        "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
+        "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc", "xhttp": "/vless-xhttp"},
+        "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc", "xhttp": "/vmess-xhttp"},
+        "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc", "xhttp": "/trojan-xhttp"},
     }
 
     def vless_link(net: str, val: str) -> str:
         q = {"encryption": "none", "security": "tls", "type": net, "sni": domain}
-        if net in {"ws", "httpupgrade"}:
+        if net in {"ws", "httpupgrade", "xhttp"}:
             q["path"] = val or "/"
         elif net == "grpc" and val:
             q["serviceName"] = val
@@ -1126,7 +1126,7 @@ def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str,
 
     def trojan_link(net: str, val: str) -> str:
         q = {"security": "tls", "type": net, "sni": domain}
-        if net in {"ws", "httpupgrade"}:
+        if net in {"ws", "httpupgrade", "xhttp"}:
             q["path"] = val or "/"
         elif net == "grpc" and val:
             q["serviceName"] = val
@@ -1146,7 +1146,7 @@ def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str,
             "tls": "tls",
             "sni": domain,
         }
-        if net in {"ws", "httpupgrade"}:
+        if net in {"ws", "httpupgrade", "xhttp"}:
             obj["path"] = val or "/"
         elif net == "grpc":
             obj["path"] = val or ""
@@ -1156,7 +1156,7 @@ def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str,
 
     links: dict[str, str] = {}
     p = public_paths.get(proto, {})
-    for net in ("ws", "httpupgrade", "grpc"):
+    for net in ("ws", "httpupgrade", "grpc", "xhttp"):
         v = p.get(net, "")
         if proto == "vless":
             links[net] = vless_link(net, v)
@@ -1218,6 +1218,7 @@ def _build_account_text(
             f"  WebSocket   : {links.get('ws', '-')}",
             f"  HTTPUpgrade : {links.get('httpupgrade', '-')}",
             f"  gRPC        : {links.get('grpc', '-')}",
+            f"  XHTTP       : {links.get('xhttp', '-')}",
             "",
         ]
     )
@@ -1458,6 +1459,47 @@ def _refresh_all_account_info(domain: str | None = None, ip: str | None = None) 
                 failed += 1
 
     return updated, failed
+
+
+def _account_info_needs_compat_refresh() -> bool:
+    _ensure_runtime_dirs()
+    for proto in PROTOCOLS:
+        d = ACCOUNT_ROOT / proto
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*.txt")):
+            stem = p.stem
+            expected_suffix = f"@{proto}"
+            is_legacy_name = not stem.endswith(expected_suffix)
+
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return True
+
+            has_links_block = bool(re.search(r"(?m)^Links Import:\s*$", text))
+            has_xhttp_line = bool(re.search(r"(?m)^\s*XHTTP\s*:", text))
+            if is_legacy_name or not has_links_block or not has_xhttp_line:
+                return True
+    return False
+
+
+def op_account_info_compat_refresh_if_needed() -> tuple[bool, str, str]:
+    title = "User Management - Account Info Compat Refresh"
+    if not _account_info_needs_compat_refresh():
+        return True, title, "Skip: format account info sudah kompatibel."
+
+    domain = _detect_domain()
+    ip_override: str | None = None
+    ok_ip, ip_or_err = _get_public_ipv4()
+    if ok_ip:
+        ip_override = str(ip_or_err)
+
+    updated, failed = _refresh_all_account_info(domain=domain, ip=ip_override)
+    msg = f"Compat refresh selesai: updated={updated}, failed={failed}"
+    if failed > 0:
+        return False, title, msg
+    return True, title, msg
 
 
 def _speed_policy_file_path(proto: str, username: str) -> Path:

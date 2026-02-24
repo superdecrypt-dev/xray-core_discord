@@ -25,6 +25,7 @@ import { sendActionResult } from "./result";
 import { createUserContextToken, isUserContextToken, resolveUserContext } from "./user_context_state";
 
 const USER_SELECT_PAGE_SIZE = 25;
+const INVALID_INTERACTION_MSG = "Pilihan tidak valid atau kadaluarsa. Silakan ulangi dari menu.";
 
 function buildUsernameSelectView(menuId: string, actionId: string, proto: string, usernames: string[], pageRaw = 0) {
   const action = findAction(menuId, actionId);
@@ -166,7 +167,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
 
     const protoRaw = String(interaction.values[0] || "").trim().toLowerCase();
     if (!isXrayProtocol(protoRaw)) {
-      await interaction.reply({ content: "Protocol tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -217,7 +218,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
     const selectedValue = String(interaction.values[0] || "").trim();
     const isAllowed = singleFieldSelectCfg.options.some((opt) => opt.value === selectedValue);
     if (!isAllowed) {
-      await interaction.reply({ content: "Nilai pilihan tidak valid.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -226,7 +227,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
     const params: Record<string, string> = { [singleFieldSelectCfg.fieldId]: selectedValue };
     if (needsProtocolSelect && protoFromContext) {
       if (!isXrayProtocol(protoFromContext)) {
-        await interaction.reply({ content: "Protocol tidak valid.", flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
         return true;
       }
       params.proto = protoFromContext;
@@ -234,7 +235,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
     if (needsUsernameSelect && usernameContextRaw) {
       const resolvedUser = resolveUserContext(usernameContextRaw, params.proto || protoFromContext);
       if (!resolvedUser || !resolvedUser.username) {
-        await interaction.reply({ content: "Context username kadaluarsa. Ulangi dari pilih user.", flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
         return true;
       }
       if (!params.proto && resolvedUser.proto) {
@@ -326,21 +327,18 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
 
   const selectedRaw = String(interaction.values[0] || "").trim();
   if (!selectedRaw || selectedRaw === "__none__") {
-    await interaction.reply({ content: "Username tidak valid.", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
     return true;
   }
 
   const protoFromId = String(parts[4] || "").trim().toLowerCase();
   if (needsProtocolSelect && !isXrayProtocol(protoFromId)) {
-    await interaction.reply({ content: "Protocol tidak valid.", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
     return true;
   }
   const resolvedUser = resolveUserContext(selectedRaw, needsProtocolSelect ? protoFromId : "");
   if (!resolvedUser || !resolvedUser.username) {
-    const content = isUserContextToken(selectedRaw)
-      ? "Pilihan user kadaluarsa. Silakan pilih ulang dari daftar user."
-      : "Username tidak valid.";
-    await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: INVALID_INTERACTION_MSG, flags: MessageFlags.Ephemeral });
     return true;
   }
   const selectedUsername = resolvedUser.username;
