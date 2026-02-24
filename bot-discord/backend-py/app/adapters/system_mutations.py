@@ -1,6 +1,7 @@
 import base64
 import grp
 import hashlib
+import ipaddress
 import json
 import os
 import random
@@ -970,6 +971,65 @@ def _dns_set_server_idx(cfg: dict[str, Any], idx: int, value: str) -> None:
         servers[idx] = val
 
 
+def _is_valid_port_text(port_text: str) -> bool:
+    if not port_text.isdigit():
+        return False
+    try:
+        port = int(port_text)
+    except Exception:
+        return False
+    return 1 <= port <= 65535
+
+
+def _is_valid_dns_host(value: str) -> bool:
+    host = str(value or "").strip().lower().strip(".")
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except Exception:
+        pass
+    return bool(DOMAIN_RE.match(host))
+
+
+def _is_valid_dns_server_value(value: str) -> bool:
+    val = str(value or "").strip()
+    if not val:
+        return False
+
+    # Plain IP/FQDN.
+    if _is_valid_dns_host(val):
+        return True
+
+    # IPv4 with explicit port.
+    if ":" in val and val.count(":") == 1:
+        host, port_text = val.rsplit(":", 1)
+        if _is_valid_port_text(port_text) and _is_valid_dns_host(host):
+            return True
+
+    # Bracketed IPv6 with explicit port.
+    m = re.match(r"^\[(.+)\]:(\d{1,5})$", val)
+    if m:
+        host = m.group(1)
+        port_text = m.group(2)
+        if _is_valid_port_text(port_text):
+            try:
+                ipaddress.ip_address(host)
+                return True
+            except Exception:
+                return False
+
+    # URI form (for DoH/DoT style values), e.g. https://dns.google/dns-query.
+    parsed = urllib.parse.urlparse(val)
+    if parsed.scheme and parsed.hostname and _is_valid_dns_host(str(parsed.hostname)):
+        return True
+
+    return False
+
+
 def _apply_dns_transaction(mutator: Any) -> tuple[bool, str]:
     with file_lock(DNS_LOCK_FILE):
         cfg_original: dict[str, Any]
@@ -1009,6 +1069,8 @@ def _dns_set_primary(cfg: dict[str, Any], value: str) -> tuple[bool, str]:
     val = str(value or "").strip()
     if not val:
         return False, "Primary DNS tidak boleh kosong."
+    if not _is_valid_dns_server_value(val):
+        return False, "Primary DNS tidak valid. Gunakan IP/FQDN/URI DNS yang valid."
     _dns_set_server_idx(cfg, 0, val)
     return True, f"Primary DNS di-set ke {val}."
 
@@ -1017,6 +1079,8 @@ def _dns_set_secondary(cfg: dict[str, Any], value: str) -> tuple[bool, str]:
     val = str(value or "").strip()
     if not val:
         return False, "Secondary DNS tidak boleh kosong."
+    if not _is_valid_dns_server_value(val):
+        return False, "Secondary DNS tidak valid. Gunakan IP/FQDN/URI DNS yang valid."
     servers = _dns_servers_list(cfg)
     if len(servers) == 0:
         _dns_set_server_idx(cfg, 0, "1.1.1.1")
