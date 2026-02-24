@@ -51,6 +51,31 @@ safe_realpath() {
   printf '%s\n' "${path}"
 }
 
+repo_has_local_changes() {
+  local dir="$1"
+  git -C "${dir}" diff --quiet --ignore-submodules -- || return 0
+  git -C "${dir}" diff --cached --quiet --ignore-submodules -- || return 0
+  if [[ -n "$(git -C "${dir}" ls-files --others --exclude-standard 2>/dev/null || true)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+reclone_repo_with_backup() {
+  local target="$1"
+  local backup="${target}.backup.$(date +%Y%m%d%H%M%S)"
+
+  warn "Repositori existing memiliki perubahan lokal. Menyimpan backup ke: ${backup}"
+  mv "${target}" "${backup}" || die "Gagal backup repositori lama: ${target}"
+
+  log "Mengkloning ulang repositori bersih ke ${target} ..."
+  if ! git clone --depth=1 "${REPO_URL}" "${target}" 2>&1; then
+    die "Gagal re-clone repositori setelah backup. Backup tersedia di: ${backup}"
+  fi
+  ok "Repositori bersih berhasil dibuat ulang."
+  ok "Backup repositori lama tersimpan di: ${backup}"
+}
+
 # -------------------------
 # Validasi
 # -------------------------
@@ -124,7 +149,12 @@ clone_repo() {
   if [[ -d "${REPO_DIR}/.git" ]]; then
     log "Memperbarui repositori di ${REPO_DIR} ..."
     if ! git -C "${REPO_DIR}" pull --ff-only origin main 2>&1; then
-      die "Gagal update repositori di ${REPO_DIR}. Pastikan repo bersih atau jalankan pada server baru."
+      if repo_has_local_changes "${REPO_DIR}"; then
+        warn "Update gagal karena working tree tidak bersih."
+        reclone_repo_with_backup "${REPO_DIR}"
+        return 0
+      fi
+      die "Gagal update repositori di ${REPO_DIR}. Penyebab bukan perubahan lokal; cek koneksi/remote lalu coba lagi."
     fi
     ok "Repositori berhasil diperbarui."
     return 0

@@ -5017,13 +5017,12 @@ sync_manage_modules_layout() {
   fi
 
   if [[ "${downloaded}" == "1" ]]; then
-    if python3 - "${bundle_file}" "${MANAGE_MODULES_DST_DIR}" "${MANAGE_BIN}" <<'PY'
+    if python3 - "${bundle_file}" "${MANAGE_MODULES_DST_DIR}" "${MANAGE_BIN}" "${SCRIPT_DIR}" <<'PY'
 import os
-import stat
 import sys
 import zipfile
 
-zip_path, dst_root, manage_bin = sys.argv[1:4]
+zip_path, dst_root, manage_bin, local_root = sys.argv[1:5]
 mapping = {
   "env.sh": "core/env.sh",
   "router.sh": "core/router.sh",
@@ -5055,6 +5054,10 @@ def basename_index(names):
       idx[base] = n
   return idx, dup
 
+def read_file(path):
+  with open(path, "rb") as fh:
+    return fh.read()
+
 with zipfile.ZipFile(zip_path, "r") as zf:
   members = [n for n in zf.namelist() if not n.endswith("/")]
   base_map, duplicates = basename_index(members)
@@ -5067,20 +5070,45 @@ with zipfile.ZipFile(zip_path, "r") as zf:
     print("missing module files in zip: " + ", ".join(sorted(missing)), file=sys.stderr)
     raise SystemExit(3)
 
+  payload = {}
   for src_name, dst_rel in mapping.items():
     src_member = base_map[src_name]
+    data = zf.read(src_member)
+    payload[src_name] = data
+
+  manage_data = None
+  if "manage.sh" in base_map:
+    manage_data = zf.read(base_map["manage.sh"])
+
+  # Guard anti bundle stale: jika setup dijalankan dari repo yang punya source lokal,
+  # pastikan isi bundle identik. Jika tidak, paksa fallback ke source lokal.
+  local_manage = os.path.join(local_root, "manage.sh")
+  local_modules_root = os.path.join(local_root, "opt", "manage")
+  mismatch = []
+  if os.path.isfile(local_manage) and manage_data is not None:
+    if read_file(local_manage) != manage_data:
+      mismatch.append("manage.sh")
+  for src_name, dst_rel in mapping.items():
+    local_path = os.path.join(local_modules_root, dst_rel)
+    if os.path.isfile(local_path) and read_file(local_path) != payload[src_name]:
+      mismatch.append(src_name)
+  if mismatch:
+    print("bundle differs from local source: " + ", ".join(sorted(mismatch)), file=sys.stderr)
+    raise SystemExit(4)
+
+  for src_name, dst_rel in mapping.items():
     dst_path = os.path.join(dst_root, dst_rel)
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    data = zf.read(src_member)
     with open(dst_path, "wb") as fh:
-      fh.write(data)
+      fh.write(payload[src_name])
     os.chmod(dst_path, 0o644)
 
-  if "manage.sh" in base_map:
-    manage_member = base_map["manage.sh"]
-    data = zf.read(manage_member)
+  if manage_data is not None:
+    manage_dir = os.path.dirname(manage_bin)
+    if manage_dir:
+      os.makedirs(manage_dir, exist_ok=True)
     with open(manage_bin, "wb") as fh:
-      fh.write(data)
+      fh.write(manage_data)
     os.chmod(manage_bin, 0o755)
 
 for sub in ("core", "features", "menus", "app"):
@@ -5101,9 +5129,8 @@ PY
   fi
 
   if [[ ! -d "${MANAGE_MODULES_SRC_DIR}" ]]; then
-    warn "Template modul lokal tidak ditemukan (${MANAGE_MODULES_SRC_DIR}); lewati sinkronisasi /opt/manage."
     rm -rf "${tmpdir}" >/dev/null 2>&1 || true
-    return 0
+    die "Sinkronisasi modular manage gagal total: bundle gagal/invalid dan source lokal tidak ditemukan (${MANAGE_MODULES_SRC_DIR})."
   fi
 
   mkdir -p "${MANAGE_MODULES_DST_DIR}"
@@ -5111,6 +5138,12 @@ PY
   find "${MANAGE_MODULES_DST_DIR}" -type d -exec chmod 755 {} + 2>/dev/null || true
   find "${MANAGE_MODULES_DST_DIR}" -type f -name '*.sh' -exec chmod 644 {} + 2>/dev/null || true
   chown -R root:root "${MANAGE_MODULES_DST_DIR}" 2>/dev/null || true
+  if [[ -f "${SCRIPT_DIR}/manage.sh" ]]; then
+    mkdir -p "$(dirname "${MANAGE_BIN}")"
+    install -m 0755 "${SCRIPT_DIR}/manage.sh" "${MANAGE_BIN}"
+    chown root:root "${MANAGE_BIN}" 2>/dev/null || true
+    ok "Binary manage disegarkan dari source lokal: ${MANAGE_BIN}"
+  fi
   ok "Template modular manage siap di: ${MANAGE_MODULES_DST_DIR} (fallback lokal)"
   rm -rf "${tmpdir}" >/dev/null 2>&1 || true
 }
