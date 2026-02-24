@@ -76,6 +76,13 @@ SPEED_MARK_MAX=59999
 SPEED_OUTBOUND_TAG_PREFIX="speed-mark-"
 SPEED_RULE_MARKER_PREFIX="dummy-speed-user-"
 SPEED_POLICY_LOCK_FILE="/var/lock/xray-speed-policy.lock"
+XRAY_OBSERVE_BIN="/usr/local/bin/xray-observe"
+XRAY_OBSERVE_CONFIG_FILE="/etc/xray-observe/config.env"
+XRAY_OBSERVE_ALERT_LOG="/var/log/xray-observe/alerts.log"
+XRAY_OBSERVE_REPORT_FILE="/var/lib/xray-observe/last-report.txt"
+XRAY_DOMAIN_GUARD_BIN="/usr/local/bin/xray-domain-guard"
+XRAY_DOMAIN_GUARD_CONFIG_FILE="/etc/xray-domain-guard/config.env"
+XRAY_DOMAIN_GUARD_LOG_FILE="/var/log/xray-observe/domain-guard.log"
 
 # Direktori kerja untuk operasi aman (atomic write)
 WORK_DIR="/var/lib/xray-manage"
@@ -1682,6 +1689,80 @@ domain_control_show_info() {
   pause
 }
 
+domain_control_guard_check() {
+  title
+  echo "5) Domain Control > Domain & Cert Guard Check"
+  hr
+
+  if [[ ! -x "${XRAY_DOMAIN_GUARD_BIN}" ]]; then
+    warn "xray-domain-guard belum terpasang."
+    warn "Jalankan setup.sh terbaru untuk mengaktifkan Domain & Cert Guard."
+    hr
+    pause
+    return 0
+  fi
+
+  local rc=0
+  set +e
+  "${XRAY_DOMAIN_GUARD_BIN}" check
+  rc=$?
+  set -e
+
+  hr
+  case "${rc}" in
+    0) log "Domain & Cert Guard: sehat." ;;
+    1) warn "Domain & Cert Guard: warning terdeteksi." ;;
+    2) warn "Domain & Cert Guard: masalah critical terdeteksi." ;;
+    *) warn "Domain & Cert Guard selesai dengan status ${rc}." ;;
+  esac
+  echo "Config path: ${XRAY_DOMAIN_GUARD_CONFIG_FILE}"
+  if [[ -f "${XRAY_DOMAIN_GUARD_LOG_FILE}" ]]; then
+    echo "Log path   : ${XRAY_DOMAIN_GUARD_LOG_FILE}"
+  fi
+  pause
+}
+
+domain_control_guard_renew_if_needed() {
+  title
+  echo "5) Domain Control > Domain & Cert Guard Renew-if-Needed"
+  hr
+
+  if [[ ! -x "${XRAY_DOMAIN_GUARD_BIN}" ]]; then
+    warn "xray-domain-guard belum terpasang."
+    hr
+    pause
+    return 0
+  fi
+
+  local ask_rc=0
+  if ! confirm_yn_or_back "Jalankan guard renew-if-needed sekarang?"; then
+    ask_rc=$?
+    if (( ask_rc == 2 )); then
+      warn "Dibatalkan dan kembali ke Domain Control."
+      pause
+      return 0
+    fi
+    warn "Dibatalkan oleh pengguna."
+    pause
+    return 0
+  fi
+
+  local rc=0
+  set +e
+  "${XRAY_DOMAIN_GUARD_BIN}" renew-if-needed
+  rc=$?
+  set -e
+
+  hr
+  case "${rc}" in
+    0) log "Renew-if-needed selesai, status sehat." ;;
+    1) warn "Renew-if-needed selesai dengan warning." ;;
+    2) warn "Renew-if-needed selesai, namun masih ada kondisi critical." ;;
+    *) warn "Renew-if-needed selesai dengan status ${rc}." ;;
+  esac
+  pause
+}
+
 domain_control_menu() {
   while true; do
     title
@@ -1689,15 +1770,19 @@ domain_control_menu() {
     hr
     echo -e "  ${UI_ACCENT}1)${UI_RESET} Set Domain + Issue Certificate"
     echo -e "  ${UI_ACCENT}2)${UI_RESET} Show Current Domain"
+    echo -e "  ${UI_ACCENT}3)${UI_RESET} Domain & Cert Guard Check"
+    echo -e "  ${UI_ACCENT}4)${UI_RESET} Domain & Cert Guard Renew-if-Needed"
     echo -e "  ${UI_ACCENT}0)${UI_RESET} Kembali"
     hr
-    if ! read -r -p "Pilih (1-2/0/kembali): " c; then
+    if ! read -r -p "Pilih (1-4/0/kembali): " c; then
       echo
       break
     fi
     case "${c}" in
       1) domain_control_set_domain_now ;;
       2) domain_control_show_info ;;
+      3) domain_control_guard_check ;;
+      4) domain_control_guard_renew_if_needed ;;
       0|kembali|k|back|b) break ;;
       *) invalid_choice ;;
     esac
@@ -2570,6 +2655,110 @@ sanity_check_now() {
   hr
   echo "[OK] Sanity check selesai (lihat WARN bila ada)."
   pause
+}
+
+observability_snapshot_now() {
+  title
+  echo "1) Status & Diagnostics > Observability Snapshot"
+  hr
+
+  if [[ ! -x "${XRAY_OBSERVE_BIN}" ]]; then
+    warn "xray-observe belum terpasang."
+    warn "Jalankan setup.sh terbaru untuk mengaktifkan observability."
+    hr
+    pause
+    return 0
+  fi
+
+  local rc=0
+  set +e
+  "${XRAY_OBSERVE_BIN}" once
+  rc=$?
+  set -e
+
+  hr
+  case "${rc}" in
+    0) log "Observability snapshot: sehat (critical=0)." ;;
+    1) warn "Observability snapshot: ditemukan isu critical (lihat detail di atas)." ;;
+    *) warn "Observability snapshot selesai dengan status ${rc}." ;;
+  esac
+  pause
+}
+
+observability_status_show() {
+  title
+  echo "1) Status & Diagnostics > Observability Status"
+  hr
+
+  if [[ ! -x "${XRAY_OBSERVE_BIN}" ]]; then
+    warn "xray-observe belum terpasang."
+    hr
+    pause
+    return 0
+  fi
+
+  if svc_exists xray-observe.timer; then
+    svc_status_line xray-observe.timer
+    echo "Enable state: $(systemctl is-enabled xray-observe.timer 2>/dev/null || echo unknown)"
+  else
+    warn "xray-observe.timer belum tersedia."
+  fi
+  if svc_exists xray-observe.service; then
+    echo "Service last state: $(systemctl is-active xray-observe.service 2>/dev/null || echo unknown)"
+  fi
+  echo "Config path: ${XRAY_OBSERVE_CONFIG_FILE}"
+  echo "Alert  path: ${XRAY_OBSERVE_ALERT_LOG}"
+  hr
+
+  if [[ -s "${XRAY_OBSERVE_REPORT_FILE}" ]]; then
+    echo "Last report (${XRAY_OBSERVE_REPORT_FILE}):"
+    sed -n '1,80p' "${XRAY_OBSERVE_REPORT_FILE}" || true
+  else
+    warn "Belum ada report observability."
+  fi
+  hr
+  pause
+}
+
+observability_alert_log_show() {
+  title
+  echo "1) Status & Diagnostics > Alert Log"
+  hr
+
+  if [[ -s "${XRAY_OBSERVE_ALERT_LOG}" ]]; then
+    tail -n 80 "${XRAY_OBSERVE_ALERT_LOG}" || true
+  else
+    warn "Log alert observability belum tersedia."
+    echo "Path: ${XRAY_OBSERVE_ALERT_LOG}"
+  fi
+  hr
+  pause
+}
+
+status_diagnostics_menu() {
+  while true; do
+    title
+    echo "1) Status & Diagnostics"
+    hr
+    echo "  1) Sanity Check (core)"
+    echo "  2) Observability Snapshot"
+    echo "  3) Observability Status"
+    echo "  4) View Observability Alert Log"
+    echo "  0) Kembali"
+    hr
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
+    case "${c}" in
+      1) sanity_check_now ;;
+      2) observability_snapshot_now ;;
+      3) observability_status_show ;;
+      4) observability_alert_log_show ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
 }
 
 trap 'domain_control_restore_on_exit' EXIT
@@ -10501,6 +10690,423 @@ speedtest_menu() {
 }
 
 # -------------------------
+# Traffic Analytics
+# - Sumber data: metadata quota /opt/quota/{vless,vmess,trojan}/*.json
+# - Menggunakan quota_used sebagai dasar traffic usage.
+# -------------------------
+traffic_analytics_dataset_build_to_file() {
+  # args: output_json_file
+  local out_file="$1"
+  need_python3
+  python3 - <<'PY' "${QUOTA_ROOT}" "${out_file}" "${QUOTA_PROTO_DIRS[@]}"
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+quota_root = sys.argv[1]
+out_file = sys.argv[2]
+protos = [p.strip() for p in sys.argv[3:] if p.strip()]
+
+def to_int(v, default=0):
+  try:
+    if v is None:
+      return default
+    if isinstance(v, bool):
+      return int(v)
+    if isinstance(v, (int, float)):
+      return int(v)
+    s = str(v).strip()
+    if not s:
+      return default
+    return int(float(s))
+  except Exception:
+    return default
+
+entries = []
+proto_summary = {p: {"users": 0, "used_bytes": 0, "quota_bytes": 0} for p in protos}
+
+for proto in protos:
+  pdir = os.path.join(quota_root, proto)
+  if not os.path.isdir(pdir):
+    continue
+
+  chosen = {}
+  for name in os.listdir(pdir):
+    if not name.endswith(".json"):
+      continue
+    stem = name[:-5]
+    uname = stem.split("@", 1)[0] if "@" in stem else stem
+    key = uname.strip()
+    if not key:
+      continue
+    has_at = "@" in stem
+    prev = chosen.get(key)
+    if prev is None or (has_at and not prev["has_at"]):
+      chosen[key] = {"name": name, "has_at": has_at}
+
+  for uname in sorted(chosen.keys(), key=lambda x: x.lower()):
+    name = chosen[uname]["name"]
+    path = os.path.join(pdir, name)
+    try:
+      with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+      if not isinstance(data, dict):
+        data = {}
+    except Exception:
+      data = {}
+
+    username = str(data.get("username") or uname).strip() or uname
+    used_bytes = to_int(data.get("quota_used"), 0)
+    quota_bytes = to_int(data.get("quota_limit"), 0)
+    if used_bytes < 0:
+      used_bytes = 0
+    if quota_bytes < 0:
+      quota_bytes = 0
+    expired_at = str(data.get("expired_at") or "-")
+
+    entry = {
+      "username": username,
+      "proto": proto,
+      "used_bytes": used_bytes,
+      "quota_bytes": quota_bytes,
+      "expired_at": expired_at,
+      "source_file": path,
+    }
+    entries.append(entry)
+
+    proto_summary[proto]["users"] += 1
+    proto_summary[proto]["used_bytes"] += used_bytes
+    proto_summary[proto]["quota_bytes"] += quota_bytes
+
+entries.sort(key=lambda x: (-int(x["used_bytes"]), str(x["username"]).lower(), str(x["proto"]).lower()))
+
+total_users = len(entries)
+total_used_bytes = sum(int(e["used_bytes"]) for e in entries)
+total_quota_bytes = sum(int(e["quota_bytes"]) for e in entries)
+
+payload = {
+  "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+  "quota_root": quota_root,
+  "total_users": total_users,
+  "total_used_bytes": total_used_bytes,
+  "total_quota_bytes": total_quota_bytes,
+  "protocols": proto_summary,
+  "top_users": entries,
+}
+
+tmp = f"{out_file}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as f:
+  json.dump(payload, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+  f.flush()
+  os.fsync(f.fileno())
+os.replace(tmp, out_file)
+print(out_file)
+PY
+}
+
+traffic_analytics_dataset_make_tmp() {
+  local tmp
+  tmp="$(mktemp "${WORK_DIR}/traffic-analytics.XXXXXX.json")" || die "Gagal membuat file dataset analytics."
+  if ! traffic_analytics_dataset_build_to_file "${tmp}" >/dev/null; then
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  echo "${tmp}"
+}
+
+traffic_analytics_overview_show() {
+  title
+  echo "12) Traffic Analytics > Overview"
+  hr
+
+  local dataset
+  if ! dataset="$(traffic_analytics_dataset_make_tmp)"; then
+    warn "Gagal membangun dataset traffic analytics."
+    hr
+    pause
+    return 0
+  fi
+
+  need_python3
+  python3 - <<'PY' "${dataset}"
+import json
+import sys
+
+path = sys.argv[1]
+try:
+  data = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+  print("Dataset analytics tidak valid.")
+  raise SystemExit(0)
+
+def human_bytes(v):
+  try:
+    n = int(v)
+  except Exception:
+    n = 0
+  if n >= 1024**4:
+    return f"{n/(1024**4):.2f} TiB"
+  if n >= 1024**3:
+    return f"{n/(1024**3):.2f} GiB"
+  if n >= 1024**2:
+    return f"{n/(1024**2):.2f} MiB"
+  if n >= 1024:
+    return f"{n/1024:.2f} KiB"
+  return f"{n} B"
+
+generated = data.get("generated_at_utc") or "-"
+total_users = int(data.get("total_users") or 0)
+total_used = int(data.get("total_used_bytes") or 0)
+total_quota = int(data.get("total_quota_bytes") or 0)
+avg_used = int(total_used / total_users) if total_users > 0 else 0
+
+print(f"Generated UTC : {generated}")
+print(f"Total Users   : {total_users}")
+print(f"Total Used    : {human_bytes(total_used)}")
+print(f"Total Quota   : {human_bytes(total_quota)}")
+print(f"Avg/User Used : {human_bytes(avg_used)}")
+print()
+print("By Protocol:")
+
+protocols = data.get("protocols") or {}
+for proto in ("vless", "vmess", "trojan"):
+  info = protocols.get(proto) or {}
+  users = int(info.get("users") or 0)
+  used = int(info.get("used_bytes") or 0)
+  quota = int(info.get("quota_bytes") or 0)
+  print(f"  {proto.upper():<6} users={users:<4} used={human_bytes(used):<12} quota={human_bytes(quota)}")
+
+print()
+print("Top 5 Users:")
+top = (data.get("top_users") or [])[:5]
+if not top:
+  print("  (kosong)")
+else:
+  for i, row in enumerate(top, start=1):
+    user = str(row.get("username") or "-")
+    proto = str(row.get("proto") or "-").upper()
+    used = human_bytes(row.get("used_bytes") or 0)
+    print(f"  {i:>2}. {user:<20} {proto:<6} {used}")
+PY
+
+  rm -f "${dataset}" >/dev/null 2>&1 || true
+  hr
+  pause
+}
+
+traffic_analytics_top_users_show() {
+  title
+  echo "12) Traffic Analytics > Top Users by Usage"
+  hr
+
+  local n
+  read -r -p "Tampilkan top berapa user? (default 15, max 200, atau kembali): " n
+  if is_back_choice "${n}"; then
+    return 0
+  fi
+  if [[ -z "${n}" ]]; then
+    n=15
+  fi
+  [[ "${n}" =~ ^[0-9]+$ ]] || { warn "Input harus angka."; hr; pause; return 0; }
+  if (( n < 1 )); then n=1; fi
+  if (( n > 200 )); then n=200; fi
+
+  local dataset
+  if ! dataset="$(traffic_analytics_dataset_make_tmp)"; then
+    warn "Gagal membangun dataset traffic analytics."
+    hr
+    pause
+    return 0
+  fi
+
+  need_python3
+  python3 - <<'PY' "${dataset}" "${n}"
+import json
+import sys
+
+path, top_n = sys.argv[1], int(sys.argv[2])
+try:
+  data = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+  print("Dataset analytics tidak valid.")
+  raise SystemExit(0)
+
+def human_bytes(v):
+  try:
+    n = int(v)
+  except Exception:
+    n = 0
+  if n >= 1024**4:
+    return f"{n/(1024**4):.2f} TiB"
+  if n >= 1024**3:
+    return f"{n/(1024**3):.2f} GiB"
+  if n >= 1024**2:
+    return f"{n/(1024**2):.2f} MiB"
+  if n >= 1024:
+    return f"{n/1024:.2f} KiB"
+  return f"{n} B"
+
+rows = (data.get("top_users") or [])[:top_n]
+if not rows:
+  print("Belum ada data traffic user.")
+  raise SystemExit(0)
+
+print(f"{'NO':<4} {'PROTO':<8} {'USERNAME':<20} {'USED':<12} {'QUOTA':<12} {'USE%':>6} {'EXPIRED':<10}")
+print(f"{'-'*4:<4} {'-'*8:<8} {'-'*20:<20} {'-'*12:<12} {'-'*12:<12} {'-'*6:>6} {'-'*10:<10}")
+for i, row in enumerate(rows, start=1):
+  proto = str(row.get("proto") or "-").upper()
+  user = str(row.get("username") or "-")
+  used = int(row.get("used_bytes") or 0)
+  quota = int(row.get("quota_bytes") or 0)
+  exp = str(row.get("expired_at") or "-")[:10]
+  if quota > 0:
+    pct = f"{(used * 100.0 / quota):.1f}"
+  else:
+    pct = "-"
+  print(f"{i:<4} {proto:<8} {user[:20]:<20} {human_bytes(used):<12} {human_bytes(quota):<12} {pct:>6} {exp:<10}")
+PY
+
+  rm -f "${dataset}" >/dev/null 2>&1 || true
+  hr
+  pause
+}
+
+traffic_analytics_search_user_show() {
+  title
+  echo "12) Traffic Analytics > Search User Traffic"
+  hr
+
+  local q
+  read -r -p "Cari username/proto (atau kembali): " q
+  if is_back_choice "${q}"; then
+    return 0
+  fi
+  q="$(echo "${q}" | awk '{$1=$1;print}')"
+  [[ -n "${q}" ]] || { warn "Keyword kosong."; hr; pause; return 0; }
+
+  local dataset
+  if ! dataset="$(traffic_analytics_dataset_make_tmp)"; then
+    warn "Gagal membangun dataset traffic analytics."
+    hr
+    pause
+    return 0
+  fi
+
+  need_python3
+  python3 - <<'PY' "${dataset}" "${q}"
+import json
+import sys
+
+path, query = sys.argv[1], sys.argv[2].strip().lower()
+try:
+  data = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+  print("Dataset analytics tidak valid.")
+  raise SystemExit(0)
+
+def human_bytes(v):
+  try:
+    n = int(v)
+  except Exception:
+    n = 0
+  if n >= 1024**4:
+    return f"{n/(1024**4):.2f} TiB"
+  if n >= 1024**3:
+    return f"{n/(1024**3):.2f} GiB"
+  if n >= 1024**2:
+    return f"{n/(1024**2):.2f} MiB"
+  if n >= 1024:
+    return f"{n/1024:.2f} KiB"
+  return f"{n} B"
+
+rows = []
+for row in (data.get("top_users") or []):
+  username = str(row.get("username") or "")
+  proto = str(row.get("proto") or "")
+  token = f"{username}@{proto}".lower()
+  if query in token:
+    rows.append(row)
+
+if not rows:
+  print("Tidak ada user yang cocok dengan keyword.")
+  raise SystemExit(0)
+
+print(f"Ditemukan {len(rows)} user.")
+print(f"{'NO':<4} {'PROTO':<8} {'USERNAME':<20} {'USED':<12} {'QUOTA':<12} {'USE%':>6} {'EXPIRED':<10}")
+print(f"{'-'*4:<4} {'-'*8:<8} {'-'*20:<20} {'-'*12:<12} {'-'*12:<12} {'-'*6:>6} {'-'*10:<10}")
+for i, row in enumerate(rows[:200], start=1):
+  proto = str(row.get("proto") or "-").upper()
+  user = str(row.get("username") or "-")
+  used = int(row.get("used_bytes") or 0)
+  quota = int(row.get("quota_bytes") or 0)
+  exp = str(row.get("expired_at") or "-")[:10]
+  if quota > 0:
+    pct = f"{(used * 100.0 / quota):.1f}"
+  else:
+    pct = "-"
+  print(f"{i:<4} {proto:<8} {user[:20]:<20} {human_bytes(used):<12} {human_bytes(quota):<12} {pct:>6} {exp:<10}")
+PY
+
+  rm -f "${dataset}" >/dev/null 2>&1 || true
+  hr
+  pause
+}
+
+traffic_analytics_export_json() {
+  title
+  echo "12) Traffic Analytics > Export JSON Report"
+  hr
+
+  local dataset out
+  if ! dataset="$(traffic_analytics_dataset_make_tmp)"; then
+    warn "Gagal membangun dataset traffic analytics."
+    hr
+    pause
+    return 0
+  fi
+
+  out="${REPORT_DIR}/traffic-analytics-$(date +%Y%m%d-%H%M%S).json"
+  if cp -f "${dataset}" "${out}"; then
+    chmod 600 "${out}" >/dev/null 2>&1 || true
+    log "Report tersimpan: ${out}"
+  else
+    warn "Gagal menyimpan report ke: ${out}"
+  fi
+
+  rm -f "${dataset}" >/dev/null 2>&1 || true
+  hr
+  pause
+}
+
+traffic_analytics_menu() {
+  while true; do
+    title
+    echo "12) Traffic Analytics"
+    hr
+    echo "  1) Overview"
+    echo "  2) Top Users by Usage"
+    echo "  3) Search User Traffic"
+    echo "  4) Export JSON Report"
+    echo "  0) Kembali"
+    hr
+    if ! read -r -p "Pilih: " c; then
+      echo
+      break
+    fi
+    case "${c}" in
+      1) traffic_analytics_overview_show ;;
+      2) traffic_analytics_top_users_show ;;
+      3) traffic_analytics_search_user_show ;;
+      4) traffic_analytics_export_json ;;
+      0|kembali|k|back|b) break ;;
+      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+    esac
+  done
+}
+
+# -------------------------
 # Security
 # - TLS & Certificate
 # - Fail2ban Protection
@@ -11472,6 +12078,7 @@ main_menu() {
     echo -e "  ${UI_ACCENT}7)${UI_RESET} Security"
     echo -e "  ${UI_ACCENT}8)${UI_RESET} Maintenance"
     echo -e "  ${UI_ACCENT}9)${UI_RESET} Install BOT Discord"
+    echo -e "  ${UI_ACCENT}12)${UI_RESET} Traffic Analytics"
     echo -e "  ${UI_ACCENT}0)${UI_RESET} Keluar"
     hr
     if ! read -r -p "Pilih: " c; then
@@ -11479,7 +12086,7 @@ main_menu() {
       exit 0
     fi
     case "${c}" in
-      1) run_action "Status & Diagnostics" sanity_check_now ;;
+      1) run_action "Status & Diagnostics" status_diagnostics_menu ;;
       2) run_action "User Management" user_menu ;;
       3) run_action "Quota & Access Control" quota_menu ;;
       4) run_action "Network Controls" network_menu ;;
@@ -11488,6 +12095,7 @@ main_menu() {
       7) run_action "Security" fail2ban_menu ;;
       8) run_action "Maintenance" maintenance_menu ;;
       9) run_action "Install BOT Discord" install_discord_bot_menu ;;
+      12) run_action "Traffic Analytics" traffic_analytics_menu ;;
       0|kembali|k|back|b) exit 0 ;;
       *) invalid_choice ;;
     esac
