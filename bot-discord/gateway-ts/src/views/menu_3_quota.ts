@@ -5,10 +5,10 @@ export const menu3: MenuDefinition = {
   label: "Quota & Access Control",
   description: "Ringkasan kuota dan kontrol akses per pengguna.",
   actions: [
-    { id: "summary", label: "Quota Summary", mode: "direct", style: "primary" },
+    { id: "summary", label: "Quota Summary View", mode: "direct", style: "primary" },
     {
       id: "detail",
-      label: "Quota Detail",
+      label: "Quota Detail View",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -63,7 +63,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "ip_limit_enable",
-      label: "IP Limit ON/OFF",
+      label: "IP Limit Toggle",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -77,7 +77,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "set_ip_limit",
-      label: "Set IP Limit",
+      label: "Set IP Limit Value",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -91,7 +91,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "unlock_ip_lock",
-      label: "Unlock IP Lock",
+      label: "Unlock IP Locked",
       mode: "modal",
       style: "secondary",
       modal: {

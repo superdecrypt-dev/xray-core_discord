@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -366,6 +367,101 @@ def _status_speed_limit(status: dict) -> str:
     return f"ON({_fmt_number(down)}/{_fmt_number(up)} Mbps)"
 
 
+def _fmt_active_period(data: dict) -> str:
+    expired_at = str(data.get("expired_at") or "").strip()[:10]
+    if not expired_at:
+        return "-"
+    try:
+        exp_date = datetime.strptime(expired_at, "%Y-%m-%d").date()
+        remain = max(0, (exp_date - date.today()).days)
+        return f"{remain} hari (sampai {expired_at})"
+    except Exception:
+        return expired_at
+
+
+def _read_account_fields(path: Path) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    if not path.exists():
+        return fields
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            fields[key.strip()] = value.strip()
+    except Exception:
+        return {}
+    return fields
+
+
+def _fmt_active_period_from_account_fields(fields: dict[str, str]) -> str:
+    valid_until = str(fields.get("Valid Until") or "").strip()[:10]
+    if valid_until:
+        try:
+            exp_date = datetime.strptime(valid_until, "%Y-%m-%d").date()
+            remain = max(0, (exp_date - date.today()).days)
+            return f"{remain} hari (sampai {valid_until})"
+        except Exception:
+            return valid_until
+
+    expired_raw = str(fields.get("Expired") or "").strip()
+    if not expired_raw:
+        return "-"
+    match = re.search(r"(\d+)", expired_raw)
+    if not match:
+        return expired_raw
+    try:
+        days = max(0, int(match.group(1)))
+    except Exception:
+        return expired_raw
+    return f"{days} hari"
+
+
+def _fmt_quota_limit_from_account_fields(fields: dict[str, str]) -> str:
+    quota_raw = str(fields.get("Quota Limit") or "").strip()
+    if not quota_raw:
+        return "0 GB"
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", quota_raw)
+    if not match:
+        return quota_raw
+    try:
+        return f"{_fmt_number(float(match.group(1)))} GB"
+    except Exception:
+        return quota_raw
+
+
+def _fmt_ip_limit_from_account_fields(fields: dict[str, str]) -> str:
+    ip_raw = str(fields.get("IP Limit") or "").strip()
+    if not ip_raw:
+        return "OFF"
+    if ip_raw.upper().startswith("OFF"):
+        return "OFF"
+    match = re.search(r"ON\s*\((\d+)\)", ip_raw, re.IGNORECASE)
+    if match:
+        return f"ON({match.group(1)})"
+    if ip_raw.upper().startswith("ON"):
+        return "ON"
+    return ip_raw
+
+
+def _fmt_speed_limit_from_account_fields(fields: dict[str, str]) -> str:
+    speed_raw = str(fields.get("Speed Limit") or "").strip()
+    if not speed_raw:
+        return "OFF"
+    if speed_raw.upper().startswith("OFF"):
+        return "OFF"
+    down_match = re.search(r"DOWN\s*([0-9]+(?:\.[0-9]+)?)", speed_raw, re.IGNORECASE)
+    up_match = re.search(r"UP\s*([0-9]+(?:\.[0-9]+)?)", speed_raw, re.IGNORECASE)
+    if down_match and up_match:
+        try:
+            down = _fmt_number(float(down_match.group(1)))
+            up = _fmt_number(float(up_match.group(1)))
+            return f"ON({down}/{up} Mbps)"
+        except Exception:
+            return speed_raw
+    return speed_raw
+
+
 def _iter_proto_quota_files(proto: str) -> list[tuple[str, Path]]:
     d = QUOTA_ROOT / proto
     if not d.exists():
@@ -484,6 +580,51 @@ def op_account_info(proto: str, username: str) -> tuple[str, str]:
             content = "(kosong)"
         return "User Management - Account Info", f"File: {candidate}\n\n{content}"
     return "User Management - Account Info", f"File account tidak ditemukan untuk {user_n} [{proto_n}]"
+
+
+def op_account_info_summary(proto: str, username: str) -> tuple[bool, dict[str, str] | str]:
+    proto_n = proto.lower().strip()
+    user_n = username.strip()
+    if proto_n not in PROTOCOLS:
+        return False, f"Proto tidak valid: {proto}"
+    if not _is_valid_username(user_n):
+        return False, "Username tidak valid. Gunakan huruf/angka/._- tanpa spasi."
+
+    for candidate in _quota_candidates(proto_n, user_n):
+        if not candidate.exists():
+            continue
+        ok, payload = read_json(candidate)
+        if not ok:
+            return False, str(payload)
+        if not isinstance(payload, dict):
+            return False, f"Format quota tidak valid: {candidate}"
+        status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+        return True, {
+            "username": user_n,
+            "protocol": proto_n,
+            "active_period": _fmt_active_period(payload),
+            "quota_gb": _fmt_quota_limit_gb(payload),
+            "ip_limit": _status_ip_limit(status),
+            "speed_limit": _status_speed_limit(status),
+        }
+    for candidate in _account_candidates(proto_n, user_n):
+        if not candidate.exists():
+            continue
+        fields = _read_account_fields(candidate)
+        if not fields:
+            continue
+        protocol = str(fields.get("Protocol") or proto_n).strip().lower()
+        if protocol not in PROTOCOLS:
+            protocol = proto_n
+        return True, {
+            "username": str(fields.get("Username") or user_n).strip() or user_n,
+            "protocol": protocol,
+            "active_period": _fmt_active_period_from_account_fields(fields),
+            "quota_gb": _fmt_quota_limit_from_account_fields(fields),
+            "ip_limit": _fmt_ip_limit_from_account_fields(fields),
+            "speed_limit": _fmt_speed_limit_from_account_fields(fields),
+        }
+    return False, f"File quota/account tidak ditemukan untuk {user_n} [{proto_n}]"
 
 
 def op_network_outbound_summary() -> tuple[str, str]:

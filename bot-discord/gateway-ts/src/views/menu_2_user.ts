@@ -7,7 +7,7 @@ export const menu2: MenuDefinition = {
   actions: [
     {
       id: "add_user",
-      label: "Add User",
+      label: "Add User Account",
       mode: "modal",
       style: "success",
       modal: {
@@ -29,7 +29,7 @@ export const menu2: MenuDefinition = {
     },
     {
       id: "delete_user",
-      label: "Delete User",
+      label: "Delete User Account",
       mode: "modal",
       style: "danger",
       confirm: true,
@@ -55,10 +55,10 @@ export const menu2: MenuDefinition = {
         ],
       },
     },
-    { id: "list_users", label: "List Users", mode: "direct", style: "primary" },
+    { id: "list_users", label: "List User Account", mode: "direct", style: "primary" },
     {
       id: "search_user",
-      label: "Search User",
+      label: "Search User Name",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -68,7 +68,7 @@ export const menu2: MenuDefinition = {
     },
     {
       id: "account_info",
-      label: "Account Info",
+      label: "Account Info View",
       mode: "modal",
       style: "secondary",
       modal: {

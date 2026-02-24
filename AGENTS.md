@@ -3,7 +3,7 @@
 ## Identitas Proyek (Terkini)
 - Nama proyek/repo aktif: `autoscript`
 - Remote utama: `https://github.com/superdecrypt-dev/autoscript`
-- Source kerja installer `run.sh` di VPS: `/opt/autoscript`
+- Source kerja installer `run.sh` di VPS: `/opt/autoscript` (alias kompatibilitas lama: `/root/xray-core_discord`)
 - Deploy bot Discord tetap: `/opt/bot-discord`
 
 ## Struktur Proyek & Organisasi Modul

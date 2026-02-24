@@ -8,7 +8,7 @@ Agent AI baru wajib memulai dari konteks di atas.
 ## Baseline Saat Ini
 - Repo utama: `https://github.com/superdecrypt-dev/autoscript`
 - Workspace aktif (Codex): `/codex/xray-core_discord` (rename folder lokal bisa berbeda per host)
-- Source kerja installer `run.sh`: `/opt/autoscript`
+- Source kerja installer `run.sh`: `/opt/autoscript` (alias kompatibilitas lama: `/root/xray-core_discord`)
 - Deploy bot Discord: `/opt/bot-discord`
 
 ## Prinsip Operasional

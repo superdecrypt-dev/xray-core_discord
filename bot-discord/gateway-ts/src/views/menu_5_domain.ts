@@ -3,16 +3,19 @@ import type { MenuDefinition } from "./types";
 export const menu5: MenuDefinition = {
   id: "5",
   label: "Domain Control",
-  description: "Set domain via Custom/Cloudflare wizard dengan issue cert terintegrasi.",
+  description:
+    "Atur domain aktif + sertifikat.\n" +
+    "Manual: pakai domain sendiri yang sudah pointing ke IP VPS.\n" +
+    "Auto: pakai root domain bawaan sistem (subdomain dibuat otomatis via API Cloudflare).",
   actions: [
     {
       id: "setup_domain_custom",
-      label: "Set Domain + Cert (Recommended)",
+      label: "Set Domain Manual",
       mode: "modal",
       style: "danger",
       confirm: true,
       modal: {
-        title: "Set Domain + Cert (Custom)",
+        title: "Set Domain Manual",
         fields: [
           { id: "domain", label: "Domain (FQDN)", style: "short", required: true, placeholder: "vpn.example.com" },
         ],
@@ -20,12 +23,12 @@ export const menu5: MenuDefinition = {
     },
     {
       id: "setup_domain_cloudflare",
-      label: "Set Domain Cloudflare",
+      label: "Set Domain Auto (API Cloudflare)",
       mode: "modal",
       style: "danger",
       confirm: true,
       modal: {
-        title: "Cloudflare Domain Wizard",
+        title: "Set Domain Auto (API Cloudflare)",
         fields: [
           { id: "root_domain", label: "Root Domain", style: "short", required: true, placeholder: "1 atau vyxara1.web.id" },
           { id: "subdomain_mode", label: "Subdomain Mode", style: "short", required: false, placeholder: "auto / manual (default: auto)" },
@@ -41,7 +44,7 @@ export const menu5: MenuDefinition = {
         ],
       },
     },
-    { id: "domain_info", label: "Domain Info", mode: "direct", style: "primary" },
+    { id: "domain_info", label: "Domain Info View", mode: "direct", style: "primary" },
     { id: "nginx_server_name", label: "Nginx Server Name", mode: "direct", style: "secondary" },
     { id: "refresh_account_info", label: "Refresh Account Info", mode: "direct", style: "secondary" },
   ],

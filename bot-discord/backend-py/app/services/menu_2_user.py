@@ -37,7 +37,7 @@ def handle(action: str, params: dict, settings) -> dict:
         ok_p, proto_or_err = require_protocol(params, title)
         if not ok_p:
             return proto_or_err
-        ok_u, user_or_err = require_username(params, title)
+        ok_u, user_or_err = require_username(params, title, max_length=64)
         if not ok_u:
             return user_or_err
         ok_d, days_or_err = require_positive_int_param(params, "days", title, minimum=1)
@@ -168,13 +168,33 @@ def handle(action: str, params: dict, settings) -> dict:
         return error_response("user_extend_failed", title_ext, msg_ext)
 
     if action == "account_info":
-        ok_p, proto_or_err = require_param(params, "proto", "User Management - Account Info")
+        title = "User Management - Account Info"
+        ok_p, proto_or_err = require_protocol(params, title)
         if not ok_p:
             return proto_or_err
-        ok_u, user_or_err = require_param(params, "username", "User Management - Account Info")
+        ok_u, user_or_err = require_username(params, title, max_length=64)
         if not ok_u:
             return user_or_err
-        title, msg = system.op_account_info(proto_or_err.lower(), user_or_err)
-        return ok_response(title, msg)
+        title_info, msg_info = system.op_account_info(proto_or_err, user_or_err)
+        ok_summary, summary_or_err = system.op_account_info_summary(proto_or_err, user_or_err)
+        if not ok_summary:
+            return error_response("account_info_failed", title_info, str(summary_or_err))
+
+        ok_download, download_or_err = system_mutations.op_user_account_file_download(proto_or_err, user_or_err)
+        if not ok_download or not isinstance(download_or_err, dict):
+            return error_response("account_info_failed", title_info, str(download_or_err))
+
+        data: dict[str, object] = {
+            "account_info_summary": summary_or_err,
+            "download_file": download_or_err,
+        }
+        filename = str(download_or_err.get("filename") or f"{user_or_err}@{proto_or_err}.txt")
+        lines = [
+            "Ringkasan akun siap.",
+            f"File TXT    : {filename} (download)",
+            "",
+            msg_info,
+        ]
+        return ok_response(title_info, "\n".join(lines), data=data)
 
     return error_response("unknown_action", "User Management", f"Action tidak dikenal: {action}")

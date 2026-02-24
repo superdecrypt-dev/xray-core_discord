@@ -7,6 +7,6 @@ export const menu1: MenuDefinition = {
   actions: [
     { id: "overview", label: "Ringkasan Status", mode: "direct", style: "primary" },
     { id: "xray_test", label: "Test Config Xray", mode: "direct", style: "secondary" },
-    { id: "tls_info", label: "TLS Info", mode: "direct", style: "secondary" },
+    { id: "tls_info", label: "TLS Info Detail", mode: "direct", style: "secondary" },
   ],
 };

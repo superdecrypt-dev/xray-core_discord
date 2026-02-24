@@ -54,10 +54,10 @@ settings_on = type("S", (), {"enable_dangerous_actions": True})()
 settings_off = type("S", (), {"enable_dangerous_actions": False})()
 
 cases = [
-    ("domain_root_list_success", "cloudflare_root_list", {}, settings_on, "ok"),
+    ("domain_info_success", "domain_info", {}, settings_on, "ok"),
     ("setup_domain_custom_invalid_domain", "setup_domain_custom", {"domain": "abc"}, settings_on, "setup_domain_custom_failed"),
     ("setup_domain_cloudflare_invalid_root", "setup_domain_cloudflare", {"root_domain": "999"}, settings_on, "setup_domain_cloudflare_failed"),
-    ("strict_bool_proxied_invalid", "setup_domain_cloudflare", {"root_domain": "999", "proxied": "abc"}, settings_on, "invalid_param"),
+    ("strict_bool_proxied_invalid", "setup_domain_cloudflare", {"root_domain": "999", "proxied": "abc"}, settings_on, "setup_domain_cloudflare_failed"),
     ("dangerous_action_blocked", "setup_domain_custom", {"domain": "vpn.example.com"}, settings_off, "forbidden"),
 ]
 
@@ -68,6 +68,45 @@ for name, action, params, settings, expect_code in cases:
     print(f"gate2_{name}={'PASS' if ok else 'FAIL'} code={res.get('code')} ok={res.get('ok')}")
     if not ok:
         bad.append(name)
+
+original_cf = menu_5_domain.system_mutations.op_domain_setup_cloudflare
+captured = {}
+contract_ok = False
+try:
+    def fake_cf(*, root_domain_input, subdomain_mode, subdomain, proxied, allow_existing_same_ip):
+        captured["root_domain_input"] = root_domain_input
+        captured["subdomain_mode"] = subdomain_mode
+        captured["subdomain"] = subdomain
+        captured["proxied"] = proxied
+        captured["allow_existing_same_ip"] = allow_existing_same_ip
+        return True, "Domain Control - Set Domain (Cloudflare Wizard)", "mocked"
+
+    menu_5_domain.system_mutations.op_domain_setup_cloudflare = fake_cf
+    res_contract = menu_5_domain.handle(
+        "setup_domain_cloudflare",
+        {
+            "root_domain": "vyxara1.web.id",
+            "subdomain_mode": "manual",
+            "subdomain": "gate2-test",
+            "proxied": "abc",
+            "allow_existing_same_ip": "xyz",
+        },
+        settings_on,
+    )
+    warnings = ((res_contract.get("data") or {}).get("warnings") or [])
+    contract_ok = bool(
+        res_contract.get("ok") is True
+        and captured.get("proxied") is False
+        and captured.get("allow_existing_same_ip") is False
+        and isinstance(warnings, list)
+        and len(warnings) >= 2
+    )
+finally:
+    menu_5_domain.system_mutations.op_domain_setup_cloudflare = original_cf
+
+print(f"gate2_bool_invalid_warn_default={'PASS' if contract_ok else 'FAIL'}")
+if not contract_ok:
+    bad.append("bool_invalid_warn_default")
 
 if bad:
     raise SystemExit(f"gate2_failed={','.join(bad)}")
@@ -136,8 +175,8 @@ s, b = get("/api/main-menu", headers={"X-Internal-Shared-Secret": SECRET})
 rec("main_menu_auth", s == 200 and b.get("menu_count") == 8)
 s, b = get_allow_error("/api/main-menu")
 rec("auth_guard", s == 401)
-s, b = post("/api/menu/5/action", {"action": "cloudflare_root_list", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
-rec("menu5_root_list", s == 200 and b.get("code") == "ok")
+s, b = post("/api/menu/5/action", {"action": "domain_info", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
+rec("menu5_domain_info", s == 200 and b.get("code") == "ok")
 
 if not all(ok for _, ok in checks):
     raise SystemExit("gate3_failed")
@@ -191,8 +230,8 @@ s,b=get("/api/main-menu", headers={"X-Internal-Shared-Secret":SECRET})
 rec("main_menu_auth", s==200 and b.get("menu_count")==8)
 s,b=get_allow_error("/api/main-menu")
 rec("auth_guard", s==401)
-s,b=post("/api/menu/5/action", {"action":"cloudflare_root_list","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
-rec("menu5_root_list", s==200 and b.get("code")=="ok")
+s,b=post("/api/menu/5/action", {"action":"domain_info","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
+rec("menu5_domain_info", s==200 and b.get("code")=="ok")
 
 if not all(ok for _,ok in checks):
     raise SystemExit("gate3_1_failed")
@@ -235,8 +274,8 @@ def rec(name, ok):
 
 s,b=request("GET","/api/main-menu", auth=False)
 rec("auth_guard", s==401)
-s,b=request("POST","/api/menu/5/action", {"action":"setup_domain_cloudflare","params":{"root_domain":"1","proxied":"abc"}}, auth=True)
-rec("invalid_bool", s==200 and b.get("code")=="invalid_param")
+s,b=request("POST","/api/menu/5/action", {"action":"setup_domain_cloudflare","params":{"root_domain":"999","proxied":"abc"}}, auth=True)
+rec("invalid_bool", s==200 and b.get("code")=="setup_domain_cloudflare_failed")
 s,b=request("POST","/api/menu/5/action", {"action":"setup_domain_cloudflare","params":{"root_domain":"999"}}, auth=True)
 rec("invalid_root", s==200 and b.get("code")=="setup_domain_cloudflare_failed")
 

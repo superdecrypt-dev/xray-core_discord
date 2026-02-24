@@ -7,11 +7,66 @@ import { findAction } from "../router";
 import { createPendingConfirm } from "./confirm_state";
 import { buildPendingConfirmView } from "./confirm_view";
 import { sendActionResult } from "./result";
+import { isUserContextToken, resolveUserContext } from "./user_context_state";
 
 type SpeedParseResult =
   | { ok: true; enabled: false }
   | { ok: true; enabled: true; down: string; up: string }
   | { ok: false; error: string };
+
+type ParsedFormCustomId = {
+  menuId: string;
+  actionId: string;
+  presetProto: string;
+  presetUsername: string;
+  presetSelectToken: string;
+};
+
+function parseFormCustomId(customId: string): ParsedFormCustomId | null {
+  if (!customId.startsWith("form:")) {
+    return null;
+  }
+  const parts = customId.split(":");
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const menuId = parts[1] || "";
+  const actionId = parts[2] || "";
+  const extras = parts.slice(3);
+
+  let presetProto = "";
+  let presetUsername = "";
+  let presetSelectToken = "";
+
+  const isSelectToken = (value: string): boolean => value.includes("|");
+  if (extras.length > 0 && isSelectToken(extras[0])) {
+    presetSelectToken = extras[0];
+    presetProto = extras[1] || "";
+    presetUsername = extras[2] || "";
+    return { menuId, actionId, presetProto, presetUsername, presetSelectToken };
+  }
+
+  if (extras.length > 0) {
+    presetProto = extras[0] || "";
+  }
+  if (extras.length > 1) {
+    const second = extras[1] || "";
+    if (isSelectToken(second)) {
+      presetSelectToken = second;
+    } else {
+      presetUsername = second;
+    }
+  }
+  if (extras.length > 2) {
+    const third = extras[2] || "";
+    if (isSelectToken(third)) {
+      presetSelectToken = third;
+    }
+  }
+
+  return { menuId, actionId, presetProto, presetUsername, presetSelectToken };
+}
 
 function parseSpeedLimitInput(raw: string): SpeedParseResult {
   const value = String(raw || "").trim().toLowerCase();
@@ -51,11 +106,12 @@ function parseSpeedLimitInput(raw: string): SpeedParseResult {
 
 export async function handleModal(interaction: ModalSubmitInteraction, backend: BackendClient): Promise<boolean> {
   const id = interaction.customId;
-  if (!id.startsWith("form:")) {
+  const parsedId = parseFormCustomId(id);
+  if (!parsedId) {
     return false;
   }
 
-  const [, menuId, actionId, presetProto = "", presetUsername = ""] = id.split(":");
+  const { menuId, actionId, presetProto, presetUsername, presetSelectToken } = parsedId;
   const action = findAction(menuId, actionId);
   if (!action || action.mode !== "modal" || !action.modal) {
     await interaction.reply({ content: "Modal action tidak valid.", flags: MessageFlags.Ephemeral });
@@ -71,7 +127,7 @@ export async function handleModal(interaction: ModalSubmitInteraction, backend: 
     }
   }
 
-  const presetSelect = decodeSingleSelectPreset(presetProto);
+  const presetSelect = decodeSingleSelectPreset(presetSelectToken);
   if (presetSelect) {
     params[presetSelect.fieldId] = presetSelect.value;
   }
@@ -103,10 +159,23 @@ export async function handleModal(interaction: ModalSubmitInteraction, backend: 
   }
 
   if (needsUsernameSelect) {
-    const selectedUsername = String(presetUsername || params.username || "").trim();
+    const selectedUsernameRaw = String(presetUsername || params.username || "").trim();
+    if (!selectedUsernameRaw) {
+      await interaction.reply({ content: "Username tidak valid.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    const resolvedUser = resolveUserContext(selectedUsernameRaw, selectedProto);
+    if (isUserContextToken(selectedUsernameRaw) && !resolvedUser) {
+      await interaction.reply({ content: "Context username kadaluarsa. Ulangi aksi dari menu.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    const selectedUsername = String(resolvedUser?.username || selectedUsernameRaw).trim();
     if (!selectedUsername) {
       await interaction.reply({ content: "Username tidak valid.", flags: MessageFlags.Ephemeral });
       return true;
+    }
+    if (!selectedProto && resolvedUser?.proto) {
+      selectedProto = resolvedUser.proto;
     }
     params.username = selectedUsername;
   }

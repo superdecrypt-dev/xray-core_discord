@@ -11,6 +11,12 @@ Dokumen ini adalah SOP pengujian untuk proyek `autoscript` (anchor: "oke saat in
 Jalankan sebelum semua paket uji:
 
 ```bash
+AUTO_SCRIPT_ROOT="${AUTO_SCRIPT_ROOT:-/opt/autoscript}"
+if [[ ! -d "${AUTO_SCRIPT_ROOT}" && -d /root/xray-core_discord ]]; then
+  AUTO_SCRIPT_ROOT="/root/xray-core_discord"
+fi
+cd "${AUTO_SCRIPT_ROOT}"
+
 git status --short
 bash -n setup.sh manage.sh run.sh install-discord-bot.sh
 shellcheck *.sh

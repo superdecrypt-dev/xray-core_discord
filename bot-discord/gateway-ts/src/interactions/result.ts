@@ -21,10 +21,11 @@ type JsonDownloadPayload = {
   content_base64: string;
 };
 
-type AddUserSummaryPayload = {
+type UserSummaryPayload = {
+  source: "add_user" | "account_info";
   username: string;
   protocol: string;
-  active_days: string;
+  active_period: string;
   quota_gb: string;
   ip_limit: string;
   speed_limit: string;
@@ -36,37 +37,48 @@ function sanitizeFilename(input: string): string {
   return clean;
 }
 
-function extractAddUserSummary(data?: Record<string, unknown>): AddUserSummaryPayload | null {
+function extractUserSummary(data?: Record<string, unknown>): UserSummaryPayload | null {
   if (!data || typeof data !== "object") return null;
-  const raw = data.add_user_summary;
-  if (!raw || typeof raw !== "object") return null;
-  const payload = raw as Record<string, unknown>;
-  const username = String(payload.username || "").trim();
-  const protocol = String(payload.protocol || "").trim();
-  const activeDays = String(payload.active_days || "").trim();
-  const quotaGb = String(payload.quota_gb || "").trim();
-  const ipLimit = String(payload.ip_limit || "").trim();
-  const speedLimit = String(payload.speed_limit || "").trim();
-  if (!username || !protocol) return null;
-  return {
-    username,
-    protocol,
-    active_days: activeDays || "-",
-    quota_gb: quotaGb || "-",
-    ip_limit: ipLimit || "-",
-    speed_limit: speedLimit || "-",
+  const parse = (raw: unknown, source: "add_user" | "account_info"): UserSummaryPayload | null => {
+    if (!raw || typeof raw !== "object") return null;
+    const payload = raw as Record<string, unknown>;
+    const username = String(payload.username || "").trim();
+    const protocol = String(payload.protocol || "").trim();
+    const quotaGb = String(payload.quota_gb || "").trim();
+    const ipLimit = String(payload.ip_limit || "").trim();
+    const speedLimit = String(payload.speed_limit || "").trim();
+    if (!username || !protocol) return null;
+
+    let activePeriod = String(payload.active_period || "").trim();
+    if (!activePeriod) {
+      const activeDays = String(payload.active_days || "").trim();
+      activePeriod = activeDays ? `${activeDays} hari` : "-";
+    }
+
+    return {
+      source,
+      username,
+      protocol,
+      active_period: activePeriod || "-",
+      quota_gb: quotaGb || "-",
+      ip_limit: ipLimit || "-",
+      speed_limit: speedLimit || "-",
+    };
   };
+
+  return parse(data.add_user_summary, "add_user") || parse(data.account_info_summary, "account_info");
 }
 
-function buildAddUserSummaryEmbed(summary: AddUserSummaryPayload): EmbedBuilder {
+function buildUserSummaryEmbed(summary: UserSummaryPayload): EmbedBuilder {
+  const isAddUser = summary.source === "add_user";
   return new EmbedBuilder()
-    .setTitle("Add User Berhasil")
-    .setDescription("Ringkasan akun baru")
-    .setColor(0x2ea043)
+    .setTitle(isAddUser ? "Add User Berhasil" : "Account Info")
+    .setDescription(isAddUser ? "Ringkasan akun baru" : "Ringkasan akun")
+    .setColor(isAddUser ? 0x2ea043 : 0x2f81f7)
     .addFields(
       { name: "Username", value: summary.username, inline: true },
       { name: "Protokol", value: summary.protocol.toUpperCase(), inline: true },
-      { name: "Masa Aktif", value: `${summary.active_days} hari`, inline: true },
+      { name: "Masa Aktif", value: summary.active_period, inline: true },
       { name: "Quota", value: summary.quota_gb, inline: true },
       { name: "IP Limit", value: summary.ip_limit, inline: true },
       { name: "Speed Limit", value: summary.speed_limit, inline: false },
@@ -82,6 +94,13 @@ function extractJsonDownload(data?: Record<string, unknown>): JsonDownloadPayloa
   const contentBase64 = String(payload.content_base64 || "").trim();
   if (!contentBase64) return null;
   return { filename, content_base64: contentBase64 };
+}
+
+function extractDownloadError(data?: Record<string, unknown>): string {
+  if (!data || typeof data !== "object") return "";
+  const raw = data.download_error;
+  if (typeof raw !== "string") return "";
+  return raw.trim();
 }
 
 function buildJsonAttachment(payload: JsonDownloadPayload): AttachmentBuilder | null {
@@ -101,9 +120,9 @@ export async function sendActionResult(
   ok: boolean,
   data?: Record<string, unknown>,
 ): Promise<void> {
-  const summary = extractAddUserSummary(data);
+  const summary = extractUserSummary(data);
   if (ok && summary) {
-    const embed = buildAddUserSummaryEmbed(summary);
+    const embed = buildUserSummaryEmbed(summary);
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp({ embeds: [embed], flags: MessageFlags.Ephemeral });
     } else {
@@ -111,7 +130,12 @@ export async function sendActionResult(
     }
 
     const download = extractJsonDownload(data);
-    if (!download) return;
+    if (!download) {
+      const reason = extractDownloadError(data);
+      const msg = reason ? `File lampiran tidak tersedia: ${reason}` : "File lampiran tidak tersedia untuk hasil ini.";
+      await interaction.followUp({ content: msg.slice(0, MAX_CHUNK), flags: MessageFlags.Ephemeral });
+      return;
+    }
     const attachment = buildJsonAttachment(download);
     if (!attachment) {
       await interaction.followUp({

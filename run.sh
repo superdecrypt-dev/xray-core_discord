@@ -16,6 +16,7 @@ export PATH
 # -------------------------
 REPO_URL="https://github.com/superdecrypt-dev/autoscript.git"
 REPO_DIR="/opt/autoscript"
+LEGACY_REPO_DIR="/root/xray-core_discord"
 MANAGE_BIN="/usr/local/bin/manage"
 BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
 
@@ -38,6 +39,15 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 hr() { echo "------------------------------------------------------------"; }
+
+safe_realpath() {
+  local path="$1"
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "${path}" 2>/dev/null || printf '%s\n' "${path}"
+    return 0
+  fi
+  printf '%s\n' "${path}"
+}
 
 # -------------------------
 # Validasi
@@ -94,6 +104,13 @@ check_deps() {
 clone_repo() {
   mkdir -p "$(dirname "${REPO_DIR}")"
 
+  # Kompatibilitas: sebagian host lama masih memakai /root/xray-core_discord.
+  # Jika path canonical belum ada, pakai alias symlink agar SOP tetap sinkron.
+  if [[ ! -e "${REPO_DIR}" && -d "${LEGACY_REPO_DIR}/.git" ]]; then
+    log "Deteksi repo legacy di ${LEGACY_REPO_DIR}; membuat alias ${REPO_DIR}."
+    ln -s "${LEGACY_REPO_DIR}" "${REPO_DIR}"
+  fi
+
   if [[ -d "${REPO_DIR}" && ! -d "${REPO_DIR}/.git" ]]; then
     if [[ -z "$(find "${REPO_DIR}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
       rmdir "${REPO_DIR}" || true
@@ -116,6 +133,26 @@ clone_repo() {
     die "Gagal mengkloning repositori: ${REPO_URL}\n  Pastikan server memiliki koneksi internet dan URL repo benar."
   fi
   ok "Repositori berhasil diunduh."
+}
+
+sync_repo_compat_alias() {
+  if [[ ! -d "${REPO_DIR}/.git" ]]; then
+    return 0
+  fi
+
+  if [[ ! -e "${LEGACY_REPO_DIR}" ]]; then
+    if ln -s "${REPO_DIR}" "${LEGACY_REPO_DIR}" 2>/dev/null; then
+      ok "Alias kompatibilitas dibuat: ${LEGACY_REPO_DIR} -> ${REPO_DIR}"
+    fi
+    return 0
+  fi
+
+  local repo_real legacy_real
+  repo_real="$(safe_realpath "${REPO_DIR}")"
+  legacy_real="$(safe_realpath "${LEGACY_REPO_DIR}")"
+  if [[ "${repo_real}" != "${legacy_real}" ]]; then
+    warn "Terdeteksi dua path repo berbeda: ${REPO_DIR} (${repo_real}) dan ${LEGACY_REPO_DIR} (${legacy_real}). Gunakan ${REPO_DIR} sebagai path canonical."
+  fi
 }
 
 install_manage() {
@@ -161,6 +198,7 @@ main() {
   check_os
   check_deps
   clone_repo
+  sync_repo_compat_alias
   install_manage
   run_setup
 

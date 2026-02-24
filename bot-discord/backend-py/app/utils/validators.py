@@ -26,7 +26,9 @@ def require_protocol(params: dict, title: str, key: str = "proto") -> tuple[bool
     return True, proto
 
 
-def require_username(params: dict, title: str, key: str = "username") -> tuple[bool, str | dict]:
+def require_username(
+    params: dict, title: str, key: str = "username", max_length: int | None = None
+) -> tuple[bool, str | dict]:
     ok, user_or_err = require_param(params, key, title)
     if not ok:
         return False, user_or_err
@@ -36,6 +38,12 @@ def require_username(params: dict, title: str, key: str = "username") -> tuple[b
             "invalid_param",
             title,
             "Username tidak valid. Gunakan huruf/angka/._- tanpa spasi.",
+        )
+    if max_length is not None and len(username) > int(max_length):
+        return False, error_response(
+            "invalid_param",
+            title,
+            f"Username terlalu panjang. Maksimal {int(max_length)} karakter.",
         )
     return True, username
 

@@ -19,6 +19,7 @@ import type { MenuActionDef } from "../views/types";
 import { buildMainMenuView } from "../views/main_menu";
 import { consumePendingConfirm } from "./confirm_state";
 import { sendActionResult } from "./result";
+import { createUserContextToken } from "./user_context_state";
 
 const USER_SELECT_PAGE_SIZE = 25;
 
@@ -192,7 +193,7 @@ function buildUsernameSelectView(menuId: string, actionId: string, proto: string
       items.length > 0
         ? items.map((username) => ({
             label: username.slice(0, 100),
-            value: username,
+            value: createUserContextToken(proto, username),
             description: `${proto.toUpperCase()} user`,
           }))
         : [{ label: "(kosong)", value: "__none__", description: "Tidak ada user", default: true }]
@@ -273,13 +274,14 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
       await interaction.reply({ content: "Action modal tidak valid.", flags: MessageFlags.Ephemeral });
       return true;
     }
+    const hasProto = actionHasProtoField(action);
+    if (shouldUseProtocolSelect(menuId, actionId, hasProto)) {
+      await interaction.update(buildProtocolSelectView(menuId, actionId));
+      return true;
+    }
     const singleSelectView = buildSingleFieldSelectView(menuId, actionId);
     if (singleSelectView) {
       await interaction.update(singleSelectView);
-      return true;
-    }
-    if (shouldUseProtocolSelect(menuId, actionId, actionHasProtoField(action))) {
-      await interaction.update(buildProtocolSelectView(menuId, actionId));
       return true;
     }
 

@@ -5,10 +5,10 @@ export const menu4: MenuDefinition = {
   label: "Network Controls",
   description: "Ringkasan outbound, routing, DNS, dan status network.",
   actions: [
-    { id: "egress_summary", label: "Egress Summary", mode: "direct", style: "primary" },
+    { id: "egress_summary", label: "Egress Summary View", mode: "direct", style: "primary" },
     {
       id: "set_egress_mode",
-      label: "Set Egress Mode",
+      label: "Egress Mode Setup",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -18,7 +18,7 @@ export const menu4: MenuDefinition = {
     },
     {
       id: "set_balancer_strategy",
-      label: "Set Balancer Strategy",
+      label: "Balancer Strategy",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -34,10 +34,10 @@ export const menu4: MenuDefinition = {
         ],
       },
     },
-    { id: "set_balancer_selector_auto", label: "Balancer Selector Auto", mode: "direct", style: "secondary" },
+    { id: "set_balancer_selector_auto", label: "Balancer Auto Sel", mode: "direct", style: "secondary" },
     {
       id: "set_balancer_selector",
-      label: "Set Balancer Selector",
+      label: "Balancer Selector",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -53,10 +53,10 @@ export const menu4: MenuDefinition = {
         ],
       },
     },
-    { id: "dns_summary", label: "DNS Summary", mode: "direct", style: "secondary" },
+    { id: "dns_summary", label: "DNS Summary View", mode: "direct", style: "secondary" },
     {
       id: "set_dns_primary",
-      label: "Set Primary DNS",
+      label: "Primary DNS Setup",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -66,7 +66,7 @@ export const menu4: MenuDefinition = {
     },
     {
       id: "set_dns_secondary",
-      label: "Set Secondary DNS",
+      label: "Secondary DNS Set",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -76,7 +76,7 @@ export const menu4: MenuDefinition = {
     },
     {
       id: "set_dns_query_strategy",
-      label: "Set Query Strategy",
+      label: "DNS Query Strategy",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -92,7 +92,7 @@ export const menu4: MenuDefinition = {
         ],
       },
     },
-    { id: "toggle_dns_cache", label: "Toggle DNS Cache", mode: "direct", style: "secondary" },
-    { id: "state_file", label: "State File", mode: "direct", style: "secondary" },
+    { id: "toggle_dns_cache", label: "DNS Cache Toggle", mode: "direct", style: "secondary" },
+    { id: "state_file", label: "State File View", mode: "direct", style: "secondary" },
   ],
 };

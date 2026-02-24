@@ -3297,7 +3297,8 @@ import time
 from datetime import datetime, timezone
 
 XRAY_CONFIG_DEFAULT = "/usr/local/etc/xray/conf.d/30-routing.json"
-API_SERVER_DEFAULT = "127.0.0.1:10080"
+API_SERVER_DEFAULT = "127.0.0.1:10080,127.0.0.1:10085"
+API_SERVER_FALLBACKS = ("127.0.0.1:10080", "127.0.0.1:10085")
 QUOTA_ROOT = "/opt/quota"
 PROTO_DIRS = ("vless", "vmess", "trojan")
 
@@ -3462,33 +3463,58 @@ def iter_quota_files():
       if name.endswith(".json"):
         yield proto, os.path.join(d, name)
 
+def _api_server_candidates(api_server):
+  ordered = []
+  raw = str(api_server or "").strip()
+  if raw:
+    for part in raw.split(","):
+      cand = part.strip()
+      if cand and cand not in ordered:
+        ordered.append(cand)
+  for cand in API_SERVER_FALLBACKS:
+    if cand not in ordered:
+      ordered.append(cand)
+  return ordered
+
 def fetch_all_user_traffic(api_server):
   # Xray stats name format (bytes):
   # - user>>>[email]>>>traffic>>>uplink
   # - user>>>[email]>>>traffic>>>downlink
-  try:
-    out = subprocess.check_output(
-      ["xray", "api", "statsquery", f"--server={api_server}", "--pattern", "user>>>"],
-      text=True,
-      stderr=subprocess.DEVNULL,
+  candidates = _api_server_candidates(api_server)
+  data = None
+  last_error = ""
+
+  for server in candidates:
+    try:
+      out = subprocess.check_output(
+        ["xray", "api", "statsquery", f"--server={server}", "--pattern", "user>>>"],
+        text=True,
+        stderr=subprocess.DEVNULL,
+      )
+      data = json.loads(out)
+      break
+    except subprocess.CalledProcessError as e:
+      last_error = f"exit {e.returncode} @ {server}"
+      continue
+    except FileNotFoundError:
+      import sys
+      print(f"[xray-quota] WARN: perintah 'xray' tidak ditemukan. Quota tidak diupdate.", file=sys.stderr)
+      return {}
+    except json.JSONDecodeError as e:
+      last_error = f"JSON decode error @ {server}: {e}"
+      continue
+    except Exception as e:
+      last_error = f"error @ {server}: {e}"
+      continue
+
+  if data is None:
+    import sys
+    shown = ", ".join(candidates)
+    print(
+      f"[xray-quota] WARN: xray api statsquery gagal untuk semua endpoint [{shown}]. "
+      f"Detail terakhir: {last_error or 'tidak ada detail'}. Quota tidak diupdate siklus ini.",
+      file=sys.stderr,
     )
-    data = json.loads(out)
-  except subprocess.CalledProcessError as e:
-    import sys
-    print(f"[xray-quota] WARN: xray api statsquery gagal (exit {e.returncode}). "
-          f"Pastikan Xray API aktif di {api_server}. Quota tidak diupdate siklus ini.", file=sys.stderr)
-    return {}
-  except FileNotFoundError:
-    import sys
-    print(f"[xray-quota] WARN: perintah 'xray' tidak ditemukan. Quota tidak diupdate.", file=sys.stderr)
-    return {}
-  except json.JSONDecodeError as e:
-    import sys
-    print(f"[xray-quota] WARN: output xray api bukan JSON valid: {e}. Quota tidak diupdate.", file=sys.stderr)
-    return {}
-  except Exception as e:
-    import sys
-    print(f"[xray-quota] WARN: fetch_all_user_traffic error: {e}. Quota tidak diupdate.", file=sys.stderr)
     return {}
 
   traffic = {}  # email -> {"uplink": int, "downlink": int}
