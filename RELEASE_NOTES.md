@@ -1,5 +1,43 @@
 # Release Notes
 
+## Rilis 2026-02-24
+
+### Ringkasan
+Rilis ini memfokuskan finalisasi bot Discord untuk penggunaan produksi dan hardening operasional shell di staging: konsistensi mode select, output hasil yang lebih ringkas, sinkronisasi domain control, serta penguatan runtime quota watcher.
+
+### Perubahan Utama
+1. Konsistensi UX Select di Bot Discord
+- Alur yang membutuhkan pemilihan protokol/user dipindahkan ke mode select agar minim typo.
+- Alur ini mencakup `Add User`, `Extend/Set Expiry`, `Account Info`, dan aksi select-based di `Network Controls`.
+
+2. Output User Management Lebih Ringkas
+- `Add User` sukses kini menampilkan embed ringkasan + lampiran `username@protokol.txt`.
+- `Account Info` menampilkan embed ringkasan + lampiran `username@protokol.txt`.
+- `Account Info` ditingkatkan dengan fallback summary dari file account ketika file quota tidak tersedia.
+
+3. Penyederhanaan Domain Control
+- Nama aksi diperjelas menjadi:
+  - `Set Domain Manual`
+  - `Set Domain Auto (API Cloudflare)`
+- Root domain Cloudflare dipilih via select (`vyxara1.web.id`, `vyxara2.web.id`, `vyxara1.qzz.io`, `vyxara2.qzz.io`).
+- Perilaku boolean invalid di wizard Cloudflare tidak lagi silent: tetap fallback aman, tetapi sekarang memberi warning eksplisit.
+
+4. Hardening Shell Runtime & Staging
+- `run.sh` menambah kompatibilitas path canonical `/opt/autoscript` dengan alias legacy `/root/xray-core_discord`.
+- `install-discord-bot.sh` merapikan source archive URL agar konsisten memakai `BOT_SOURCE_OWNER/BOT_SOURCE_REPO/BOT_SOURCE_REF`.
+- Generator `xray-quota` di `setup.sh` sekarang mendukung fallback endpoint API (`127.0.0.1:10080` dan `127.0.0.1:10085`) untuk mengurangi warning transien `statsquery`.
+
+### Hasil Validasi
+- Validasi lokal:
+  - `bash -n setup.sh manage.sh run.sh install-discord-bot.sh` -> PASS
+  - `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py')` -> PASS
+  - `(cd bot-discord/gateway-ts && npm run build)` -> PASS
+  - `bot-discord/scripts/gate-all.sh local` -> PASS
+- Validasi staging (24 Februari 2026):
+  - smoke + negative untuk `manage.sh`/`install-discord-bot.sh` -> PASS
+  - `xray run -test -confdir /usr/local/etc/xray/conf.d` -> `Configuration OK`
+  - setelah update `xray-quota`, audit `journalctl -u xray-quota -p warning` pada window uji tidak menemukan warning baru.
+
 ## Update Handoff 2026-02-23
 
 ### Ringkasan

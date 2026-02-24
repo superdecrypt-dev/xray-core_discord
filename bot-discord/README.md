@@ -1,4 +1,4 @@
-# Bot Discord Standalone (UI Button + Modal)
+# Bot Discord Standalone (UI Button + Select + Modal)
 
 Bot ini berdiri sendiri dan tidak menjalankan `manage.sh`. Perilaku menunya dibuat mirip struktur `manage.sh` (menu 1-8), tetapi seluruh aksi dieksekusi lewat backend sendiri.
 
@@ -11,9 +11,26 @@ Bot ini berdiri sendiri dan tidak menjalankan `manage.sh`. Perilaku menunya dibu
 ## Alur Interaksi
 1. Admin jalankan `/panel`.
 2. Gateway kirim panel menu utama (button 1-8).
-3. User pilih action via button/modal.
+3. User pilih action via button/select/modal.
 4. Gateway memanggil backend (`/api/menu/{id}/action`) dengan secret internal.
 5. Backend menjalankan aksi dan mengembalikan hasil ke Discord.
+
+## UX Terkini (RELEASE)
+- Alur yang membutuhkan pilihan protokol/user diprioritaskan memakai select untuk menurunkan risiko typo.
+- `Add User`:
+  - memilih protokol via select,
+  - output sukses berupa embed ringkasan (`Username`, `Protokol`, `Masa Aktif`, `Quota`, `IP Limit`, `Speed Limit`),
+  - lampiran file `username@protokol.txt`.
+- `Account Info`:
+  - pemilihan user via select,
+  - output berupa embed ringkasan + lampiran file `username@protokol.txt`.
+- `Domain Control`:
+  - `Set Domain Manual` untuk domain sendiri (sudah pointing ke IP VPS),
+  - `Set Domain Auto (API Cloudflare)` untuk root domain bawaan sistem,
+  - root domain dipilih via select (`vyxara1.web.id`, `vyxara2.web.id`, `vyxara1.qzz.io`, `vyxara2.qzz.io`).
+- `Network Controls`:
+  - `Set Egress Mode`, `Set Balancer Strategy`, `Set Balancer Selector`, `Set DNS Query Strategy` memakai select.
+- `Run Speedtest` diringkas ke metrik inti: ISP, Latency, Packet Loss, Download, Upload.
 
 ## Jalankan Lokal
 ```bash

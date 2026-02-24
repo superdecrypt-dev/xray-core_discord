@@ -8,7 +8,7 @@
 ![Mode](https://img.shields.io/badge/Mode-Menu%20Driven-2EA043)
 
 `setup.sh` dipakai sekali untuk provisioning. `manage.sh` dipakai terus untuk operasi harian.  
-Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan interaksi tombol dan modal.
+Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan interaksi tombol, select, dan modal.
 
 [Quick Install](#quick-install-root) | [Fitur Utama](#fitur-utama-highlight) | [Fitur manage.sh](#fitur-unggulan-managesh) | [Bot Discord](#fitur-bot-discord-standalone) | [Troubleshooting](#troubleshooting-cepat)
 
@@ -23,7 +23,7 @@ Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan int
 ## Fitur Utama (Highlight)
 - One-time provisioning lengkap via `setup.sh`: Xray, Nginx, TLS, WARP, daemon runtime.
 - Operasional harian terpusat via `manage.sh` menu 1-9 (status, user, quota, network, security, maintenance).
-- Bot Discord standalone dengan UX interaktif tombol/modal (`/panel` sebagai entry point minimal).
+- Bot Discord standalone dengan UX interaktif tombol/select/modal (`/panel` sebagai entry point minimal).
 - Installer bot terpisah (`install-discord-bot.sh`) dengan mode menu + quick setup all-in-one.
 - Deploy source bot memakai verifikasi checksum archive sebelum extract (lebih aman dari archive corrupt/tampered).
 
@@ -36,6 +36,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/superdecrypt-dev/autoscript/
 1. Clone repo
 2. Install command `manage` ke `/usr/local/bin/manage`
 3. Menjalankan `setup.sh`
+
+Catatan path source:
+- Canonical source installer: `/opt/autoscript`
+- Alias kompatibilitas lama: `/root/xray-core_discord`
 
 ## Alur Operasional
 ```mermaid
@@ -120,13 +124,18 @@ Status detail akun menampilkan:
 - WARP tier management: `Target Tier` dan `Live Tier`
 - DNS settings + advanced DNS editor
 
-## Fitur Bot Discord (Standalone, BETA)
+## Fitur Bot Discord (Standalone, RELEASE)
 Bot Discord berada di `bot-discord/` dan sengaja berdiri sendiri (tidak mengeksekusi `manage.sh`).
 
 Highlight kemampuan:
-- Status rilis saat ini: **BETA** (staging-first sebelum promote production).
-- UX Discord: dominan button/modal, slash command minimal (`/panel`).
-- Cakupan menu mengikuti pola `manage.sh` (menu 1-9) agar familiar untuk admin.
+- Status rilis saat ini: **RELEASE** (siap produksi, tetap disarankan staging-first sebelum perubahan besar).
+- UX Discord: dominan button/select/modal, slash command minimal (`/panel`).
+- Cakupan menu mengikuti pola `manage.sh` (menu 1-8) agar familiar untuk admin.
+- Flow `Add User`, `Extend/Set Expiry`, `Account Info`, dan aksi Network/Domain tertentu sudah select-driven untuk meminimalkan typo input.
+- Hasil `Add User` dan `Account Info` ditampilkan sebagai embed ringkas + lampiran file `username@protokol.txt`.
+- Menu Domain Control disederhanakan menjadi:
+  - `Set Domain Manual` (domain milik sendiri, sudah pointing ke IP VPS)
+  - `Set Domain Auto (API Cloudflare)` (pakai root domain bawaan sistem)
 - Arsitektur terpisah gateway TypeScript (`discord.js`) + backend Python (`FastAPI`).
 - Role-based access lewat `DISCORD_ADMIN_ROLE_IDS` dan `DISCORD_ADMIN_USER_IDS`.
 - Deploy produksi via `install-discord-bot.sh` ke `/opt/bot-discord` + systemd service terpisah.

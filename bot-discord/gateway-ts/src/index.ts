@@ -24,7 +24,7 @@ const backend = new BackendClient(cfg.backendBaseUrl, cfg.sharedSecret);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 async function registerSlashCommands(): Promise<void> {
-  const commands = [new SlashCommandBuilder().setName("panel").setDescription("Buka panel operasional Xray (BETA)").toJSON()];
+  const commands = [new SlashCommandBuilder().setName("panel").setDescription("Buka panel operasional Xray").toJSON()];
   const rest = new REST({ version: "10" }).setToken(cfg.token);
   await rest.put(Routes.applicationGuildCommands(cfg.applicationId, cfg.guildId), { body: commands });
 }
