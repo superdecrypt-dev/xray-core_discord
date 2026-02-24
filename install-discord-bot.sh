@@ -43,9 +43,9 @@ MONITOR_SERVICE="xray-discord-monitor"
 SRC_OWNER="${BOT_SOURCE_OWNER:-superdecrypt-dev}"
 SRC_REPO="${BOT_SOURCE_REPO:-autoscript}"
 SRC_REF="${BOT_SOURCE_REF:-main}"
-SRC_ARCHIVE_DEFAULT_URL="https://github.com/${SRC_OWNER}/${SRC_REPO}/raw/${SRC_REF}/bot-discord.tar.gz"
+SRC_ARCHIVE_DEFAULT_URL="https://github.com/${SRC_OWNER}/${SRC_REPO}/raw/${SRC_REF}/bot_discord.zip"
 SRC_ARCHIVE_URL="${BOT_SOURCE_ARCHIVE_URL:-${SRC_ARCHIVE_DEFAULT_URL}}"
-SRC_ARCHIVE_SHA256="${BOT_SOURCE_ARCHIVE_SHA256:-2385b9a3cd9f8bdea6fd9ac08c81f77b1be588842e4437a9812eb6c1f1842b25}"
+SRC_ARCHIVE_SHA256="${BOT_SOURCE_ARCHIVE_SHA256:-6097db4a58ecc88e653724460cf9fd45f15802a5d7cc17c307b6f5d1a816bda1}"
 SRC_ARCHIVE_SHA256_URL="${BOT_SOURCE_ARCHIVE_SHA256_URL:-}"
 ALLOW_UNVERIFIED_ARCHIVE="${BOT_ALLOW_UNVERIFIED_ARCHIVE:-0}"
 
@@ -508,6 +508,29 @@ validate_source_tree() {
   [[ -f "${src}/systemd/xray-discord-gateway.service.tpl" ]] || die "Source invalid: template gateway service tidak ditemukan"
 }
 
+extract_source_archive() {
+  local archive="$1"
+  local dst="$2"
+  local archive_lower
+  archive_lower="$(echo "${archive}" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "${archive_lower}" == *.zip ]]; then
+    python3 - "${archive}" "${dst}" <<'PY' || die "Gagal extract archive zip."
+import sys
+import zipfile
+
+archive_path = sys.argv[1]
+dest_path = sys.argv[2]
+
+with zipfile.ZipFile(archive_path, "r") as zf:
+  zf.extractall(dest_path)
+PY
+    return 0
+  fi
+
+  tar -xzf "${archive}" -C "${dst}" || die "Gagal extract archive tar.gz."
+}
+
 resolve_archive_checksum() {
   local archive="$1"
   local checksum_file="$2"
@@ -547,15 +570,15 @@ deploy_or_update_files() {
 
   local tmp archive checksum_file src_root src_dir
   tmp="$(mktemp -d /tmp/bot-discord-src.XXXXXX)"
-  archive="${tmp}/src.tar.gz"
-  checksum_file="${tmp}/src.tar.gz.sha256"
+  archive="${tmp}/src.archive"
+  checksum_file="${tmp}/src.archive.sha256"
 
   log "Download source archive: ${SRC_ARCHIVE_URL}"
   curl -fsSL --connect-timeout 15 --max-time 180 "${SRC_ARCHIVE_URL}" -o "${archive}" || die "Gagal download archive source."
   resolve_archive_checksum "${archive}" "${checksum_file}"
 
   log "Extract archive..."
-  tar -xzf "${archive}" -C "${tmp}" || die "Gagal extract archive."
+  extract_source_archive "${archive}" "${tmp}"
 
   src_root="$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
   [[ -n "${src_root}" ]] || die "Tidak menemukan root folder hasil extract."
