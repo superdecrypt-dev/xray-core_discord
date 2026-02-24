@@ -8,6 +8,11 @@ export interface BackendActionResponse {
   data?: Record<string, unknown>;
 }
 
+export interface BackendUserOption {
+  proto: string;
+  username: string;
+}
+
 export class BackendClient {
   private readonly client: AxiosInstance;
 
@@ -27,5 +32,13 @@ export class BackendClient {
       params,
     });
     return res.data;
+  }
+
+  async listUserOptions(proto?: string): Promise<BackendUserOption[]> {
+    const res = await this.client.get<{ users?: BackendUserOption[] }>("/api/users/options", {
+      params: proto ? { proto } : {},
+    });
+    const users = Array.isArray(res.data?.users) ? res.data.users : [];
+    return users.filter((item) => item && typeof item.proto === "string" && typeof item.username === "string");
   }
 }

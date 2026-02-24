@@ -1,4 +1,5 @@
 import base64
+import grp
 import hashlib
 import json
 import os
@@ -119,6 +120,11 @@ def _read_json(path: Path) -> tuple[bool, Any]:
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    previous = None
+    try:
+        previous = path.stat()
+    except Exception:
+        previous = None
     fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=path.suffix or ".json", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as wf:
@@ -127,6 +133,25 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
             wf.flush()
             os.fsync(wf.fileno())
         os.replace(tmp, path)
+        if previous is not None:
+            try:
+                os.chmod(path, previous.st_mode & 0o777)
+            except Exception:
+                pass
+            try:
+                os.chown(path, previous.st_uid, previous.st_gid)
+            except Exception:
+                pass
+        if path.parent == XRAY_CONFDIR:
+            try:
+                os.chmod(path, 0o640)
+            except Exception:
+                pass
+            try:
+                xray_gid = grp.getgrnam("xray").gr_gid
+                os.chown(path, 0, xray_gid)
+            except Exception:
+                pass
     finally:
         try:
             if os.path.exists(tmp):
@@ -137,6 +162,11 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 def _write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    previous = None
+    try:
+        previous = path.stat()
+    except Exception:
+        previous = None
     fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=path.suffix or ".txt", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as wf:
@@ -144,6 +174,25 @@ def _write_text_atomic(path: Path, content: str) -> None:
             wf.flush()
             os.fsync(wf.fileno())
         os.replace(tmp, path)
+        if previous is not None:
+            try:
+                os.chmod(path, previous.st_mode & 0o777)
+            except Exception:
+                pass
+            try:
+                os.chown(path, previous.st_uid, previous.st_gid)
+            except Exception:
+                pass
+        if path.parent == XRAY_CONFDIR:
+            try:
+                os.chmod(path, 0o640)
+            except Exception:
+                pass
+            try:
+                xray_gid = grp.getgrnam("xray").gr_gid
+                os.chown(path, 0, xray_gid)
+            except Exception:
+                pass
     finally:
         try:
             if os.path.exists(tmp):

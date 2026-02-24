@@ -13,11 +13,17 @@ export const menu2: MenuDefinition = {
       modal: {
         title: "Add User",
         fields: [
-          { id: "proto", label: "Protocol", style: "short", required: true, placeholder: "vless/vmess/trojan" },
           { id: "username", label: "Username", style: "short", required: true, placeholder: "contoh: alice" },
           { id: "days", label: "Masa Aktif (hari)", style: "short", required: true, placeholder: "30" },
           { id: "quota_gb", label: "Quota (GB)", style: "short", required: true, placeholder: "100" },
           { id: "ip_limit", label: "IP Limit (opsional)", style: "short", required: false, placeholder: "0 = OFF" },
+          {
+            id: "speed_limit",
+            label: "Speed Limit Mbps (opsional)",
+            style: "short",
+            required: false,
+            placeholder: "off | 20 | 20/10 (down/up)",
+          },
         ],
       },
     },
@@ -43,7 +49,6 @@ export const menu2: MenuDefinition = {
       modal: {
         title: "Extend/Set Expiry",
         fields: [
-          { id: "proto", label: "Protocol", style: "short", required: true, placeholder: "vless/vmess/trojan" },
           { id: "username", label: "Username", style: "short", required: true, placeholder: "contoh: alice" },
           { id: "mode", label: "Mode", style: "short", required: true, placeholder: "extend / set" },
           { id: "value", label: "Value", style: "short", required: true, placeholder: "7 atau 2026-12-31" },
@@ -69,7 +74,6 @@ export const menu2: MenuDefinition = {
       modal: {
         title: "User Account Info",
         fields: [
-          { id: "proto", label: "Protocol", style: "short", required: true, placeholder: "vless/vmess/trojan" },
           { id: "username", label: "Username", style: "short", required: true, placeholder: "contoh: alice" },
         ],
       },

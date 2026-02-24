@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
+from ..adapters import system
 from ..auth import verify_shared_secret
 from ..config import get_settings
 from ..schemas import ActionRequest, ActionResponse
@@ -37,6 +38,21 @@ def get_main_menu_overview() -> dict:
         "dangerous_actions_enabled": settings.enable_dangerous_actions,
         "menu_count": len(data.get("menus", [])),
         "menus": data.get("menus", []),
+    }
+
+
+@router.get("/api/users/options", dependencies=[Depends(verify_shared_secret)])
+def get_user_options(proto: str | None = None) -> dict:
+    proto_norm = (proto or "").strip().lower()
+    if proto_norm and proto_norm not in {"vless", "vmess", "trojan"}:
+        return {"users": []}
+
+    records = system.list_accounts()
+    if proto_norm:
+        records = [(p, u) for p, u in records if p == proto_norm]
+
+    return {
+        "users": [{"proto": p, "username": u} for p, u in records],
     }
 
 

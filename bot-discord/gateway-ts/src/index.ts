@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  Interaction,
   MessageFlags,
   REST,
   Routes,
@@ -23,13 +24,48 @@ const backend = new BackendClient(cfg.backendBaseUrl, cfg.sharedSecret);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 async function registerSlashCommands(): Promise<void> {
-  const commands = [new SlashCommandBuilder().setName("panel").setDescription("Buka panel operasional Xray").toJSON()];
+  const commands = [new SlashCommandBuilder().setName("panel").setDescription("Buka panel operasional Xray (BETA)").toJSON()];
   const rest = new REST({ version: "10" }).setToken(cfg.token);
   await rest.put(Routes.applicationGuildCommands(cfg.applicationId, cfg.guildId), { body: commands });
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getDiscordErrorCode(err: unknown): number | null {
+  if (!err || typeof err !== "object") return null;
+  const maybe = (err as { code?: unknown }).code;
+  return typeof maybe === "number" ? maybe : null;
+}
+
+function isIgnorableInteractionError(err: unknown): boolean {
+  const code = getDiscordErrorCode(err);
+  return code === 10062 || code === 40060;
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) {
+    return `${err.name}: ${err.message}`;
+  }
+  return String(err);
+}
+
+async function safeReplyEphemeral(interaction: Interaction, content: string): Promise<void> {
+  if (!interaction.isRepliable()) return;
+  try {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    }
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) {
+      console.warn(`[gateway] skip interaction reply (ack/expired): ${formatError(err)}`);
+      return;
+    }
+    throw err;
+  }
 }
 
 async function registerSlashCommandsWithRetry(maxAttempts = 5): Promise<boolean> {
@@ -108,20 +144,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({ content: "Akses ditolak.", flags: MessageFlags.Ephemeral });
         return;
       }
-      const handled = await handleSelect(interaction);
+      const handled = await handleSelect(interaction, backend);
       if (!handled && !interaction.replied) {
         await interaction.reply({ content: "Opsi ini belum tersedia.", flags: MessageFlags.Ephemeral });
       }
     }
   } catch (err) {
-    const text = `Terjadi kesalahan: ${String(err)}`;
-    if (interaction.isRepliable()) {
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: text, flags: MessageFlags.Ephemeral });
-      } else {
-        await interaction.reply({ content: text, flags: MessageFlags.Ephemeral });
-      }
+    if (isIgnorableInteractionError(err)) {
+      console.warn(`[gateway] interaction warning (ack/expired): ${formatError(err)}`);
+      return;
     }
+    const text = `Terjadi kesalahan: ${formatError(err)}`;
+    await safeReplyEphemeral(interaction, text);
   }
 });
 
