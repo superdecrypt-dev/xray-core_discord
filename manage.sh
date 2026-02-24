@@ -725,6 +725,65 @@ account_info_sync_after_domain_change_if_needed() {
   fi
 }
 
+account_info_compat_needs_refresh() {
+  # Return 0 jika ditemukan file account info format lama yang perlu disegarkan.
+  # Kriteria:
+  # - nama file legacy (username.txt, belum username@proto.txt)
+  # - belum memiliki blok "Links Import" modern
+  # - belum memiliki baris link XHTTP
+  ensure_account_quota_dirs
+  account_collect_files
+
+  if (( ${#ACCOUNT_FILES[@]} == 0 )); then
+    return 1
+  fi
+
+  local i f proto base
+  for i in "${!ACCOUNT_FILES[@]}"; do
+    f="${ACCOUNT_FILES[$i]}"
+    proto="${ACCOUNT_FILE_PROTOS[$i]}"
+    base="$(basename "${f}")"
+
+    if [[ "${base}" != *@${proto}.txt ]]; then
+      return 0
+    fi
+
+    if ! grep -Eq '^Links Import:[[:space:]]*$' "${f}" 2>/dev/null; then
+      return 0
+    fi
+
+    if ! grep -Eq '^  XHTTP[[:space:]]*:' "${f}" 2>/dev/null; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+account_info_compat_refresh_if_needed() {
+  # Sinkronisasi one-shot saat startup manage untuk migrasi format account info lama.
+  local domain ip
+  if ! account_info_compat_needs_refresh; then
+    return 0
+  fi
+
+  domain="$(detect_domain)"
+  domain="$(echo "${domain}" | awk '{print $1}' | tr -d ';')"
+  [[ -n "${domain}" ]] || domain="-"
+  ip="$(detect_public_ip_ipapi)"
+
+  log "Format XRAY ACCOUNT INFO lama terdeteksi, menjalankan sinkronisasi kompatibilitas..."
+  if account_refresh_all_info_files "${domain}" "${ip}"; then
+    log "Sinkronisasi kompatibilitas XRAY ACCOUNT INFO selesai."
+    account_info_domain_sync_state_write "${domain}"
+    return 0
+  fi
+
+  warn "Sebagian XRAY ACCOUNT INFO gagal disinkronkan saat migrasi kompatibilitas."
+  warn "Silakan cek file di ${ACCOUNT_ROOT}."
+  return 1
+}
+
 cert_snapshot_create() {
   # args: backup_dir
   local backup_dir="$1"
@@ -1640,7 +1699,7 @@ domain_control_menu() {
       1) domain_control_set_domain_now ;;
       2) domain_control_show_info ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 }
@@ -1662,6 +1721,11 @@ PY
 
 pause() {
   read -r -p "Tekan ENTER untuk kembali..." _ || true
+}
+
+invalid_choice() {
+  warn "Pilihan tidak valid"
+  pause
 }
 
 run_action() {
@@ -2382,6 +2446,36 @@ xray_confdir_syntax_test() {
   xray run -test -confdir "${XRAY_CONFDIR}" >/dev/null 2>&1
 }
 
+xray_confdir_syntax_test_pretty() {
+  # Untuk menu Diagnostics:
+  # - tampilkan error penting jika ada
+  # - ringkas warning deprecation transport legacy agar tidak terlihat seperti fatal error
+  if ! have_cmd xray; then
+    warn "xray binary tidak ditemukan"
+    return 127
+  fi
+
+  local out rc filtered deprec_count
+  set +e
+  out="$(xray run -test -confdir "${XRAY_CONFDIR}" 2>&1)"
+  rc=$?
+  set -e
+
+  filtered="$(printf '%s\n' "${out}" | grep -Ev 'common/errors: The feature .* is deprecated' || true)"
+  deprec_count="$(printf '%s\n' "${out}" | grep -Ec 'common/errors: The feature .* is deprecated' || true)"
+
+  if [[ -n "${filtered//[[:space:]]/}" ]]; then
+    printf '%s\n' "${filtered}"
+  fi
+
+  if (( deprec_count > 0 )); then
+    warn "Ditemukan ${deprec_count} warning deprecation transport legacy (WS/HUP/gRPC/VMess/Trojan)."
+    warn "Ini warning kompatibilitas upstream, bukan syntax error conf.d."
+  fi
+
+  return "${rc}"
+}
+
 
 check_tls_expiry() {
   if have_cmd openssl && [[ -f "${CERT_FULLCHAIN}" ]]; then
@@ -3007,6 +3101,9 @@ for ib in cfg.get('inbounds', []) or []:
   elif net in ('httpupgrade','httpUpgrade'):
     hu = ss.get('httpUpgradeSettings') or ss.get('httpupgradeSettings') or {}
     val = hu.get('path') or ''
+  elif net == 'xhttp':
+    xs = ss.get('xhttpSettings') or {}
+    val = xs.get('path') or ''
   elif net == 'grpc':
     gs = ss.get('grpcSettings') or {}
     val = gs.get('serviceName') or ''
@@ -3668,15 +3765,15 @@ def fmt_mbit(v):
 
 # Public endpoint harus selaras dengan nginx public path (setup.sh).
 PUBLIC_PATHS = {
-  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
-  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
-  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
+  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc", "xhttp": "/vless-xhttp"},
+  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc", "xhttp": "/vmess-xhttp"},
+  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc", "xhttp": "/trojan-xhttp"},
 }
 
 
 def vless_link(net, val):
   q={"encryption":"none","security":"tls","type":net,"sni":domain}
-  if net in ("ws","httpupgrade"):
+  if net in ("ws","httpupgrade","xhttp"):
     q["path"]=val or "/"
   elif net=="grpc":
     if val:
@@ -3685,7 +3782,7 @@ def vless_link(net, val):
 
 def trojan_link(net, val):
   q={"security":"tls","type":net,"sni":domain}
-  if net in ("ws","httpupgrade"):
+  if net in ("ws","httpupgrade","xhttp"):
     q["path"]=val or "/"
   elif net=="grpc":
     if val:
@@ -3706,7 +3803,7 @@ def vmess_link(net, val):
     "tls":"tls",
     "sni":domain
   }
-  if net in ("ws","httpupgrade"):
+  if net in ("ws","httpupgrade","xhttp"):
     obj["path"]=val or "/"
   elif net=="grpc":
     obj["path"]=val or ""  # many clients use path as serviceName
@@ -3716,7 +3813,7 @@ def vmess_link(net, val):
 
 links={}
 public_proto = PUBLIC_PATHS.get(proto, {})
-for net in ("ws","httpupgrade","grpc"):
+for net in ("ws","httpupgrade","grpc","xhttp"):
   val = public_proto.get(net, "")
   if proto=="vless":
     links[net]=vless_link(net,val)
@@ -3753,6 +3850,7 @@ lines.append("Links Import:")
 lines.append(f"  WebSocket   : {links.get('ws','-')}")
 lines.append(f"  HTTPUpgrade : {links.get('httpupgrade','-')}")
 lines.append(f"  gRPC        : {links.get('grpc','-')}")
+lines.append(f"  XHTTP       : {links.get('xhttp','-')}")
 lines.append("")
 
 with open(acc_file, "w", encoding="utf-8") as f:
@@ -4064,15 +4162,15 @@ if not cred:
   raise SystemExit(20)
 
 PUBLIC_PATHS = {
-  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
-  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
-  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
+  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc", "xhttp": "/vless-xhttp"},
+  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc", "xhttp": "/vmess-xhttp"},
+  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc", "xhttp": "/trojan-xhttp"},
 }
 
 
 def vless_link(net, val):
   q = {"encryption": "none", "security": "tls", "type": net, "sni": domain}
-  if net in ("ws", "httpupgrade"):
+  if net in ("ws", "httpupgrade", "xhttp"):
     q["path"] = val or "/"
   elif net == "grpc" and val:
     q["serviceName"] = val
@@ -4081,7 +4179,7 @@ def vless_link(net, val):
 
 def trojan_link(net, val):
   q = {"security": "tls", "type": net, "sni": domain}
-  if net in ("ws", "httpupgrade"):
+  if net in ("ws", "httpupgrade", "xhttp"):
     q["path"] = val or "/"
   elif net == "grpc" and val:
     q["serviceName"] = val
@@ -4102,7 +4200,7 @@ def vmess_link(net, val):
     "tls": "tls",
     "sni": domain,
   }
-  if net in ("ws", "httpupgrade"):
+  if net in ("ws", "httpupgrade", "xhttp"):
     obj["path"] = val or "/"
   elif net == "grpc":
     obj["path"] = val or ""
@@ -4113,7 +4211,7 @@ def vmess_link(net, val):
 
 links = {}
 public_proto = PUBLIC_PATHS.get(proto, {})
-for net in ("ws", "httpupgrade", "grpc"):
+for net in ("ws", "httpupgrade", "grpc", "xhttp"):
   val = public_proto.get(net, "")
   if proto == "vless":
     links[net] = vless_link(net, val)
@@ -4146,6 +4244,7 @@ lines.append("Links Import:")
 lines.append(f"  WebSocket   : {links.get('ws', '-')}")
 lines.append(f"  HTTPUpgrade : {links.get('httpupgrade', '-')}")
 lines.append(f"  gRPC        : {links.get('grpc', '-')}")
+lines.append(f"  XHTTP       : {links.get('xhttp', '-')}")
 lines.append("")
 
 os.makedirs(os.path.dirname(acc_file) or ".", exist_ok=True)
@@ -4276,7 +4375,7 @@ user_add_menu() {
       previous|p|prev)
         if (( page > 0 )); then page=$((page - 1)); fi
         ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 
@@ -4524,7 +4623,7 @@ user_del_menu() {
       previous|p|prev)
         if (( page > 0 )); then page=$((page - 1)); fi
         ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 
@@ -4621,7 +4720,7 @@ user_extend_expiry_menu() {
       previous|p|prev)
         if (( page > 0 )); then page=$((page - 1)); fi
         ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 
@@ -4927,7 +5026,7 @@ user_list_menu() {
         fi
         ;;
       refresh|3) : ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 }
@@ -4953,7 +5052,7 @@ user_menu() {
       3) user_extend_expiry_menu ;;
       4) user_list_menu ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 }
@@ -6001,9 +6100,9 @@ validate_email_user() {
 
 is_default_xray_email_or_tag() {
   # Default/bawaan Xray (disembunyikan dari menu WARP per-user):
-  # default@(vless|vmess|trojan)-(ws|hup|grpc)
+  # default@(vless|vmess|trojan)-(ws|hup|grpc|xhttp)
   local s="${1:-}"
-  [[ "${s}" =~ ^default@(vless|vmess|trojan)-(ws|hup|grpc)$ ]]
+  [[ "${s}" =~ ^default@(vless|vmess|trojan)-(ws|hup|grpc|xhttp)$ ]]
 }
 
 is_readonly_geosite_domain() {
@@ -10260,10 +10359,10 @@ network_diagnostics_menu() {
         title
         echo "xray config test (confdir)"
         hr
-        if have_cmd xray; then
-          xray run -test -confdir "${XRAY_CONFDIR}" 2>&1 || true
+        if xray_confdir_syntax_test_pretty; then
+          log "Syntax conf.d: OK"
         else
-          warn "xray binary tidak ditemukan"
+          warn "Syntax conf.d: GAGAL"
         fi
         hr
         pause
@@ -10285,7 +10384,7 @@ network_diagnostics_menu() {
         pause
         ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 }
@@ -10315,7 +10414,7 @@ network_menu() {
       5) network_diagnostics_menu ;;
       6) adblock_menu ;;
       0|kembali|k|back|b) break ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 }
@@ -11390,7 +11489,7 @@ main_menu() {
       8) run_action "Maintenance" maintenance_menu ;;
       9) run_action "Install BOT Discord" install_discord_bot_menu ;;
       0|kembali|k|back|b) exit 0 ;;
-      *) warn "Pilihan tidak valid" ; sleep 1 ;;
+      *) invalid_choice ;;
     esac
   done
 }
@@ -11400,6 +11499,7 @@ main() {
   init_runtime_dirs
   ensure_account_quota_dirs
   quota_migrate_dates_to_dateonly
+  account_info_compat_refresh_if_needed || true
   main_menu
 }
 

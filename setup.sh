@@ -863,6 +863,7 @@ write_xray_config() {
   local P_VLESS_WS P_VMESS_WS P_TROJAN_WS
   local P_VLESS_HUP P_VMESS_HUP P_TROJAN_HUP
   local P_VLESS_GRPC P_VMESS_GRPC P_TROJAN_GRPC
+  local P_VLESS_XHTTP P_VMESS_XHTTP P_TROJAN_XHTTP
   local P_API
 
   P_VLESS_WS="$(pick_port)"
@@ -874,6 +875,9 @@ write_xray_config() {
   P_VLESS_GRPC="$(pick_port)"
   P_VMESS_GRPC="$(pick_port)"
   P_TROJAN_GRPC="$(pick_port)"
+  P_VLESS_XHTTP="$(pick_port)"
+  P_VMESS_XHTTP="$(pick_port)"
+  P_TROJAN_XHTTP="$(pick_port)"
   P_API="10080"
 
   if ! is_port_free "$P_API"; then
@@ -888,6 +892,7 @@ write_xray_config() {
   local I_VLESS_WS I_VMESS_WS I_TROJAN_WS
   local I_VLESS_HUP I_VMESS_HUP I_TROJAN_HUP
   local I_VLESS_GRPC I_VMESS_GRPC I_TROJAN_GRPC
+  local I_VLESS_XHTTP I_VMESS_XHTTP I_TROJAN_XHTTP
 
   I_VLESS_WS="/$(rand_str 14)"
   I_VMESS_WS="/$(rand_str 14)"
@@ -898,6 +903,9 @@ write_xray_config() {
   I_VLESS_GRPC="$(rand_str 12)"
   I_VMESS_GRPC="$(rand_str 12)"
   I_TROJAN_GRPC="$(rand_str 12)"
+  I_VLESS_XHTTP="/$(rand_str 14)"
+  I_VMESS_XHTTP="/$(rand_str 14)"
+  I_TROJAN_XHTTP="/$(rand_str 14)"
 
   mkdir -p "$(dirname "$XRAY_CONFIG")"
 
@@ -906,7 +914,7 @@ write_xray_config() {
   "log": {
     "access": "/var/log/xray/access.log",
     "error": "/var/log/xray/error.log",
-    "loglevel": "info"
+    "loglevel": "warning"
   },
   "dns": {
     "servers": [
@@ -1304,6 +1312,95 @@ write_xray_config() {
           "quic"
         ]
       }
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": ${P_VLESS_XHTTP},
+      "protocol": "vless",
+      "tag": "default@vless-xhttp",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "email": "default@vless-xhttp"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": {
+          "path": "${I_VLESS_XHTTP}"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": ${P_VMESS_XHTTP},
+      "protocol": "vmess",
+      "tag": "default@vmess-xhttp",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "alterId": 0,
+            "email": "default@vmess-xhttp"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": {
+          "path": "${I_VMESS_XHTTP}"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": ${P_TROJAN_XHTTP},
+      "protocol": "trojan",
+      "tag": "default@trojan-xhttp",
+      "settings": {
+        "clients": [
+          {
+            "password": "${TROJAN_PASS}",
+            "email": "default@trojan-xhttp"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": {
+          "path": "${I_TROJAN_XHTTP}"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
     }
   ],
   "outbounds": [
@@ -1376,6 +1473,9 @@ EOF
   declare -gx P_VLESS_GRPC="$P_VLESS_GRPC"
   declare -gx P_VMESS_GRPC="$P_VMESS_GRPC"
   declare -gx P_TROJAN_GRPC="$P_TROJAN_GRPC"
+  declare -gx P_VLESS_XHTTP="$P_VLESS_XHTTP"
+  declare -gx P_VMESS_XHTTP="$P_VMESS_XHTTP"
+  declare -gx P_TROJAN_XHTTP="$P_TROJAN_XHTTP"
 
   declare -gx I_VLESS_WS="$I_VLESS_WS"
   declare -gx I_VMESS_WS="$I_VMESS_WS"
@@ -1386,6 +1486,9 @@ EOF
   declare -gx I_VLESS_GRPC="$I_VLESS_GRPC"
   declare -gx I_VMESS_GRPC="$I_VMESS_GRPC"
   declare -gx I_TROJAN_GRPC="$I_TROJAN_GRPC"
+  declare -gx I_VLESS_XHTTP="$I_VLESS_XHTTP"
+  declare -gx I_VMESS_XHTTP="$I_VMESS_XHTTP"
+  declare -gx I_TROJAN_XHTTP="$I_TROJAN_XHTTP"
 }
 write_xray_modular_configs() {
   ok "Membuat konfigurasi modular Xray-core (conf.d)..."
@@ -1617,9 +1720,13 @@ map \$uri \$internal_port {
   ~^/vless-grpc(?:/|\$)  ${P_VLESS_GRPC};
   ~^/vmess-grpc(?:/|\$)  ${P_VMESS_GRPC};
   ~^/trojan-grpc(?:/|\$) ${P_TROJAN_GRPC};
+
+  ~^/vless-xhttp(?:/|\$)  ${P_VLESS_XHTTP};
+  ~^/vmess-xhttp(?:/|\$)  ${P_VMESS_XHTTP};
+  ~^/trojan-xhttp(?:/|\$) ${P_TROJAN_XHTTP};
 }
 
-# 2) Map Public Path -> INTERNAL PATH (WebSocket & HTTPUpgrade)
+# 2) Map Public Path -> INTERNAL PATH (WebSocket, HTTPUpgrade, XHTTP)
 map \$uri \$internal_path {
   default "";
 
@@ -1630,6 +1737,10 @@ map \$uri \$internal_path {
   ~^/vless-hup(?:/|\$)   ${I_VLESS_HUP};
   ~^/vmess-hup(?:/|\$)   ${I_VMESS_HUP};
   ~^/trojan-hup(?:/|\$)  ${I_TROJAN_HUP};
+
+  ~^/vless-xhttp(?:/|\$)  ${I_VLESS_XHTTP};
+  ~^/vmess-xhttp(?:/|\$)  ${I_VMESS_XHTTP};
+  ~^/trojan-xhttp(?:/|\$) ${I_TROJAN_XHTTP};
 }
 
 # 3) Map Public Path -> gRPC Service Name
@@ -1727,6 +1838,27 @@ server {
     # juga idle saat tidak ada traffic aktif — tanpa ini koneksi akan ter-reset.
     grpc_read_timeout 7d;
     grpc_send_timeout 7d;
+  }
+
+  # --- XHTTP ---
+  location ~ ^/(vless|vmess|trojan)-xhttp(?:/|\$) {
+    set \$up_port \$internal_port;
+    set \$up_path \$internal_path;
+
+    if (\$up_port = 0) { return 404; }
+    if (\$up_path = "") { return 404; }
+
+    proxy_redirect off;
+    rewrite ^ \$up_path break;
+    proxy_pass http://127.0.0.1:\$up_port;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+    proxy_read_timeout 7d;
+    proxy_send_timeout 7d;
   }
 
   # Default: hide everything else
