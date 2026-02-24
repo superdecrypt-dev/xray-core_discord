@@ -18,6 +18,8 @@ REPO_URL="https://github.com/superdecrypt-dev/autoscript.git"
 REPO_DIR="/opt/autoscript"
 LEGACY_REPO_DIR="/root/xray-core_discord"
 MANAGE_BIN="/usr/local/bin/manage"
+MANAGE_MODULES_SRC_DIR="${REPO_DIR}/opt/manage"
+MANAGE_MODULES_DST_DIR="/opt/manage"
 BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
 
 # -------------------------
@@ -165,6 +167,18 @@ install_manage() {
   log "Menginstal 'manage' ke ${MANAGE_BIN} ..."
   install -m 0755 "${src}" "${MANAGE_BIN}"
   ok "Perintah 'manage' tersedia di: ${MANAGE_BIN}"
+
+  if [[ -d "${MANAGE_MODULES_SRC_DIR}" ]]; then
+    log "Sinkronisasi modul manage ke ${MANAGE_MODULES_DST_DIR} ..."
+    mkdir -p "${MANAGE_MODULES_DST_DIR}"
+    cp -a "${MANAGE_MODULES_SRC_DIR}/." "${MANAGE_MODULES_DST_DIR}/"
+    find "${MANAGE_MODULES_DST_DIR}" -type d -exec chmod 755 {} + 2>/dev/null || true
+    find "${MANAGE_MODULES_DST_DIR}" -type f -name '*.sh' -exec chmod 644 {} + 2>/dev/null || true
+    chown -R root:root "${MANAGE_MODULES_DST_DIR}" 2>/dev/null || true
+    ok "Modul manage tersedia di: ${MANAGE_MODULES_DST_DIR}"
+  else
+    warn "Template modul manage tidak ditemukan di repo (${MANAGE_MODULES_SRC_DIR}); lewati sinkronisasi."
+  fi
 
   log "Menginstal installer bot Discord ke ${BOT_INSTALLER_BIN} ..."
   install -m 0755 "${bot_installer_src}" "${BOT_INSTALLER_BIN}"

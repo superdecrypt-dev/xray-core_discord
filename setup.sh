@@ -69,6 +69,11 @@ ACME_SH_DNS_CF_HOOK_URL="https://raw.githubusercontent.com/acmesh-official/acme.
 CUSTOM_GEOSITE_URL="${CUSTOM_GEOSITE_URL:-https://github.com/superdecrypt-dev/custom-geosite-xray/raw/main/custom.dat}"
 XRAY_ASSET_DIR="/usr/local/share/xray"
 CUSTOM_GEOSITE_DEST="${XRAY_ASSET_DIR}/custom.dat"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+MANAGE_MODULES_SRC_DIR="${SCRIPT_DIR}/opt/manage"
+MANAGE_MODULES_DST_DIR="/opt/manage"
+MANAGE_BUNDLE_URL="${MANAGE_BUNDLE_URL:-https://raw.githubusercontent.com/superdecrypt-dev/autoscript/main/manage_bundle.zip}"
+MANAGE_BIN="${MANAGE_BIN:-/usr/local/bin/manage}"
 
 die() {
   echo -e "${RED}[ERROR]${NC} $*" >&2
@@ -4997,6 +5002,119 @@ EOF
   fi
 }
 
+sync_manage_modules_layout() {
+  local tmpdir bundle_file downloaded="0"
+  tmpdir="$(mktemp -d)"
+  bundle_file="${tmpdir}/manage_bundle.zip"
+
+  ok "Sinkronisasi modular manage ke ${MANAGE_MODULES_DST_DIR} ..."
+
+  if curl -fsSL --connect-timeout 15 --max-time 120 "${MANAGE_BUNDLE_URL}" -o "${bundle_file}"; then
+    downloaded="1"
+    ok "manage_bundle.zip berhasil diunduh dari repo."
+  else
+    warn "Gagal unduh manage_bundle.zip dari repo: ${MANAGE_BUNDLE_URL}"
+  fi
+
+  if [[ "${downloaded}" == "1" ]]; then
+    if python3 - "${bundle_file}" "${MANAGE_MODULES_DST_DIR}" "${MANAGE_BIN}" <<'PY'
+import os
+import stat
+import sys
+import zipfile
+
+zip_path, dst_root, manage_bin = sys.argv[1:4]
+mapping = {
+  "env.sh": "core/env.sh",
+  "router.sh": "core/router.sh",
+  "ui.sh": "core/ui.sh",
+  "analytics.sh": "features/analytics.sh",
+  "backup.sh": "features/backup.sh",
+  "domain.sh": "features/domain.sh",
+  "maintenance.sh": "features/maintenance.sh",
+  "network.sh": "features/network.sh",
+  "users.sh": "features/users.sh",
+  "domain_menu.sh": "menus/domain_menu.sh",
+  "main_menu.sh": "menus/main_menu.sh",
+  "maintenance_menu.sh": "menus/maintenance_menu.sh",
+  "network_menu.sh": "menus/network_menu.sh",
+  "user_menu.sh": "menus/user_menu.sh",
+  "main.sh": "app/main.sh",
+}
+
+os.makedirs(dst_root, exist_ok=True)
+
+def basename_index(names):
+  idx = {}
+  dup = set()
+  for n in names:
+    base = os.path.basename(n)
+    if base in idx:
+      dup.add(base)
+    else:
+      idx[base] = n
+  return idx, dup
+
+with zipfile.ZipFile(zip_path, "r") as zf:
+  members = [n for n in zf.namelist() if not n.endswith("/")]
+  base_map, duplicates = basename_index(members)
+  if duplicates:
+    print("duplicate entries in zip: " + ", ".join(sorted(duplicates)), file=sys.stderr)
+    raise SystemExit(2)
+
+  missing = [name for name in mapping if name not in base_map]
+  if missing:
+    print("missing module files in zip: " + ", ".join(sorted(missing)), file=sys.stderr)
+    raise SystemExit(3)
+
+  for src_name, dst_rel in mapping.items():
+    src_member = base_map[src_name]
+    dst_path = os.path.join(dst_root, dst_rel)
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    data = zf.read(src_member)
+    with open(dst_path, "wb") as fh:
+      fh.write(data)
+    os.chmod(dst_path, 0o644)
+
+  if "manage.sh" in base_map:
+    manage_member = base_map["manage.sh"]
+    data = zf.read(manage_member)
+    with open(manage_bin, "wb") as fh:
+      fh.write(data)
+    os.chmod(manage_bin, 0o755)
+
+for sub in ("core", "features", "menus", "app"):
+  path = os.path.join(dst_root, sub)
+  if os.path.isdir(path):
+    os.chmod(path, 0o755)
+os.chmod(dst_root, 0o755)
+PY
+    then
+      chown -R root:root "${MANAGE_MODULES_DST_DIR}" 2>/dev/null || true
+      chown root:root "${MANAGE_BIN}" 2>/dev/null || true
+      ok "Template modular manage siap di: ${MANAGE_MODULES_DST_DIR}"
+      ok "Binary manage disegarkan dari bundle: ${MANAGE_BIN}"
+      rm -rf "${tmpdir}" >/dev/null 2>&1 || true
+      return 0
+    fi
+    warn "Ekstrak manage_bundle.zip gagal; fallback ke source lokal."
+  fi
+
+  if [[ ! -d "${MANAGE_MODULES_SRC_DIR}" ]]; then
+    warn "Template modul lokal tidak ditemukan (${MANAGE_MODULES_SRC_DIR}); lewati sinkronisasi /opt/manage."
+    rm -rf "${tmpdir}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  mkdir -p "${MANAGE_MODULES_DST_DIR}"
+  cp -a "${MANAGE_MODULES_SRC_DIR}/." "${MANAGE_MODULES_DST_DIR}/"
+  find "${MANAGE_MODULES_DST_DIR}" -type d -exec chmod 755 {} + 2>/dev/null || true
+  find "${MANAGE_MODULES_DST_DIR}" -type f -name '*.sh' -exec chmod 644 {} + 2>/dev/null || true
+  chown -R root:root "${MANAGE_MODULES_DST_DIR}" 2>/dev/null || true
+  ok "Template modular manage siap di: ${MANAGE_MODULES_DST_DIR} (fallback lokal)"
+  rm -rf "${tmpdir}" >/dev/null 2>&1 || true
+}
+
 install_domain_cert_guard() {
   ok "Setup domain & cert guard (xray-domain-guard)..."
 
@@ -5543,6 +5661,7 @@ main() {
   configure_xray_service_confdir
   write_nginx_config
   install_management_scripts
+  sync_manage_modules_layout
   install_xray_speed_limiter_foundation
   install_observability_alerting
   install_domain_cert_guard
