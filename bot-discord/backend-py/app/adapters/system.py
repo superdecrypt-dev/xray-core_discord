@@ -1,8 +1,9 @@
+import base64
 import json
 import re
 import shutil
 import subprocess
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -12,9 +13,17 @@ XRAY_CONFDIR = Path("/usr/local/etc/xray/conf.d")
 NGINX_CONF = Path("/etc/nginx/conf.d/xray.conf")
 CERT_FULLCHAIN = Path("/opt/cert/fullchain.pem")
 NETWORK_STATE_FILE = Path("/var/lib/xray-manage/network_state.json")
+XRAY_OBSERVE_BIN = Path("/usr/local/bin/xray-observe")
+XRAY_OBSERVE_CONFIG_FILE = Path("/etc/xray-observe/config.env")
+XRAY_OBSERVE_ALERT_LOG = Path("/var/log/xray-observe/alerts.log")
+XRAY_OBSERVE_REPORT_FILE = Path("/var/lib/xray-observe/last-report.txt")
+XRAY_DOMAIN_GUARD_BIN = Path("/usr/local/bin/xray-domain-guard")
+XRAY_DOMAIN_GUARD_CONFIG_FILE = Path("/etc/xray-domain-guard/config.env")
+XRAY_DOMAIN_GUARD_LOG_FILE = Path("/var/log/xray-observe/domain-guard.log")
 PROTOCOLS = ("vless", "vmess", "trojan")
 QUOTA_UNIT_DECIMAL = {"decimal", "gb", "1000", "gigabyte"}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+EXIT_CODE_RE = re.compile(r"^\[exit (\d+)\]$")
 ALLOWED_SERVICES = (
     "xray",
     "nginx",
@@ -110,6 +119,47 @@ def service_state(name: str) -> str:
     if ok:
         return out.splitlines()[-1].strip()
     return out.splitlines()[-1].strip() if out.strip() else "unknown"
+
+
+def systemctl_enabled_state(name: str) -> str:
+    ok, out = run_cmd(["systemctl", "is-enabled", name], timeout=8)
+    if ok:
+        return out.splitlines()[-1].strip()
+    return out.splitlines()[-1].strip() if out.strip() else "unknown"
+
+
+def _extract_exit_code(raw: str) -> int | None:
+    line = str(raw or "").splitlines()[0].strip() if str(raw or "").splitlines() else ""
+    m = EXIT_CODE_RE.match(line)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _tail_lines(path: Path, limit: int = 80) -> list[str]:
+    if limit < 1:
+        limit = 1
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return []
+    return lines[-limit:]
+
+
+def _human_bytes(value: int) -> str:
+    n = max(0, int(value))
+    if n >= 1024**4:
+        return f"{n / (1024**4):.2f} TiB"
+    if n >= 1024**3:
+        return f"{n / (1024**3):.2f} GiB"
+    if n >= 1024**2:
+        return f"{n / (1024**2):.2f} MiB"
+    if n >= 1024:
+        return f"{n / 1024:.2f} KiB"
+    return f"{n} B"
 
 
 def op_status_overview() -> tuple[str, str]:
@@ -224,6 +274,171 @@ def op_tls_info() -> tuple[bool, str, str]:
     if ok:
         return True, "TLS Certificate Info", out
     return False, "TLS Certificate Info", f"Gagal membaca cert:\n{out}"
+
+
+def op_observe_snapshot() -> tuple[bool, str, str]:
+    title = "Observability Snapshot"
+    if not XRAY_OBSERVE_BIN.exists():
+        return False, title, "xray-observe belum terpasang. Jalankan setup.sh terbaru."
+
+    ok, out = run_cmd([str(XRAY_OBSERVE_BIN), "once"], timeout=180)
+    rc = 0 if ok else _extract_exit_code(out)
+
+    summary = "Snapshot selesai."
+    if rc == 0:
+        summary = "Snapshot sehat (critical=0)."
+    elif rc == 1:
+        summary = "Snapshot selesai dengan critical issue."
+    elif rc is not None:
+        summary = f"Snapshot selesai dengan status {rc}."
+
+    lines = [
+        summary,
+        f"Config path : {XRAY_OBSERVE_CONFIG_FILE}",
+        f"Alert path  : {XRAY_OBSERVE_ALERT_LOG}",
+        f"Report path : {XRAY_OBSERVE_REPORT_FILE}",
+    ]
+
+    if XRAY_OBSERVE_REPORT_FILE.exists():
+        report_tail = _tail_lines(XRAY_OBSERVE_REPORT_FILE, limit=24)
+        if report_tail:
+            lines.extend(["", "Last report (tail):", *report_tail])
+
+    if out and out != "(no output)":
+        out_lines = [line for line in out.splitlines() if line.strip() and not line.strip().startswith("[exit ")]
+        if out_lines:
+            lines.extend(["", "Command output:", *out_lines[:30]])
+
+    msg = "\n".join(lines)
+    if rc in (None, 0):
+        return True, title, msg
+    return False, title, msg
+
+
+def op_observe_status() -> tuple[bool, str, str]:
+    title = "Observability Status"
+    if not XRAY_OBSERVE_BIN.exists():
+        return False, title, "xray-observe belum terpasang. Jalankan setup.sh terbaru."
+
+    lines = [
+        f"Binary       : {XRAY_OBSERVE_BIN}",
+        f"Config path  : {XRAY_OBSERVE_CONFIG_FILE}",
+        f"Alert path   : {XRAY_OBSERVE_ALERT_LOG}",
+        f"Report path  : {XRAY_OBSERVE_REPORT_FILE}",
+        "",
+        f"Timer active : {service_state('xray-observe.timer')}",
+        f"Timer enable : {systemctl_enabled_state('xray-observe.timer')}",
+        f"Svc active   : {service_state('xray-observe.service')}",
+    ]
+
+    if XRAY_OBSERVE_REPORT_FILE.exists():
+        report_tail = _tail_lines(XRAY_OBSERVE_REPORT_FILE, limit=24)
+        if report_tail:
+            lines.extend(["", "Last report (tail):", *report_tail])
+    else:
+        lines.append("")
+        lines.append("Belum ada report observability.")
+
+    return True, title, "\n".join(lines)
+
+
+def op_observe_alert_log(lines: int = 80) -> tuple[bool, str, str]:
+    title = "Observability Alert Log"
+    if not XRAY_OBSERVE_ALERT_LOG.exists():
+        return False, title, f"Log alert belum tersedia: {XRAY_OBSERVE_ALERT_LOG}"
+
+    log_lines = _tail_lines(XRAY_OBSERVE_ALERT_LOG, limit=lines)
+    if not log_lines:
+        return False, title, f"Log alert kosong: {XRAY_OBSERVE_ALERT_LOG}"
+    return True, title, "\n".join(log_lines)
+
+
+def op_domain_guard_check() -> tuple[bool, str, str]:
+    title = "Domain & Cert Guard Check"
+    if not XRAY_DOMAIN_GUARD_BIN.exists():
+        return False, title, "xray-domain-guard belum terpasang. Jalankan setup.sh terbaru."
+
+    ok, out = run_cmd([str(XRAY_DOMAIN_GUARD_BIN), "check"], timeout=180)
+    rc = 0 if ok else _extract_exit_code(out)
+
+    summary = "Check selesai."
+    if rc == 0:
+        summary = "Domain & cert sehat."
+    elif rc == 1:
+        summary = "Check selesai: warning terdeteksi."
+    elif rc == 2:
+        summary = "Check selesai: kondisi critical terdeteksi."
+    elif rc is not None:
+        summary = f"Check selesai dengan status {rc}."
+
+    lines = [
+        summary,
+        f"Config path : {XRAY_DOMAIN_GUARD_CONFIG_FILE}",
+        f"Log path    : {XRAY_DOMAIN_GUARD_LOG_FILE}",
+    ]
+    if out and out != "(no output)":
+        out_lines = [line for line in out.splitlines() if line.strip() and not line.strip().startswith("[exit ")]
+        if out_lines:
+            lines.extend(["", "Command output:", *out_lines[:40]])
+    msg = "\n".join(lines)
+    if rc in (None, 0):
+        return True, title, msg
+    return False, title, msg
+
+
+def op_domain_guard_status() -> tuple[bool, str, str]:
+    title = "Domain & Cert Guard Status"
+    if not XRAY_DOMAIN_GUARD_BIN.exists():
+        return False, title, "xray-domain-guard belum terpasang. Jalankan setup.sh terbaru."
+
+    lines = [
+        f"Binary       : {XRAY_DOMAIN_GUARD_BIN}",
+        f"Config path  : {XRAY_DOMAIN_GUARD_CONFIG_FILE}",
+        f"Log path     : {XRAY_DOMAIN_GUARD_LOG_FILE}",
+        "",
+        f"Timer active : {service_state('xray-domain-guard.timer')}",
+        f"Timer enable : {systemctl_enabled_state('xray-domain-guard.timer')}",
+        f"Svc active   : {service_state('xray-domain-guard.service')}",
+    ]
+
+    if XRAY_DOMAIN_GUARD_LOG_FILE.exists():
+        log_tail = _tail_lines(XRAY_DOMAIN_GUARD_LOG_FILE, limit=24)
+        if log_tail:
+            lines.extend(["", "Domain guard log (tail):", *log_tail])
+
+    return True, title, "\n".join(lines)
+
+
+def op_domain_guard_renew_if_needed(force: bool = False) -> tuple[bool, str, str]:
+    title = "Domain & Cert Guard Renew-if-Needed"
+    if not XRAY_DOMAIN_GUARD_BIN.exists():
+        return False, title, "xray-domain-guard belum terpasang. Jalankan setup.sh terbaru."
+
+    cmd = [str(XRAY_DOMAIN_GUARD_BIN), "renew-if-needed"]
+    if force:
+        cmd.append("--force")
+    ok, out = run_cmd(cmd, timeout=300)
+    rc = 0 if ok else _extract_exit_code(out)
+
+    summary = "Renew-if-needed selesai."
+    if rc == 0:
+        summary = "Renew-if-needed selesai, status sehat."
+    elif rc == 1:
+        summary = "Renew-if-needed selesai dengan warning."
+    elif rc == 2:
+        summary = "Renew-if-needed selesai namun masih ada kondisi critical."
+    elif rc is not None:
+        summary = f"Renew-if-needed selesai dengan status {rc}."
+
+    lines = [summary, f"Log path: {XRAY_DOMAIN_GUARD_LOG_FILE}"]
+    if out and out != "(no output)":
+        out_lines = [line for line in out.splitlines() if line.strip() and not line.strip().startswith("[exit ")]
+        if out_lines:
+            lines.extend(["", "Command output:", *out_lines[:40]])
+    msg = "\n".join(lines)
+    if rc in (None, 0):
+        return True, title, msg
+    return False, title, msg
 
 
 def list_accounts() -> list[tuple[str, str]]:
@@ -741,6 +956,192 @@ def op_domain_nginx_server_name() -> tuple[str, str]:
     if not lines:
         lines.append("(tidak ada baris server_name)")
     return "Domain Control - Nginx Server Name", "\n".join(lines)
+
+
+def _traffic_analytics_dataset() -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    proto_summary: dict[str, dict[str, int]] = {
+        proto: {"users": 0, "used_bytes": 0, "quota_bytes": 0}
+        for proto in PROTOCOLS
+    }
+
+    for proto in PROTOCOLS:
+        for username, path in _iter_proto_quota_files(proto):
+            ok, payload = read_json(path)
+            data = payload if ok and isinstance(payload, dict) else {}
+
+            resolved_username = str(data.get("username") or username).strip() or username
+            used_bytes = max(0, _to_int(data.get("quota_used"), 0))
+            quota_bytes = max(0, _to_int(data.get("quota_limit"), 0))
+            expired_at = str(data.get("expired_at") or "-").strip()[:10] or "-"
+
+            entries.append(
+                {
+                    "username": resolved_username,
+                    "proto": proto,
+                    "used_bytes": used_bytes,
+                    "quota_bytes": quota_bytes,
+                    "expired_at": expired_at,
+                    "source_file": str(path),
+                }
+            )
+            proto_summary[proto]["users"] += 1
+            proto_summary[proto]["used_bytes"] += used_bytes
+            proto_summary[proto]["quota_bytes"] += quota_bytes
+
+    entries.sort(
+        key=lambda item: (
+            -int(item.get("used_bytes", 0)),
+            str(item.get("username", "")).lower(),
+            str(item.get("proto", "")).lower(),
+        )
+    )
+
+    total_used = sum(int(item.get("used_bytes", 0)) for item in entries)
+    total_quota = sum(int(item.get("quota_bytes", 0)) for item in entries)
+
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "quota_root": str(QUOTA_ROOT),
+        "total_users": len(entries),
+        "total_used_bytes": total_used,
+        "total_quota_bytes": total_quota,
+        "protocols": proto_summary,
+        "top_users": entries,
+    }
+
+
+def _traffic_pct_text(used_bytes: int, quota_bytes: int) -> str:
+    if quota_bytes <= 0:
+        return "-"
+    return f"{(used_bytes * 100.0 / quota_bytes):.1f}"
+
+
+def op_traffic_analytics_overview() -> tuple[str, str]:
+    data = _traffic_analytics_dataset()
+    total_users = int(data.get("total_users") or 0)
+    total_used = int(data.get("total_used_bytes") or 0)
+    total_quota = int(data.get("total_quota_bytes") or 0)
+    avg_used = int(total_used / total_users) if total_users > 0 else 0
+
+    lines = [
+        f"Generated UTC : {data.get('generated_at_utc') or '-'}",
+        f"Total Users   : {total_users}",
+        f"Total Used    : {_human_bytes(total_used)}",
+        f"Total Quota   : {_human_bytes(total_quota)}",
+        f"Avg/User Used : {_human_bytes(avg_used)}",
+        "",
+        "By Protocol:",
+    ]
+
+    protocols = data.get("protocols") if isinstance(data.get("protocols"), dict) else {}
+    for proto in PROTOCOLS:
+        info = protocols.get(proto) if isinstance(protocols, dict) else {}
+        users = _to_int((info or {}).get("users"), 0)
+        used = _to_int((info or {}).get("used_bytes"), 0)
+        quota = _to_int((info or {}).get("quota_bytes"), 0)
+        lines.append(
+            f"  {proto.upper():<6} users={users:<4} used={_human_bytes(used):<12} quota={_human_bytes(quota)}"
+        )
+
+    top_users = data.get("top_users") if isinstance(data.get("top_users"), list) else []
+    lines.extend(["", "Top 5 Users:"])
+    if not top_users:
+        lines.append("  (kosong)")
+    else:
+        for idx, row in enumerate(top_users[:5], start=1):
+            username = str((row or {}).get("username") or "-")
+            proto = str((row or {}).get("proto") or "-").upper()
+            used = _human_bytes(_to_int((row or {}).get("used_bytes"), 0))
+            lines.append(f"  {idx:>2}. {username:<20} {proto:<6} {used}")
+
+    return "Traffic Analytics - Overview", "\n".join(lines)
+
+
+def op_traffic_analytics_top_users(limit: int = 15) -> tuple[str, str]:
+    cap = max(1, min(200, int(limit)))
+    data = _traffic_analytics_dataset()
+    rows = data.get("top_users") if isinstance(data.get("top_users"), list) else []
+    if not rows:
+        return "Traffic Analytics - Top Users", "Belum ada data traffic user."
+
+    lines = [
+        f"Top {cap} user berdasarkan penggunaan traffic:",
+        "",
+        f"{'NO':<4} {'PROTO':<8} {'USERNAME':<20} {'USED':<12} {'QUOTA':<12} {'USE%':>6} {'EXPIRED':<10}",
+        f"{'-'*4:<4} {'-'*8:<8} {'-'*20:<20} {'-'*12:<12} {'-'*12:<12} {'-'*6:>6} {'-'*10:<10}",
+    ]
+    for idx, row in enumerate(rows[:cap], start=1):
+        proto = str((row or {}).get("proto") or "-").upper()
+        username = str((row or {}).get("username") or "-")[:20]
+        used = _to_int((row or {}).get("used_bytes"), 0)
+        quota = _to_int((row or {}).get("quota_bytes"), 0)
+        exp = str((row or {}).get("expired_at") or "-")[:10]
+        lines.append(
+            f"{idx:<4} {proto:<8} {username:<20} {_human_bytes(used):<12} {_human_bytes(quota):<12} "
+            f"{_traffic_pct_text(used, quota):>6} {exp:<10}"
+        )
+    return "Traffic Analytics - Top Users", "\n".join(lines)
+
+
+def op_traffic_analytics_search(query: str) -> tuple[str, str]:
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return "Traffic Analytics - Search", "Keyword pencarian wajib diisi."
+
+    data = _traffic_analytics_dataset()
+    rows = data.get("top_users") if isinstance(data.get("top_users"), list) else []
+    hits = [
+        row
+        for row in rows
+        if needle in f"{str((row or {}).get('username') or '').strip()}@{str((row or {}).get('proto') or '').strip()}".lower()
+    ]
+    if not hits:
+        return "Traffic Analytics - Search", f"Tidak ada user cocok untuk keyword: {query}"
+
+    lines = [
+        f"Ditemukan {len(hits)} user.",
+        "",
+        f"{'NO':<4} {'PROTO':<8} {'USERNAME':<20} {'USED':<12} {'QUOTA':<12} {'USE%':>6} {'EXPIRED':<10}",
+        f"{'-'*4:<4} {'-'*8:<8} {'-'*20:<20} {'-'*12:<12} {'-'*12:<12} {'-'*6:>6} {'-'*10:<10}",
+    ]
+    for idx, row in enumerate(hits[:200], start=1):
+        proto = str((row or {}).get("proto") or "-").upper()
+        username = str((row or {}).get("username") or "-")[:20]
+        used = _to_int((row or {}).get("used_bytes"), 0)
+        quota = _to_int((row or {}).get("quota_bytes"), 0)
+        exp = str((row or {}).get("expired_at") or "-")[:10]
+        lines.append(
+            f"{idx:<4} {proto:<8} {username:<20} {_human_bytes(used):<12} {_human_bytes(quota):<12} "
+            f"{_traffic_pct_text(used, quota):>6} {exp:<10}"
+        )
+    return "Traffic Analytics - Search", "\n".join(lines)
+
+
+def op_traffic_analytics_export_json() -> tuple[bool, str, str, dict[str, str] | None]:
+    title = "Traffic Analytics - Export JSON"
+    payload = _traffic_analytics_dataset()
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    if len(raw) > 1_900_000:
+        return (
+            False,
+            title,
+            "Dataset terlalu besar untuk lampiran Discord (>1.9MB). Gunakan menu CLI untuk export penuh.",
+            None,
+        )
+
+    filename = f"traffic-analytics-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+    download = {
+        "filename": filename,
+        "content_base64": base64.b64encode(raw).decode("ascii"),
+        "content_type": "application/json",
+    }
+    msg = (
+        "Dataset traffic analytics siap diunduh.\n"
+        f"- File: {filename}\n"
+        f"- Total users: {payload.get('total_users', 0)}"
+    )
+    return True, title, msg, download
 
 
 def _speedtest_bin() -> str | None:

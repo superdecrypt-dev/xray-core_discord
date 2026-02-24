@@ -5,7 +5,7 @@ export const menu7: MenuDefinition = {
   label: "Security",
   description: "Status fail2ban dan parameter hardening kernel.",
   actions: [
-    { id: "fail2ban_status", label: "Fail2ban Status", mode: "direct", style: "primary" },
-    { id: "sysctl_summary", label: "Sysctl Summary View", mode: "direct", style: "secondary" },
+    { id: "fail2ban_status", label: "View Fail2ban", mode: "direct", style: "primary" },
+    { id: "sysctl_summary", label: "View Sysctl", mode: "direct", style: "secondary" },
   ],
 };

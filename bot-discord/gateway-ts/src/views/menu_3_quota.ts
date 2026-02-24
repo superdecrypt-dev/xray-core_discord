@@ -5,10 +5,10 @@ export const menu3: MenuDefinition = {
   label: "Quota & Access Control",
   description: "Ringkasan kuota dan kontrol akses per pengguna.",
   actions: [
-    { id: "summary", label: "Quota Summary View", mode: "direct", style: "primary" },
+    { id: "summary", label: "View Quota Summary", mode: "direct", style: "primary" },
     {
       id: "detail",
-      label: "Quota Detail View",
+      label: "View Quota Detail",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -49,7 +49,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "manual_block",
-      label: "Manual Block ON/OFF",
+      label: "Toggle Manual Block",
       mode: "modal",
       style: "danger",
       modal: {
@@ -63,7 +63,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "ip_limit_enable",
-      label: "IP Limit Toggle",
+      label: "Toggle IP Limit",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -77,7 +77,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "set_ip_limit",
-      label: "Set IP Limit Value",
+      label: "Set IP Limit",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -91,7 +91,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "unlock_ip_lock",
-      label: "Unlock IP Locked",
+      label: "Unlock IP Lock",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -104,7 +104,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "set_speed_download",
-      label: "Set Speed Download",
+      label: "Set Speed Down",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -118,7 +118,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "set_speed_upload",
-      label: "Set Speed Upload",
+      label: "Set Speed Up",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -132,7 +132,7 @@ export const menu3: MenuDefinition = {
     },
     {
       id: "speed_limit",
-      label: "Speed Limit ON/OFF",
+      label: "Toggle Speed Limit",
       mode: "modal",
       style: "secondary",
       modal: {

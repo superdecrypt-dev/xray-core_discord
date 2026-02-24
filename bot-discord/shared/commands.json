@@ -5,9 +5,12 @@
       "label": "Status & Diagnostics",
       "description": "Status server, validasi konfigurasi Xray, dan informasi TLS.",
       "actions": [
-        { "id": "overview", "label": "Ringkasan Status", "mode": "direct", "style": "primary" },
-        { "id": "xray_test", "label": "Test Config Xray", "mode": "direct", "style": "secondary" },
-        { "id": "tls_info", "label": "TLS Info", "mode": "direct", "style": "secondary" }
+        { "id": "overview", "label": "View Status", "mode": "direct", "style": "primary" },
+        { "id": "xray_test", "label": "Run Xray Test", "mode": "direct", "style": "secondary" },
+        { "id": "tls_info", "label": "View TLS Info", "mode": "direct", "style": "secondary" },
+        { "id": "observe_snapshot", "label": "Run Observe Snap", "mode": "direct", "style": "secondary" },
+        { "id": "observe_status", "label": "View Observe Stat", "mode": "direct", "style": "secondary" },
+        { "id": "observe_alert_log", "label": "View Alert Log", "mode": "direct", "style": "secondary" }
       ]
     },
     {
@@ -47,7 +50,7 @@
         },
         {
           "id": "extend_expiry",
-          "label": "Extend/Set Expiry",
+          "label": "Set User Expiry",
           "mode": "modal",
           "style": "primary",
           "modal": {
@@ -60,7 +63,7 @@
             ]
           }
         },
-        { "id": "list_users", "label": "List Users", "mode": "direct", "style": "primary" },
+        { "id": "list_users", "label": "View User List", "mode": "direct", "style": "primary" },
         {
           "id": "search_user",
           "label": "Search User",
@@ -75,7 +78,7 @@
         },
         {
           "id": "account_info",
-          "label": "Account Info",
+          "label": "View Account Info",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -93,10 +96,10 @@
       "label": "Quota & Access Control",
       "description": "Ringkasan kuota dan kontrol akses per pengguna.",
       "actions": [
-        { "id": "summary", "label": "Quota Summary", "mode": "direct", "style": "primary" },
+        { "id": "summary", "label": "View Quota Summary", "mode": "direct", "style": "primary" },
         {
           "id": "detail",
-          "label": "Quota Detail",
+          "label": "View Quota Detail",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -137,7 +140,7 @@
         },
         {
           "id": "manual_block",
-          "label": "Manual Block ON/OFF",
+          "label": "Toggle Manual Block",
           "mode": "modal",
           "style": "danger",
           "modal": {
@@ -151,7 +154,7 @@
         },
         {
           "id": "ip_limit_enable",
-          "label": "IP Limit ON/OFF",
+          "label": "Toggle IP Limit",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -192,7 +195,7 @@
         },
         {
           "id": "set_speed_download",
-          "label": "Set Speed Download",
+          "label": "Set Speed Down",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -206,7 +209,7 @@
         },
         {
           "id": "set_speed_upload",
-          "label": "Set Speed Upload",
+          "label": "Set Speed Up",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -220,7 +223,7 @@
         },
         {
           "id": "speed_limit",
-          "label": "Speed Limit ON/OFF",
+          "label": "Toggle Speed Limit",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -239,7 +242,7 @@
       "label": "Network Controls",
       "description": "Ringkasan outbound, routing, DNS, dan status network.",
       "actions": [
-        { "id": "egress_summary", "label": "Egress Summary", "mode": "direct", "style": "primary" },
+        { "id": "egress_summary", "label": "View Egress Sum", "mode": "direct", "style": "primary" },
         {
           "id": "set_egress_mode",
           "label": "Set Egress Mode",
@@ -254,7 +257,7 @@
         },
         {
           "id": "set_balancer_strategy",
-          "label": "Set Balancer Strategy",
+          "label": "Set Balance Strat",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -264,10 +267,10 @@
             ]
           }
         },
-        { "id": "set_balancer_selector_auto", "label": "Balancer Selector Auto", "mode": "direct", "style": "secondary" },
+        { "id": "set_balancer_selector_auto", "label": "Auto Balance Sel", "mode": "direct", "style": "secondary" },
         {
           "id": "set_balancer_selector",
-          "label": "Set Balancer Selector",
+          "label": "Set Balance Sel",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -277,7 +280,7 @@
             ]
           }
         },
-        { "id": "dns_summary", "label": "DNS Summary", "mode": "direct", "style": "secondary" },
+        { "id": "dns_summary", "label": "View DNS Summary", "mode": "direct", "style": "secondary" },
         {
           "id": "set_dns_primary",
           "label": "Set Primary DNS",
@@ -304,7 +307,7 @@
         },
         {
           "id": "set_dns_query_strategy",
-          "label": "Set Query Strategy",
+          "label": "Set DNS Strategy",
           "mode": "modal",
           "style": "secondary",
           "modal": {
@@ -321,16 +324,16 @@
     {
       "id": "5",
       "label": "Domain Control",
-      "description": "Set domain via Custom/Cloudflare wizard dengan issue cert terintegrasi.",
+      "description": "Atur domain aktif + sertifikat.\nManual: pakai domain sendiri yang sudah pointing ke IP VPS.\nAuto: pakai root domain bawaan sistem (subdomain dibuat otomatis via API Cloudflare).",
       "actions": [
         {
           "id": "setup_domain_custom",
-          "label": "Set Domain + Cert (Recommended)",
+          "label": "Set Domain Manual",
           "mode": "modal",
           "style": "danger",
           "confirm": true,
           "modal": {
-            "title": "Set Domain + Cert (Custom)",
+            "title": "Set Domain Manual",
             "fields": [
               { "id": "domain", "label": "Domain (FQDN)", "style": "short", "required": true, "placeholder": "vpn.example.com" }
             ]
@@ -338,12 +341,12 @@
         },
         {
           "id": "setup_domain_cloudflare",
-          "label": "Set Domain Cloudflare",
+          "label": "Set Domain Auto",
           "mode": "modal",
           "style": "danger",
           "confirm": true,
           "modal": {
-            "title": "Cloudflare Domain Wizard",
+            "title": "Set Domain Auto (API Cloudflare)",
             "fields": [
               { "id": "root_domain", "label": "Root Domain", "style": "short", "required": true, "placeholder": "1 atau vyxara1.web.id" },
               { "id": "subdomain_mode", "label": "Subdomain Mode", "style": "short", "required": false, "placeholder": "auto / manual (default: auto)" },
@@ -353,9 +356,12 @@
             ]
           }
         },
-        { "id": "domain_info", "label": "Domain Info", "mode": "direct", "style": "primary" },
-        { "id": "nginx_server_name", "label": "Nginx Server Name", "mode": "direct", "style": "secondary" },
-        { "id": "refresh_account_info", "label": "Refresh Account Info", "mode": "direct", "style": "secondary" }
+        { "id": "domain_info", "label": "View Domain Info", "mode": "direct", "style": "primary" },
+        { "id": "domain_guard_check", "label": "Run Guard Check", "mode": "direct", "style": "secondary" },
+        { "id": "domain_guard_status", "label": "View Guard Stat", "mode": "direct", "style": "secondary" },
+        { "id": "domain_guard_renew", "label": "Run Guard Renew", "mode": "direct", "style": "danger", "confirm": true },
+        { "id": "nginx_server_name", "label": "View Nginx Name", "mode": "direct", "style": "secondary" },
+        { "id": "refresh_account_info", "label": "Refresh Accounts", "mode": "direct", "style": "secondary" }
       ]
     },
     {
@@ -364,7 +370,7 @@
       "description": "Pengujian kecepatan jaringan dan versi binary.",
       "actions": [
         { "id": "run", "label": "Run Speedtest", "mode": "direct", "style": "primary" },
-        { "id": "version", "label": "Speedtest Version", "mode": "direct", "style": "secondary" }
+        { "id": "version", "label": "View Version", "mode": "direct", "style": "secondary" }
       ]
     },
     {
@@ -372,8 +378,8 @@
       "label": "Security",
       "description": "Status fail2ban dan parameter hardening kernel.",
       "actions": [
-        { "id": "fail2ban_status", "label": "Fail2ban Status", "mode": "direct", "style": "primary" },
-        { "id": "sysctl_summary", "label": "Sysctl Summary", "mode": "direct", "style": "secondary" }
+        { "id": "fail2ban_status", "label": "View Fail2ban", "mode": "direct", "style": "primary" },
+        { "id": "sysctl_summary", "label": "View Sysctl", "mode": "direct", "style": "secondary" }
       ]
     },
     {
@@ -381,9 +387,42 @@
       "label": "Maintenance",
       "description": "Status layanan dan restart layanan.",
       "actions": [
-        { "id": "service_status", "label": "Service Status", "mode": "direct", "style": "primary" },
+        { "id": "service_status", "label": "View Services", "mode": "direct", "style": "primary" },
         { "id": "restart_xray", "label": "Restart Xray", "mode": "direct", "style": "danger", "confirm": true },
         { "id": "restart_nginx", "label": "Restart Nginx", "mode": "direct", "style": "danger", "confirm": true }
+      ]
+    },
+    {
+      "id": "12",
+      "label": "Traffic Analytics",
+      "description": "Analitik traffic user berdasarkan metadata quota (overview, top users, search, dan export).",
+      "actions": [
+        { "id": "overview", "label": "View Overview", "mode": "direct", "style": "primary" },
+        {
+          "id": "top_users",
+          "label": "View Top Users",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Top Users by Usage",
+            "fields": [
+              { "id": "limit", "label": "Limit", "style": "short", "required": true, "placeholder": "15 (maks 200)" }
+            ]
+          }
+        },
+        {
+          "id": "search_user",
+          "label": "Search User",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Search User Traffic",
+            "fields": [
+              { "id": "query", "label": "Keyword", "style": "short", "required": true, "placeholder": "alice atau vless" }
+            ]
+          }
+        },
+        { "id": "export_json", "label": "Export JSON", "mode": "direct", "style": "secondary" }
       ]
     }
   ]

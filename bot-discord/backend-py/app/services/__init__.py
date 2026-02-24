@@ -7,6 +7,7 @@ from . import (
     menu_6_speedtest,
     menu_7_security,
     menu_8_maintenance,
+    menu_12_traffic,
 )
 
 MENU_HANDLERS = {
@@ -18,4 +19,5 @@ MENU_HANDLERS = {
     "6": menu_6_speedtest.handle,
     "7": menu_7_security.handle,
     "8": menu_8_maintenance.handle,
+    "12": menu_12_traffic.handle,
 }

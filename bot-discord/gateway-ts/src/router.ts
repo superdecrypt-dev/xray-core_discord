@@ -7,8 +7,9 @@ import { menu5 } from "./views/menu_5_domain";
 import { menu6 } from "./views/menu_6_speedtest";
 import { menu7 } from "./views/menu_7_security";
 import { menu8 } from "./views/menu_8_maintenance";
+import { menu12 } from "./views/menu_12_traffic";
 
-export const MENUS: MenuDefinition[] = [menu1, menu2, menu3, menu4, menu5, menu6, menu7, menu8];
+export const MENUS: MenuDefinition[] = [menu1, menu2, menu3, menu4, menu5, menu6, menu7, menu8, menu12];
 
 export function findMenu(menuId: string): MenuDefinition | undefined {
   return MENUS.find((m) => m.id === menuId);

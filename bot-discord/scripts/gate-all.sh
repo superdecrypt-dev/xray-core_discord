@@ -172,11 +172,16 @@ def rec(name, ok):
 s, b = get("/health")
 rec("health", s == 200 and b.get("status") == "ok")
 s, b = get("/api/main-menu", headers={"X-Internal-Shared-Secret": SECRET})
-rec("main_menu_auth", s == 200 and b.get("menu_count") == 8)
+menu_ids = [str(m.get("id")) for m in (b.get("menus") or []) if isinstance(m, dict)]
+rec("main_menu_auth", s == 200 and b.get("menu_count", 0) >= 9 and "12" in menu_ids)
 s, b = get_allow_error("/api/main-menu")
 rec("auth_guard", s == 401)
 s, b = post("/api/menu/5/action", {"action": "domain_info", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
 rec("menu5_domain_info", s == 200 and b.get("code") == "ok")
+s, b = post("/api/menu/1/action", {"action": "observe_status", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
+rec("menu1_observe_status", s == 200 and b.get("code") == "ok")
+s, b = post("/api/menu/12/action", {"action": "overview", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
+rec("menu12_overview", s == 200 and b.get("code") == "ok")
 
 if not all(ok for _, ok in checks):
     raise SystemExit("gate3_failed")
@@ -227,11 +232,16 @@ def rec(name, ok):
 s,b=get("/health")
 rec("health", s==200 and b.get("status")=="ok")
 s,b=get("/api/main-menu", headers={"X-Internal-Shared-Secret":SECRET})
-rec("main_menu_auth", s==200 and b.get("menu_count")==8)
+menu_ids=[str(m.get("id")) for m in (b.get("menus") or []) if isinstance(m, dict)]
+rec("main_menu_auth", s==200 and b.get("menu_count", 0)>=9 and "12" in menu_ids)
 s,b=get_allow_error("/api/main-menu")
 rec("auth_guard", s==401)
 s,b=post("/api/menu/5/action", {"action":"domain_info","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
 rec("menu5_domain_info", s==200 and b.get("code")=="ok")
+s,b=post("/api/menu/1/action", {"action":"observe_status","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
+rec("menu1_observe_status", s==200 and b.get("code")=="ok")
+s,b=post("/api/menu/12/action", {"action":"overview","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
+rec("menu12_overview", s==200 and b.get("code")=="ok")
 
 if not all(ok for _,ok in checks):
     raise SystemExit("gate3_1_failed")
@@ -317,7 +327,19 @@ python3 - <<'"'"'PY'"'"'
 import json, os, urllib.request, urllib.error
 BASE="http://127.0.0.1:8080"
 SECRET=os.environ.get("INTERNAL_SHARED_SECRET","")
-cases=[("1","overview",{}),("2","list_users",{}),("3","summary",{}),("4","egress_summary",{}),("5","domain_info",{}),("6","version",{}),("7","sysctl_summary",{}),("8","service_status",{})]
+cases=[
+  ("1","overview",{}),
+  ("1","observe_status",{}),
+  ("2","list_users",{}),
+  ("3","summary",{}),
+  ("4","egress_summary",{}),
+  ("5","domain_info",{}),
+  ("5","domain_guard_status",{}),
+  ("6","version",{}),
+  ("7","sysctl_summary",{}),
+  ("8","service_status",{}),
+  ("12","overview",{}),
+]
 
 def post(menu, action, params):
     req=urllib.request.Request(

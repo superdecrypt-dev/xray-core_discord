@@ -7,7 +7,7 @@ export const menu2: MenuDefinition = {
   actions: [
     {
       id: "add_user",
-      label: "Add User Account",
+      label: "Add User",
       mode: "modal",
       style: "success",
       modal: {
@@ -29,7 +29,7 @@ export const menu2: MenuDefinition = {
     },
     {
       id: "delete_user",
-      label: "Delete User Account",
+      label: "Delete User",
       mode: "modal",
       style: "danger",
       confirm: true,
@@ -43,7 +43,7 @@ export const menu2: MenuDefinition = {
     },
     {
       id: "extend_expiry",
-      label: "Extend/Set Expiry",
+      label: "Set User Expiry",
       mode: "modal",
       style: "primary",
       modal: {
@@ -55,10 +55,10 @@ export const menu2: MenuDefinition = {
         ],
       },
     },
-    { id: "list_users", label: "List User Account", mode: "direct", style: "primary" },
+    { id: "list_users", label: "View User List", mode: "direct", style: "primary" },
     {
       id: "search_user",
-      label: "Search User Name",
+      label: "Search User",
       mode: "modal",
       style: "secondary",
       modal: {
@@ -68,7 +68,7 @@ export const menu2: MenuDefinition = {
     },
     {
       id: "account_info",
-      label: "Account Info View",
+      label: "View Account Info",
       mode: "modal",
       style: "secondary",
       modal: {

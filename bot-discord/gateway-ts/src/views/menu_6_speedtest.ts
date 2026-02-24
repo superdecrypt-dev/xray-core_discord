@@ -5,7 +5,7 @@ export const menu6: MenuDefinition = {
   label: "Speedtest",
   description: "Pengujian kecepatan jaringan dan versi binary.",
   actions: [
-    { id: "run", label: "Run Speedtest Now", mode: "direct", style: "primary" },
-    { id: "version", label: "Speedtest Version", mode: "direct", style: "secondary" },
+    { id: "run", label: "Run Speedtest", mode: "direct", style: "primary" },
+    { id: "version", label: "View Version", mode: "direct", style: "secondary" },
   ],
 };

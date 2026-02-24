@@ -23,7 +23,7 @@ export const menu5: MenuDefinition = {
     },
     {
       id: "setup_domain_cloudflare",
-      label: "Set Domain Auto (API Cloudflare)",
+      label: "Set Domain Auto",
       mode: "modal",
       style: "danger",
       confirm: true,
@@ -44,8 +44,11 @@ export const menu5: MenuDefinition = {
         ],
       },
     },
-    { id: "domain_info", label: "Domain Info View", mode: "direct", style: "primary" },
-    { id: "nginx_server_name", label: "Nginx Server Name", mode: "direct", style: "secondary" },
-    { id: "refresh_account_info", label: "Refresh Account Info", mode: "direct", style: "secondary" },
+    { id: "domain_info", label: "View Domain Info", mode: "direct", style: "primary" },
+    { id: "domain_guard_check", label: "Run Guard Check", mode: "direct", style: "secondary" },
+    { id: "domain_guard_status", label: "View Guard Stat", mode: "direct", style: "secondary" },
+    { id: "domain_guard_renew", label: "Run Guard Renew", mode: "direct", style: "danger", confirm: true },
+    { id: "nginx_server_name", label: "View Nginx Name", mode: "direct", style: "secondary" },
+    { id: "refresh_account_info", label: "Refresh Accounts", mode: "direct", style: "secondary" },
   ],
 };

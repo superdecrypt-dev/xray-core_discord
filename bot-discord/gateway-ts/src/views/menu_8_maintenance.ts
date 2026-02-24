@@ -5,8 +5,8 @@ export const menu8: MenuDefinition = {
   label: "Maintenance",
   description: "Status layanan dan restart layanan.",
   actions: [
-    { id: "service_status", label: "Service Status View", mode: "direct", style: "primary" },
-    { id: "restart_xray", label: "Restart Xray Svc", mode: "direct", style: "danger", confirm: true },
-    { id: "restart_nginx", label: "Restart Nginx Svc", mode: "direct", style: "danger", confirm: true },
+    { id: "service_status", label: "View Services", mode: "direct", style: "primary" },
+    { id: "restart_xray", label: "Restart Xray", mode: "direct", style: "danger", confirm: true },
+    { id: "restart_nginx", label: "Restart Nginx", mode: "direct", style: "danger", confirm: true },
   ],
 };

@@ -85,4 +85,22 @@ def handle(action: str, params: dict, settings) -> dict:
         if ok_ref:
             return ok_response(title, msg)
         return error_response("domain_refresh_failed", title, msg)
+    if action == "domain_guard_check":
+        ok_chk, title, msg = system.op_domain_guard_check()
+        if ok_chk:
+            return ok_response(title, msg)
+        return error_response("domain_guard_check_failed", title, msg)
+    if action == "domain_guard_status":
+        ok_status, title, msg = system.op_domain_guard_status()
+        if ok_status:
+            return ok_response(title, msg)
+        return error_response("domain_guard_status_failed", title, msg)
+    if action == "domain_guard_renew":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Domain Control", "Dangerous actions dinonaktifkan via env.")
+        force = bool(parse_bool_value(params.get("force"), default=False))
+        ok_run, title, msg = system.op_domain_guard_renew_if_needed(force=force)
+        if ok_run:
+            return ok_response(title, msg)
+        return error_response("domain_guard_renew_failed", title, msg)
     return error_response("unknown_action", "Domain Control", f"Action tidak dikenal: {action}")
