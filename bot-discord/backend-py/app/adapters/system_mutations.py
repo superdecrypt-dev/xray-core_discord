@@ -1994,6 +1994,28 @@ def op_user_add(
         return False, "User Management - Add User", f"Gagal menyimpan artefak user: {exc}"
 
 
+def op_user_account_file_download(proto: str, username: str) -> tuple[bool, dict[str, str] | str]:
+    if proto not in PROTOCOLS:
+        return False, f"Proto tidak valid: {proto}"
+    if not _is_valid_username(username):
+        return False, "Username tidak valid."
+
+    account_file = _resolve_existing(_account_candidates(proto, username))
+    if account_file is None:
+        return False, f"File account tidak ditemukan untuk {username}@{proto}."
+
+    try:
+        raw = account_file.read_bytes()
+    except Exception as exc:
+        return False, f"Gagal membaca file account: {exc}"
+
+    return True, {
+        "filename": f"{username}@{proto}.txt",
+        "content_base64": base64.b64encode(raw).decode("ascii"),
+        "content_type": "text/plain",
+    }
+
+
 def op_user_delete(proto: str, username: str) -> tuple[bool, str, str]:
     if proto not in PROTOCOLS:
         return False, "User Management - Delete User", f"Proto tidak valid: {proto}"

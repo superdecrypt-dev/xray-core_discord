@@ -184,7 +184,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
       const res = await backend.runAction(menuId, actionId, params);
-      await sendActionResult(interaction, res.title, res.message, res.ok);
+      await sendActionResult(interaction, res.title, res.message, res.ok, res.data);
     } catch (err) {
       await sendActionResult(interaction, "Backend Error", String(err), false);
     }
@@ -226,7 +226,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
       const res = await backend.runAction(menuId, actionId, params);
-      await sendActionResult(interaction, res.title, res.message, res.ok);
+      await sendActionResult(interaction, res.title, res.message, res.ok, res.data);
     } catch (err) {
       await sendActionResult(interaction, "Backend Error", String(err), false);
     }

@@ -10,6 +10,14 @@ from ..utils.validators import (
 )
 
 
+def _fmt_number(value: float) -> str:
+    if value <= 0:
+        return "0"
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
 def handle(action: str, params: dict, settings) -> dict:
     if action == "list_users":
         title, msg = system.op_user_list()
@@ -79,7 +87,43 @@ def handle(action: str, params: dict, settings) -> dict:
             speed_up_mbit=speed_up,
         )
         if ok_add:
-            return ok_response(title_add, msg_add)
+            ip_limit_text = "OFF"
+            if ip_enabled:
+                ip_limit_text = f"ON ({ip_limit})"
+
+            speed_limit_text = "OFF"
+            if speed_enabled and speed_down > 0 and speed_up > 0:
+                speed_limit_text = f"ON (DOWN {_fmt_number(speed_down)} Mbps | UP {_fmt_number(speed_up)} Mbps)"
+
+            lines = [
+                "Akun berhasil dibuat.",
+                f"Username    : {user_or_err}",
+                f"Protokol    : {proto_or_err}",
+                f"Masa Aktif  : {int(days_or_err)} hari",
+                f"Quota       : {_fmt_number(float(quota_or_err))} GB",
+                f"IP Limit    : {ip_limit_text}",
+                f"Speed Limit : {speed_limit_text}",
+            ]
+
+            data: dict[str, object] = {}
+            data["add_user_summary"] = {
+                "username": str(user_or_err),
+                "protocol": str(proto_or_err),
+                "active_days": int(days_or_err),
+                "quota_gb": f"{_fmt_number(float(quota_or_err))} GB",
+                "ip_limit": ip_limit_text,
+                "speed_limit": speed_limit_text,
+            }
+            ok_download, download_or_err = system_mutations.op_user_account_file_download(proto_or_err, user_or_err)
+            if ok_download and isinstance(download_or_err, dict):
+                data["download_file"] = download_or_err
+                filename = str(download_or_err.get("filename") or f"{user_or_err}@{proto_or_err}.txt")
+                lines.append(f"File TXT    : {filename} (download)")
+            else:
+                lines.append("File TXT    : gagal menyiapkan file download")
+                data["download_error"] = str(download_or_err)
+
+            return ok_response(title_add, "\n".join(lines), data=data)
         return error_response("user_add_failed", title_add, msg_add)
 
     if action == "delete_user":

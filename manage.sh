@@ -4474,11 +4474,21 @@ PY
 
   title
   echo "Add user sukses ✅"
+  local created_account_file created_quota_file
+  created_account_file="${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
+  created_quota_file="${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
   hr
   echo "Account file:"
-  echo "  ${ACCOUNT_ROOT}/${proto}/${username}@${proto}.txt"
+  echo "  ${created_account_file}"
   echo "Quota metadata:"
-  echo "  ${QUOTA_ROOT}/${proto}/${username}@${proto}.json"
+  echo "  ${created_quota_file}"
+  hr
+  echo "XRAY ACCOUNT INFO:"
+  if [[ -f "${created_account_file}" ]]; then
+    cat "${created_account_file}"
+  else
+    echo "(XRAY ACCOUNT INFO tidak ditemukan: ${created_account_file})"
+  fi
   hr
   pause
 }
