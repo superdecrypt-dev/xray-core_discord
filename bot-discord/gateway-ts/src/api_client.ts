@@ -1,5 +1,16 @@
 import axios, { AxiosInstance } from "axios";
 
+const DEFAULT_BACKEND_TIMEOUT_MS = 30_000;
+const ACTION_TIMEOUT_MS: Record<string, number> = {
+  "5:setup_domain_custom": 420_000,
+  "5:setup_domain_cloudflare": 420_000,
+  "6:run": 190_000,
+};
+
+function resolveActionTimeoutMs(menuId: string, action: string): number {
+  return ACTION_TIMEOUT_MS[`${menuId}:${action}`] ?? DEFAULT_BACKEND_TIMEOUT_MS;
+}
+
 export interface BackendActionResponse {
   ok: boolean;
   code: string;
@@ -19,7 +30,7 @@ export class BackendClient {
   constructor(baseURL: string, sharedSecret: string) {
     this.client = axios.create({
       baseURL,
-      timeout: 30000,
+      timeout: DEFAULT_BACKEND_TIMEOUT_MS,
       headers: {
         "X-Internal-Shared-Secret": sharedSecret,
       },
@@ -27,10 +38,17 @@ export class BackendClient {
   }
 
   async runAction(menuId: string, action: string, params: Record<string, string> = {}): Promise<BackendActionResponse> {
-    const res = await this.client.post<BackendActionResponse>(`/api/menu/${menuId}/action`, {
-      action,
-      params,
-    });
+    const timeout = resolveActionTimeoutMs(menuId, action);
+    const res = await this.client.post<BackendActionResponse>(
+      `/api/menu/${menuId}/action`,
+      {
+        action,
+        params,
+      },
+      {
+        timeout,
+      },
+    );
     return res.data;
   }
 

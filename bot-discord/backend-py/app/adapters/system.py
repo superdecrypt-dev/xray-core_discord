@@ -3,7 +3,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 ACCOUNT_ROOT = Path("/opt/account")
 QUOTA_ROOT = Path("/opt/quota")
@@ -583,13 +583,109 @@ def _speedtest_bin() -> str | None:
     return None
 
 
+def _speedtest_parse_json(raw: str) -> tuple[bool, dict[str, Any] | str]:
+    text = str(raw or "").strip()
+    if not text:
+        return False, "Output speedtest kosong."
+
+    candidates = [line.strip() for line in text.splitlines() if line.strip()]
+    for chunk in reversed(candidates):
+        if not (chunk.startswith("{") and chunk.endswith("}")):
+            continue
+        try:
+            payload = json.loads(chunk)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return True, payload
+
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        return True, payload
+    return False, "Output speedtest tidak valid (JSON tidak ditemukan)."
+
+
+def _speedtest_to_float(value: Any) -> float | None:
+    try:
+        num = float(value)
+    except Exception:
+        return None
+    if not (num >= 0):
+        return None
+    return num
+
+
+def _speedtest_latency_text(payload: dict[str, Any]) -> str:
+    ping = payload.get("ping")
+    if not isinstance(ping, dict):
+        return "-"
+    val = _speedtest_to_float(ping.get("latency"))
+    if val is None:
+        return "-"
+    return f"{val:.2f} ms"
+
+
+def _speedtest_packet_loss_text(payload: dict[str, Any]) -> str:
+    val = _speedtest_to_float(payload.get("packetLoss"))
+    if val is None:
+        return "-"
+    return f"{val:.2f} %"
+
+
+def _speedtest_bandwidth_text(payload: dict[str, Any], key: str) -> str:
+    block = payload.get(key)
+    if not isinstance(block, dict):
+        return "-"
+    bandwidth = _speedtest_to_float(block.get("bandwidth"))
+    if bandwidth is None:
+        return "-"
+    mbps = (bandwidth * 8.0) / 1_000_000.0
+    return f"{mbps:.2f} Mbps"
+
+
+def _speedtest_compact_summary(payload: dict[str, Any]) -> str:
+    isp = str(payload.get("isp") or "-").strip() or "-"
+    latency = _speedtest_latency_text(payload)
+    packet_loss = _speedtest_packet_loss_text(payload)
+    download = _speedtest_bandwidth_text(payload, "download")
+    upload = _speedtest_bandwidth_text(payload, "upload")
+    return (
+        f"ISP         : {isp}\n"
+        f"Latency     : {latency}\n"
+        f"Packet Loss : {packet_loss}\n"
+        f"Download    : {download}\n"
+        f"Upload      : {upload}"
+    )
+
+
+def _speedtest_has_minimum_metrics(payload: dict[str, Any]) -> bool:
+    latency = _speedtest_latency_text(payload)
+    download = _speedtest_bandwidth_text(payload, "download")
+    upload = _speedtest_bandwidth_text(payload, "upload")
+    return not (latency == "-" and download == "-" and upload == "-")
+
+
 def op_speedtest_run() -> tuple[bool, str, str]:
     binary = _speedtest_bin()
     if not binary:
         return False, "Speedtest", "Binary speedtest tidak ditemukan."
-    ok, out = run_cmd([binary, "--accept-license", "--accept-gdpr"], timeout=120)
+
+    ok, out = run_cmd(
+        [binary, "--accept-license", "--accept-gdpr", "--progress=no", "--format=json"],
+        timeout=180,
+    )
     if ok:
-        return True, "Speedtest - Run", out
+        ok_parse, payload_or_err = _speedtest_parse_json(out)
+        if not ok_parse:
+            return False, "Speedtest - Run", str(payload_or_err)
+        assert isinstance(payload_or_err, dict)
+        summary = _speedtest_compact_summary(payload_or_err)
+        if not _speedtest_has_minimum_metrics(payload_or_err):
+            return False, "Speedtest - Run", f"Hasil speedtest tidak lengkap.\n{summary}"
+        return True, "Speedtest - Run", summary
     return False, "Speedtest - Run", f"Gagal speedtest:\n{out}"
 
 

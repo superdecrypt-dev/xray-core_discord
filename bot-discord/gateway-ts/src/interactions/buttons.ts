@@ -12,6 +12,7 @@ import {
 } from "discord.js";
 
 import type { BackendClient } from "../api_client";
+import { getSingleFieldSelectConfig } from "../constants/action_selects";
 import { isXrayProtocol, shouldUseProtocolSelect, XRAY_PROTOCOLS } from "../constants/protocols";
 import { findAction, findMenu } from "../router";
 import type { MenuActionDef } from "../views/types";
@@ -112,6 +113,44 @@ function buildProtocolSelectView(menuId: string, actionId: string) {
         label: proto.toUpperCase(),
         value: proto,
         description: `Gunakan protocol ${proto}`,
+      }))
+    );
+
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`nav:menu:${menuId}`).setLabel("Back").setStyle(ButtonStyle.Secondary)
+      ),
+    ],
+  };
+}
+
+function buildSingleFieldSelectView(menuId: string, actionId: string) {
+  const menu = findMenu(menuId);
+  const action = findAction(menuId, actionId);
+  const cfg = getSingleFieldSelectConfig(menuId, actionId);
+  const title = menu ? `${menu.id}) ${menu.label}` : "Network Controls";
+  const actionLabel = action?.label || actionId;
+  if (!cfg) {
+    return null;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${actionLabel} - Select`)
+    .setDescription(`Pilih nilai untuk **${cfg.title}**.`)
+    .setColor(0x2f81f7)
+    .setFooter({ text: title });
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`select:${menuId}:${actionId}:${cfg.fieldId}`)
+    .setPlaceholder(cfg.placeholder)
+    .addOptions(
+      cfg.options.map((opt) => ({
+        label: opt.label,
+        value: opt.value,
+        description: opt.description || "",
       }))
     );
 
@@ -232,6 +271,11 @@ export async function handleButton(interaction: ButtonInteraction, backend: Back
     const action = findAction(menuId, actionId);
     if (!action || action.mode !== "modal" || !action.modal) {
       await interaction.reply({ content: "Action modal tidak valid.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    const singleSelectView = buildSingleFieldSelectView(menuId, actionId);
+    if (singleSelectView) {
+      await interaction.update(singleSelectView);
       return true;
     }
     if (shouldUseProtocolSelect(menuId, actionId, actionHasProtoField(action))) {

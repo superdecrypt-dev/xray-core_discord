@@ -29,6 +29,7 @@ XRAY_CONFDIR = Path("/usr/local/etc/xray/conf.d")
 XRAY_INBOUNDS_CONF = XRAY_CONFDIR / "10-inbounds.json"
 XRAY_OUTBOUNDS_CONF = XRAY_CONFDIR / "20-outbounds.json"
 XRAY_ROUTING_CONF = XRAY_CONFDIR / "30-routing.json"
+XRAY_DNS_CONF = XRAY_CONFDIR / "02-dns.json"
 NGINX_CONF = Path("/etc/nginx/conf.d/xray.conf")
 CERT_DIR = Path("/opt/cert")
 CERT_FULLCHAIN = CERT_DIR / "fullchain.pem"
@@ -44,6 +45,11 @@ SPEED_RULE_MARKER_PREFIX = "dummy-speed-user-"
 SPEED_MARK_MIN = 1000
 SPEED_MARK_MAX = 59999
 QUOTA_UNIT_DECIMAL = {"decimal", "gb", "1000", "gigabyte"}
+BALANCER_EGRESS_TAG = "egress-balance"
+BALANCER_ALLOWED_STRATEGIES = {"random", "roundRobin", "leastPing", "leastLoad"}
+DEFAULT_EGRESS_PORTS = {"1-65535", "0-65535"}
+DNS_LOCK_FILE = "/var/lock/xray-dns.lock"
+DNS_QUERY_STRATEGY_ALLOWED = {"UseIP", "UseIPv4", "UseIPv6", "PreferIPv4", "PreferIPv6"}
 CLOUDFLARE_API_TOKEN = os.getenv(
     "CLOUDFLARE_API_TOKEN",
     "ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ",
@@ -103,6 +109,17 @@ def _restart_and_wait(name: str, timeout_sec: int = 20) -> bool:
     _run_cmd(["systemctl", "restart", name], timeout=30)
     end = time.time() + max(1, timeout_sec)
     while time.time() < end:
+        if _service_is_active(name):
+            return True
+        time.sleep(0.5)
+    if _service_is_active(name):
+        return True
+
+    # Recovery path for rapid restart bursts (systemd start-limit-hit).
+    _run_cmd(["systemctl", "reset-failed", name], timeout=10)
+    _run_cmd(["systemctl", "start", name], timeout=30)
+    end2 = time.time() + max(1, timeout_sec)
+    while time.time() < end2:
         if _service_is_active(name):
             return True
         time.sleep(0.5)
@@ -655,6 +672,377 @@ def _routing_set_user_in_marker(marker: str, email: str, state: str, outbound_ta
             return False, f"Gagal update routing marker: {exc}"
 
     return True, "ok"
+
+
+def _is_speed_outbound_tag(tag: str) -> bool:
+    return bool(tag) and tag.startswith(SPEED_OUTBOUND_TAG_PREFIX)
+
+
+def _routing_default_rule_index(rules: list[Any]) -> int:
+    idx = -1
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") != "field":
+            continue
+        port = str(rule.get("port") or "").strip()
+        if port not in DEFAULT_EGRESS_PORTS:
+            continue
+        if rule.get("user") or rule.get("domain") or rule.get("ip") or rule.get("protocol"):
+            continue
+        idx = i
+    return idx
+
+
+def _outbound_tags_from_cfg(out_cfg: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    outbounds = out_cfg.get("outbounds")
+    if not isinstance(outbounds, list):
+        return tags
+    for item in outbounds:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag") or "").strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+    return tags
+
+
+def _pick_default_balancer_selector(outbound_tags: list[str]) -> list[str]:
+    selector: list[str] = []
+    for preferred in ("direct", "warp"):
+        if preferred in outbound_tags and preferred not in selector:
+            selector.append(preferred)
+    if selector:
+        return selector
+
+    deny = {"api", "blocked"}
+    for tag in outbound_tags:
+        if tag in deny or _is_speed_outbound_tag(tag):
+            continue
+        selector.append(tag)
+        if len(selector) >= 2:
+            break
+    return selector
+
+
+def _sanitize_balancer_selector(raw_selector: Any, outbound_tags: list[str]) -> list[str]:
+    if not isinstance(raw_selector, list):
+        return []
+    known = set(outbound_tags)
+    deny = {"api", "blocked"}
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_selector:
+        tag = str(item or "").strip()
+        if not tag or tag in seen:
+            continue
+        if tag in deny or _is_speed_outbound_tag(tag):
+            continue
+        if tag not in known:
+            continue
+        seen.add(tag)
+        cleaned.append(tag)
+    return cleaned
+
+
+def _normalize_selector_input(selector_raw: str, outbound_tags: list[str]) -> tuple[bool, list[str] | str]:
+    raw = str(selector_raw or "").strip()
+    if not raw or raw.lower() == "auto":
+        auto_sel = _pick_default_balancer_selector(outbound_tags)
+        if not auto_sel:
+            return False, "Selector otomatis kosong. Pastikan outbound non-system tersedia."
+        return True, auto_sel
+
+    known = set(outbound_tags)
+    deny = {"api", "blocked"}
+    selector: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        tag = str(part or "").strip()
+        if not tag or tag in seen:
+            continue
+        if tag in deny or _is_speed_outbound_tag(tag):
+            continue
+        if tag not in known:
+            continue
+        seen.add(tag)
+        selector.append(tag)
+
+    if not selector:
+        return False, "Selector kosong. Gunakan auto atau isi tag outbound valid non-speed dipisah koma."
+    return True, selector
+
+
+def _upsert_egress_balancer(
+    routing: dict[str, Any],
+    outbound_tags: list[str],
+    selector_override: list[str] | None = None,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    balancers = routing.get("balancers")
+    if not isinstance(balancers, list):
+        balancers = []
+
+    balancer: dict[str, Any] | None = None
+    for item in balancers:
+        if isinstance(item, dict) and item.get("tag") == BALANCER_EGRESS_TAG:
+            balancer = item
+            break
+
+    if balancer is None:
+        balancer = {"tag": BALANCER_EGRESS_TAG, "selector": [], "strategy": {"type": "random"}}
+        balancers.insert(0, balancer)
+
+    selector = selector_override if selector_override is not None else _sanitize_balancer_selector(balancer.get("selector"), outbound_tags)
+    if not selector:
+        selector = _pick_default_balancer_selector(outbound_tags)
+    if not selector:
+        return False, "Tidak ada outbound valid untuk balancer egress-balance.", None
+
+    balancer["selector"] = selector
+    strategy = balancer.get("strategy")
+    if not isinstance(strategy, dict):
+        strategy = {}
+    stype = str(strategy.get("type") or "").strip()
+    if stype not in BALANCER_ALLOWED_STRATEGIES:
+        strategy["type"] = "random"
+    balancer["strategy"] = strategy
+
+    routing["balancers"] = balancers
+    return True, "ok", balancer
+
+
+def _routing_set_default_egress_mode(rt_cfg: dict[str, Any], out_cfg: dict[str, Any], mode: str) -> tuple[bool, str]:
+    mode_n = str(mode or "").strip().lower()
+    if mode_n not in {"direct", "warp", "balancer"}:
+        return False, "Mode egress harus direct/warp/balancer."
+
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    rules = routing.get("rules")
+    if not isinstance(rules, list):
+        return False, "Invalid routing config: routing.rules bukan list"
+
+    idx = _routing_default_rule_index(rules)
+    if idx < 0:
+        return False, "Default rule (port 1-65535 / 0-65535) tidak ditemukan."
+
+    outbound_tags = _outbound_tags_from_cfg(out_cfg)
+    if mode_n in {"direct", "warp"} and mode_n not in set(outbound_tags):
+        return False, f"Outbound '{mode_n}' tidak ditemukan pada 20-outbounds.json."
+
+    target = rules[idx]
+    if not isinstance(target, dict):
+        return False, "Default rule tidak valid."
+
+    if mode_n in {"direct", "warp"}:
+        target.pop("balancerTag", None)
+        target["outboundTag"] = mode_n
+    else:
+        ok_bal, msg_bal, _ = _upsert_egress_balancer(routing, outbound_tags, selector_override=None)
+        if not ok_bal:
+            return False, msg_bal
+        target.pop("outboundTag", None)
+        target["balancerTag"] = BALANCER_EGRESS_TAG
+
+    rules[idx] = target
+    routing["rules"] = rules
+    rt_cfg["routing"] = routing
+    return True, f"Default egress di-set ke {mode_n}."
+
+
+def _routing_set_balancer_strategy(rt_cfg: dict[str, Any], out_cfg: dict[str, Any], strategy_raw: str) -> tuple[bool, str]:
+    strategy = str(strategy_raw or "").strip()
+    if strategy not in BALANCER_ALLOWED_STRATEGIES:
+        choices = ", ".join(sorted(BALANCER_ALLOWED_STRATEGIES))
+        return False, f"Strategy invalid. Pilihan: {choices}."
+
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    outbound_tags = _outbound_tags_from_cfg(out_cfg)
+    ok_bal, msg_bal, balancer = _upsert_egress_balancer(routing, outbound_tags, selector_override=None)
+    if not ok_bal or balancer is None:
+        return False, msg_bal
+
+    strategy_obj = balancer.get("strategy")
+    if not isinstance(strategy_obj, dict):
+        strategy_obj = {}
+    strategy_obj["type"] = strategy
+    balancer["strategy"] = strategy_obj
+    routing["balancers"] = routing.get("balancers", [])
+    rt_cfg["routing"] = routing
+    return True, f"Balancer strategy di-set ke {strategy}."
+
+
+def _routing_set_balancer_selector(rt_cfg: dict[str, Any], out_cfg: dict[str, Any], selector_raw: str) -> tuple[bool, str]:
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    outbound_tags = _outbound_tags_from_cfg(out_cfg)
+    ok_sel, sel_or_msg = _normalize_selector_input(selector_raw, outbound_tags)
+    if not ok_sel:
+        return False, str(sel_or_msg)
+    selector = sel_or_msg
+    assert isinstance(selector, list)
+
+    ok_bal, msg_bal, _ = _upsert_egress_balancer(routing, outbound_tags, selector_override=selector)
+    if not ok_bal:
+        return False, msg_bal
+    rt_cfg["routing"] = routing
+    return True, f"Balancer selector di-set: {', '.join(selector)}"
+
+
+def _apply_routing_transaction(
+    mutator: Any,
+) -> tuple[bool, str]:
+    if not XRAY_ROUTING_CONF.exists():
+        return False, f"Config routing tidak ditemukan: {XRAY_ROUTING_CONF}"
+    if not XRAY_OUTBOUNDS_CONF.exists():
+        return False, f"Config outbounds tidak ditemukan: {XRAY_OUTBOUNDS_CONF}"
+
+    with file_lock(ROUTING_LOCK_FILE):
+        ok_rt, rt_cfg = _read_json(XRAY_ROUTING_CONF)
+        if not ok_rt:
+            return False, str(rt_cfg)
+        ok_out, out_cfg = _read_json(XRAY_OUTBOUNDS_CONF)
+        if not ok_out:
+            return False, str(out_cfg)
+        if not isinstance(rt_cfg, dict) or not isinstance(out_cfg, dict):
+            return False, "Format config Xray tidak valid."
+
+        rt_original = json.loads(json.dumps(rt_cfg))
+        try:
+            ok_mut, msg_mut = mutator(rt_cfg, out_cfg)
+            if not ok_mut:
+                return False, str(msg_mut)
+            _write_json_atomic(XRAY_ROUTING_CONF, rt_cfg)
+            if not _restart_and_wait("xray", timeout_sec=20):
+                _write_json_atomic(XRAY_ROUTING_CONF, rt_original)
+                _restart_and_wait("xray", timeout_sec=20)
+                return False, "xray tidak aktif setelah update network controls (rollback)."
+            return True, str(msg_mut)
+        except Exception as exc:
+            try:
+                _write_json_atomic(XRAY_ROUTING_CONF, rt_original)
+                _restart_and_wait("xray", timeout_sec=20)
+            except Exception:
+                pass
+            return False, f"Gagal update routing network controls: {exc}"
+
+
+def _normalize_dns_root(cfg: Any) -> dict[str, Any]:
+    if not isinstance(cfg, dict):
+        cfg = {}
+    dns_obj = cfg.get("dns")
+    if not isinstance(dns_obj, dict):
+        dns_obj = {}
+    cfg["dns"] = dns_obj
+    return cfg
+
+
+def _dns_servers_list(cfg: dict[str, Any]) -> list[Any]:
+    dns_obj = cfg.get("dns")
+    if not isinstance(dns_obj, dict):
+        dns_obj = {}
+        cfg["dns"] = dns_obj
+    servers = dns_obj.get("servers")
+    if not isinstance(servers, list):
+        servers = []
+    dns_obj["servers"] = servers
+    return servers
+
+
+def _dns_set_server_idx(cfg: dict[str, Any], idx: int, value: str) -> None:
+    val = str(value or "").strip()
+    if not val:
+        return
+    servers = _dns_servers_list(cfg)
+    while len(servers) <= idx:
+        servers.append("")
+    if isinstance(servers[idx], dict):
+        servers[idx]["address"] = val
+    else:
+        servers[idx] = val
+
+
+def _apply_dns_transaction(mutator: Any) -> tuple[bool, str]:
+    with file_lock(DNS_LOCK_FILE):
+        cfg_original: dict[str, Any]
+        if XRAY_DNS_CONF.exists():
+            ok_read, raw_cfg = _read_json(XRAY_DNS_CONF)
+            if not ok_read:
+                raw_cfg = {}
+            cfg_original = raw_cfg if isinstance(raw_cfg, dict) else {}
+        else:
+            cfg_original = {"dns": {}}
+
+        cfg_work = json.loads(json.dumps(cfg_original))
+        cfg_work = _normalize_dns_root(cfg_work)
+        cfg_snapshot = json.loads(json.dumps(cfg_work))
+
+        try:
+            ok_mut, msg_mut = mutator(cfg_work)
+            if not ok_mut:
+                return False, str(msg_mut)
+
+            _write_json_atomic(XRAY_DNS_CONF, cfg_work)
+            if not _restart_and_wait("xray", timeout_sec=20):
+                _write_json_atomic(XRAY_DNS_CONF, cfg_snapshot)
+                _restart_and_wait("xray", timeout_sec=20)
+                return False, "xray tidak aktif setelah update DNS (rollback)."
+            return True, str(msg_mut)
+        except Exception as exc:
+            try:
+                _write_json_atomic(XRAY_DNS_CONF, cfg_snapshot)
+                _restart_and_wait("xray", timeout_sec=20)
+            except Exception:
+                pass
+            return False, f"Gagal update DNS: {exc}"
+
+
+def _dns_set_primary(cfg: dict[str, Any], value: str) -> tuple[bool, str]:
+    val = str(value or "").strip()
+    if not val:
+        return False, "Primary DNS tidak boleh kosong."
+    _dns_set_server_idx(cfg, 0, val)
+    return True, f"Primary DNS di-set ke {val}."
+
+
+def _dns_set_secondary(cfg: dict[str, Any], value: str) -> tuple[bool, str]:
+    val = str(value or "").strip()
+    if not val:
+        return False, "Secondary DNS tidak boleh kosong."
+    servers = _dns_servers_list(cfg)
+    if len(servers) == 0:
+        _dns_set_server_idx(cfg, 0, "1.1.1.1")
+    _dns_set_server_idx(cfg, 1, val)
+    return True, f"Secondary DNS di-set ke {val}."
+
+
+def _dns_set_query_strategy(cfg: dict[str, Any], strategy: str) -> tuple[bool, str]:
+    val = str(strategy or "").strip()
+    if val not in DNS_QUERY_STRATEGY_ALLOWED:
+        choices = ", ".join(sorted(DNS_QUERY_STRATEGY_ALLOWED))
+        return False, f"Query strategy invalid. Pilihan: {choices}."
+    dns_obj = cfg.get("dns")
+    assert isinstance(dns_obj, dict)
+    dns_obj["queryStrategy"] = val
+    return True, f"Query strategy di-set ke {val}."
+
+
+def _dns_toggle_cache(cfg: dict[str, Any]) -> tuple[bool, str]:
+    dns_obj = cfg.get("dns")
+    assert isinstance(dns_obj, dict)
+    current = bool(dns_obj.get("disableCache"))
+    dns_obj["disableCache"] = not current
+    state = "OFF" if not current else "ON"
+    # disableCache=true means cache OFF.
+    return True, f"DNS cache sekarang: {state}."
 
 
 def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str, str]:
@@ -2569,3 +2957,90 @@ def op_domain_set(domain: str, issue_cert: bool = False) -> tuple[bool, str, str
 def op_domain_refresh_accounts() -> tuple[bool, str, str]:
     updated, failed = _refresh_all_account_info()
     return True, "Domain Control - Refresh Account Info", f"Selesai: updated={updated}, failed={failed}"
+
+
+def op_network_set_egress_mode(mode: str) -> tuple[bool, str, str]:
+    title = "Network Controls - Set Egress Mode"
+    mode_n = str(mode or "").strip().lower()
+
+    ok_apply, msg_apply = _apply_routing_transaction(
+        lambda rt_cfg, out_cfg: _routing_set_default_egress_mode(rt_cfg, out_cfg, mode_n)
+    )
+    if not ok_apply:
+        return False, title, msg_apply
+
+    ok_sync, msg_sync = _speed_policy_sync_xray()
+    if not ok_sync:
+        return True, title, f"{msg_apply}\nCatatan sinkronisasi speed policy: {msg_sync}"
+    return True, title, msg_apply
+
+
+def op_network_set_balancer_strategy(strategy: str) -> tuple[bool, str, str]:
+    title = "Network Controls - Balancer Strategy"
+    strategy_n = str(strategy or "").strip()
+
+    ok_apply, msg_apply = _apply_routing_transaction(
+        lambda rt_cfg, out_cfg: _routing_set_balancer_strategy(rt_cfg, out_cfg, strategy_n)
+    )
+    if not ok_apply:
+        return False, title, msg_apply
+
+    ok_sync, msg_sync = _speed_policy_sync_xray()
+    if not ok_sync:
+        return True, title, f"{msg_apply}\nCatatan sinkronisasi speed policy: {msg_sync}"
+    return True, title, msg_apply
+
+
+def op_network_set_balancer_selector(selector: str) -> tuple[bool, str, str]:
+    title = "Network Controls - Balancer Selector"
+    selector_n = str(selector or "").strip()
+
+    ok_apply, msg_apply = _apply_routing_transaction(
+        lambda rt_cfg, out_cfg: _routing_set_balancer_selector(rt_cfg, out_cfg, selector_n)
+    )
+    if not ok_apply:
+        return False, title, msg_apply
+
+    ok_sync, msg_sync = _speed_policy_sync_xray()
+    if not ok_sync:
+        return True, title, f"{msg_apply}\nCatatan sinkronisasi speed policy: {msg_sync}"
+    return True, title, msg_apply
+
+
+def op_network_set_balancer_selector_auto() -> tuple[bool, str, str]:
+    return op_network_set_balancer_selector("auto")
+
+
+def op_network_set_dns_primary(value: str) -> tuple[bool, str, str]:
+    title = "Network Controls - Set Primary DNS"
+    val = str(value or "").strip()
+    ok_apply, msg_apply = _apply_dns_transaction(lambda cfg: _dns_set_primary(cfg, val))
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply
+
+
+def op_network_set_dns_secondary(value: str) -> tuple[bool, str, str]:
+    title = "Network Controls - Set Secondary DNS"
+    val = str(value or "").strip()
+    ok_apply, msg_apply = _apply_dns_transaction(lambda cfg: _dns_set_secondary(cfg, val))
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply
+
+
+def op_network_set_dns_query_strategy(strategy: str) -> tuple[bool, str, str]:
+    title = "Network Controls - Set DNS Query Strategy"
+    strategy_n = str(strategy or "").strip()
+    ok_apply, msg_apply = _apply_dns_transaction(lambda cfg: _dns_set_query_strategy(cfg, strategy_n))
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply
+
+
+def op_network_toggle_dns_cache() -> tuple[bool, str, str]:
+    title = "Network Controls - Toggle DNS Cache"
+    ok_apply, msg_apply = _apply_dns_transaction(_dns_toggle_cache)
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply

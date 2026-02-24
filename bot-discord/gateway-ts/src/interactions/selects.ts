@@ -12,6 +12,11 @@ import {
 } from "discord.js";
 
 import type { BackendClient } from "../api_client";
+import {
+  encodeSingleSelectPreset,
+  getSingleFieldSelectConfig,
+  shouldSelectContinueToModal,
+} from "../constants/action_selects";
 import { isXrayProtocol, shouldUseProtocolSelect, shouldUseUsernameSelect } from "../constants/protocols";
 import { findAction } from "../router";
 import { createPendingConfirm } from "./confirm_state";
@@ -98,6 +103,7 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
   const hasUsernameField = action.modal.fields.some((field) => field.id === "username");
   const needsProtocolSelect = shouldUseProtocolSelect(menuId, actionId, hasProtoField);
   const needsUsernameSelect = shouldUseUsernameSelect(actionId, hasUsernameField);
+  const singleFieldSelectCfg = getSingleFieldSelectConfig(menuId, actionId);
 
   if (fieldId === "proto") {
     if (!needsProtocolSelect) {
@@ -138,6 +144,50 @@ export async function handleSelect(interaction: StringSelectMenuInteraction, bac
       modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
     }
     await interaction.showModal(modal);
+    return true;
+  }
+
+  if (singleFieldSelectCfg && fieldId === singleFieldSelectCfg.fieldId) {
+    const selectedValue = String(interaction.values[0] || "").trim();
+    const isAllowed = singleFieldSelectCfg.options.some((opt) => opt.value === selectedValue);
+    if (!isAllowed) {
+      await interaction.reply({ content: "Nilai pilihan tidak valid.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    if (shouldSelectContinueToModal(menuId, actionId)) {
+      const remainingFields = action.modal.fields.filter((field) => field.id !== singleFieldSelectCfg.fieldId).slice(0, 5);
+      const presetToken = encodeSingleSelectPreset(singleFieldSelectCfg.fieldId, selectedValue);
+      const modal = new ModalBuilder()
+        .setCustomId(`form:${menuId}:${actionId}:${presetToken}`)
+        .setTitle(`${action.modal.title} (${selectedValue})`);
+      for (const field of remainingFields) {
+        const input = new TextInputBuilder()
+          .setCustomId(field.id)
+          .setLabel(field.label)
+          .setRequired(field.required)
+          .setPlaceholder(field.placeholder || "")
+          .setStyle(field.style === "paragraph" ? TextInputStyle.Paragraph : TextInputStyle.Short);
+        modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+      }
+      await interaction.showModal(modal);
+      return true;
+    }
+
+    const params: Record<string, string> = { [singleFieldSelectCfg.fieldId]: selectedValue };
+    if (action.confirm) {
+      const token = createPendingConfirm({ menuId, actionId, params });
+      await interaction.update(buildPendingConfirmView(menuId, actionId, token, params));
+      return true;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const res = await backend.runAction(menuId, actionId, params);
+      await sendActionResult(interaction, res.title, res.message, res.ok);
+    } catch (err) {
+      await sendActionResult(interaction, "Backend Error", String(err), false);
+    }
     return true;
   }
 

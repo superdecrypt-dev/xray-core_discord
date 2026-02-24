@@ -3,19 +3,18 @@ import type { MenuDefinition } from "./types";
 export const menu5: MenuDefinition = {
   id: "5",
   label: "Domain Control",
-  description: "Konfigurasi domain custom/Cloudflare dan informasi domain aktif.",
+  description: "Set domain via Custom/Cloudflare wizard dengan issue cert terintegrasi.",
   actions: [
-    { id: "cloudflare_root_list", label: "Cloudflare Root List", mode: "direct", style: "secondary" },
     {
       id: "setup_domain_custom",
-      label: "Set Domain Custom",
+      label: "Set Domain + Cert (Recommended)",
       mode: "modal",
       style: "danger",
       confirm: true,
       modal: {
-        title: "Set Domain Custom",
+        title: "Set Domain + Cert (Custom)",
         fields: [
-          { id: "domain", label: "Domain", style: "short", required: true, placeholder: "vpn.example.com" },
+          { id: "domain", label: "Domain (FQDN)", style: "short", required: true, placeholder: "vpn.example.com" },
         ],
       },
     },
@@ -39,20 +38,6 @@ export const menu5: MenuDefinition = {
             required: false,
             placeholder: "on / off (default: off)",
           },
-        ],
-      },
-    },
-    {
-      id: "set_domain",
-      label: "Set Domain Legacy",
-      mode: "modal",
-      style: "danger",
-      confirm: true,
-      modal: {
-        title: "Set Domain Legacy",
-        fields: [
-          { id: "domain", label: "Domain", style: "short", required: true, placeholder: "vpn.example.com" },
-          { id: "issue_cert", label: "Issue Cert", style: "short", required: false, placeholder: "on / off (default off)" },
         ],
       },
     },

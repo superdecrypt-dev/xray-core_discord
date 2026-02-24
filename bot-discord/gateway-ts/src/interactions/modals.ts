@@ -1,6 +1,7 @@
 import { MessageFlags, ModalSubmitInteraction } from "discord.js";
 
 import type { BackendClient } from "../api_client";
+import { decodeSingleSelectPreset } from "../constants/action_selects";
 import { isXrayProtocol, shouldUseProtocolSelect, shouldUseUsernameSelect } from "../constants/protocols";
 import { findAction } from "../router";
 import { createPendingConfirm } from "./confirm_state";
@@ -69,6 +70,12 @@ export async function handleModal(interaction: ModalSubmitInteraction, backend: 
       // Field bisa tidak ada ketika value protocol dipilih via select.
     }
   }
+
+  const presetSelect = decodeSingleSelectPreset(presetProto);
+  if (presetSelect) {
+    params[presetSelect.fieldId] = presetSelect.value;
+  }
+
   const hasProtoField = action.modal.fields.some((field) => field.id === "proto");
   const hasUsernameField = action.modal.fields.some((field) => field.id === "username");
   const needsProtocolSelect = shouldUseProtocolSelect(menuId, actionId, hasProtoField);

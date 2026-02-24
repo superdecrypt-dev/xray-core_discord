@@ -10,11 +10,6 @@ def handle(action: str, params: dict, settings) -> dict:
     if action == "nginx_server_name":
         title, msg = system.op_domain_nginx_server_name()
         return ok_response(title, msg)
-    if action == "cloudflare_root_list":
-        ok_list, title, msg = system_mutations.op_domain_cloudflare_root_list()
-        if ok_list:
-            return ok_response(title, msg)
-        return error_response("domain_root_list_failed", title, msg)
     if action == "setup_domain_custom":
         if not settings.enable_dangerous_actions:
             return error_response("forbidden", "Domain Control", "Dangerous actions dinonaktifkan via env.")
