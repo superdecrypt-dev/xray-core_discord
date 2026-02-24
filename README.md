@@ -120,10 +120,11 @@ Status detail akun menampilkan:
 - WARP tier management: `Target Tier` dan `Live Tier`
 - DNS settings + advanced DNS editor
 
-## Fitur Bot Discord (Standalone)
+## Fitur Bot Discord (Standalone, BETA)
 Bot Discord berada di `bot-discord/` dan sengaja berdiri sendiri (tidak mengeksekusi `manage.sh`).
 
 Highlight kemampuan:
+- Status rilis saat ini: **BETA** (staging-first sebelum promote production).
 - UX Discord: dominan button/modal, slash command minimal (`/panel`).
 - Cakupan menu mengikuti pola `manage.sh` (menu 1-9) agar familiar untuk admin.
 - Arsitektur terpisah gateway TypeScript (`discord.js`) + backend Python (`FastAPI`).
