@@ -22,7 +22,7 @@ Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan int
 
 ## Fitur Utama (Highlight)
 - One-time provisioning lengkap via `setup.sh`: Xray, Nginx, TLS, WARP, daemon runtime.
-- Operasional harian terpusat via `manage.sh` menu 1-9 (status, user, quota, network, security, maintenance).
+- Operasional harian terpusat via `manage.sh` menu 1-9 dan 12 (status, user, quota, network, security, maintenance, analytics).
 - Bot Discord standalone dengan UX interaktif tombol/select/modal (`/panel` sebagai entry point minimal).
 - Installer bot terpisah (`install-discord-bot.sh`) dengan mode menu + quick setup all-in-one.
 - Deploy source bot memakai verifikasi checksum archive sebelum extract (lebih aman dari archive corrupt/tampered).
@@ -72,6 +72,7 @@ Main Menu
   7) Security
   8) Maintenance
   9) Install BOT Discord
+  12) Traffic Analytics
   0) Exit
 ```
 
@@ -88,11 +89,12 @@ Header realtime di Main Menu menampilkan:
 | `2) User Management` | Add, delete, set expiry, list user | Lifecycle akun harian lebih efisien |
 | `3) Quota & Access Control` | Quota, block, IP limit, speed limit per user | Kontrol abuse lebih presisi |
 | `4) Network Controls` | Egress direct/warp/balancer, adblock geosite, DNS, WARP tier | Routing fleksibel sesuai kebutuhan |
-| `5) Domain Control` | Set domain + issue cert, cek status cert/key | Manajemen domain dari satu menu |
+| `5) Domain Control` | Set domain + issue cert, cek status cert/key, domain guard | Manajemen domain dari satu menu |
 | `6) Speedtest` | Jalankan Ookla speedtest + cek versi | Verifikasi performa jaringan cepat |
 | `7) Security` | TLS ops, fail2ban, hardening status | Meningkatkan keamanan operasional |
 | `8) Maintenance` | Restart service/daemon, tail log, wireproxy status | Maintenance tanpa keluar panel |
 | `9) Install BOT Discord` | Launcher installer bot standalone (`/usr/local/bin/install-discord-bot`) | Setup, deploy, update, restart, dan uninstall bot dari menu |
+| `12) Traffic Analytics` | Overview traffic, top users, search user, export JSON report | Observabilitas pemakaian traffic lebih cepat |
 
 ### Detail Penting: `3) Quota & Access Control`
 ```text
@@ -130,7 +132,10 @@ Bot Discord berada di `bot-discord/` dan sengaja berdiri sendiri (tidak mengekse
 Highlight kemampuan:
 - Status rilis saat ini: **RELEASE** (siap produksi, tetap disarankan staging-first sebelum perubahan besar).
 - UX Discord: dominan button/select/modal, slash command minimal (`/panel`).
-- Cakupan menu mengikuti pola `manage.sh` (menu 1-8) agar familiar untuk admin.
+- Cakupan menu mengikuti pola `manage.sh` (menu 1-8 + 12) agar familiar untuk admin.
+- Menu `1)` sudah mencakup observability action (`snapshot`, `status`, `alert log`).
+- Menu `5)` sudah mencakup domain guard action (`check`, `status`, `renew-if-needed`).
+- Menu `12)` menyediakan traffic analytics (`overview`, `top users`, `search`, `export JSON`).
 - Flow `Add User`, `Extend/Set Expiry`, `Account Info`, dan aksi Network/Domain tertentu sudah select-driven untuk meminimalkan typo input.
 - Hasil `Add User` dan `Account Info` ditampilkan sebagai embed ringkas + lampiran file `username@protokol.txt`.
 - Menu Domain Control disederhanakan menjadi:
