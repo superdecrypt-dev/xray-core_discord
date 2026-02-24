@@ -102,7 +102,7 @@ Catatan:
 3. Gate 3/3.1: Integration endpoint + auth guard.
 4. Gate 4: Negative/Failure (invalid param, unauthorized).
 5. Gate 5: Discord E2E server-side check (`/panel` terdaftar).
-6. Gate 6: Regression read-only menu 1-8.
+6. Gate 6: Regression read-only menu 1-8 dan 12.
 
 ### 4.2 E2E Manual di Discord (staging)
 1. Jalankan `/panel`.
@@ -110,6 +110,54 @@ Catatan:
 3. Jalankan modal input (misal domain/user action aman).
 4. Pastikan response private dan tidak spam output panjang.
 5. Pastikan tidak ada warning deprecate untuk opsi ephemeral lama.
+
+### 4.3 Checklist Manual /panel (Rekomendasi Terbaru)
+Gunakan checklist ini saat regresi fitur bot terbaru:
+
+1. Menu `1) Status & Diagnostics`
+- `View Status`
+- `Run Xray Test`
+- `View TLS Info`
+- `Run Observe Snap`
+- `View Observe Stat`
+- `View Alert Log`
+
+2. Menu `5) Domain Control`
+- `View Domain Info`
+- `Run Guard Check`
+- `View Guard Stat`
+- `Run Guard Renew`
+- `View Nginx Name`
+- `Refresh Accounts`
+
+3. Menu `12) Traffic Analytics`
+- `View Overview`
+- `View Top Users` (isi limit)
+- `Search User` (isi query)
+- `Export JSON` (pastikan file attachment terkirim)
+
+Kriteria lulus:
+- Semua action mengembalikan respons dengan schema `ok/code/title/message`.
+- Action export analytics menyertakan `download_file` valid.
+- Tidak ada crash service gateway/backend selama uji.
+
+### 4.4 Format Rekap PASS/FAIL Per Action
+Contoh format ringkas:
+
+```text
+Tanggal:
+Environment: staging
+Checklist: /panel manual (menu 1, 5, 12)
+
+1.overview: PASS
+1.xray_test: PASS
+...
+12.export_json: PASS
+
+Total PASS:
+Total FAIL:
+Catatan:
+```
 
 ## 5. Checklist Rilis
 Sebelum promote ke production:

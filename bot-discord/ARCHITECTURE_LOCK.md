@@ -10,7 +10,7 @@ Dokumen ini menjadi acuan tetap implementasi bot Discord standalone pada repo in
 
 ## 1) Prinsip Dasar
 - Bot Discord berdiri sendiri dan **tidak mengeksekusi `manage.sh`**.
-- Perilaku menu mengikuti struktur CLI `manage.sh` (menu 1-8), tetapi eksekusi action dilakukan oleh backend bot.
+- Perilaku menu mengikuti struktur CLI `manage.sh` (menu 1-8 + 12), tetapi eksekusi action dilakukan oleh backend bot.
 - UI Discord meminimalkan slash command (entry point `/panel`) dan menggunakan button/modal untuk interaksi utama.
 
 ## 2) Struktur Direktori Bot
@@ -101,9 +101,32 @@ Script monitoring:
 Ketentuan UX gateway (terkini):
 - Respons private interaction menggunakan `flags: MessageFlags.Ephemeral` (menghindari warning deprecate).
 - Output action panjang dipotong per chunk agar tidak spam di perangkat mobile.
-- Menu bot hanya operasional 1-8; instalasi bot tetap melalui CLI installer terpisah.
+- Menu bot operasional: 1-8 dan 12; instalasi bot tetap melalui CLI installer terpisah.
 
-## 4) Lokasi Deploy & Integrasi Root Script
+## 4) Update Arsitektur Terkini (2026-02-25)
+1. Menu dan kapabilitas baru:
+   - Menu `12) Traffic Analytics` ditambahkan ke gateway router + backend service.
+   - Menu `1)` mendapat action observability:
+     - `observe_snapshot`
+     - `observe_status`
+     - `observe_alert_log`
+   - Menu `5)` mendapat action domain guard:
+     - `domain_guard_check`
+     - `domain_guard_status`
+     - `domain_guard_renew`
+2. Standar UX terbaru:
+   - Label tombol diseragamkan dengan pola `View/Run/Set/Toggle`.
+   - Action yang memiliki dampak tinggi tetap memakai konfirmasi (`confirm`).
+3. Kontrak data:
+   - `shared/commands.json` harus sinkron dengan view gateway dan service backend.
+   - Export analytics memakai `data.download_file` dengan payload base64 untuk attachment Discord.
+4. Jalur eksekusi runtime:
+   - Gateway (`discord.js`) -> backend FastAPI -> adapter system/mutations -> respon terstruktur (`ok/code/title/message/data`).
+5. Status validasi terbaru:
+   - Build gateway + compile backend PASS.
+   - Checklist `/panel` menu 1/5/12 di staging PASS per action.
+
+## 5) Lokasi Deploy & Integrasi Root Script
 - Lokasi bot terpasang: `/opt/bot-discord`
 - Env produksi: `/etc/xray-discord-bot/bot.env`
 - Runtime data/log: `/var/lib/xray-discord-bot`, `/var/log/xray-discord-bot`
@@ -113,7 +136,7 @@ Integrasi:
 - `run.sh` memasang `install-discord-bot.sh` ke `/usr/local/bin/install-discord-bot`
 - `manage.sh` menu `9) Install BOT Discord` menjalankan `/usr/local/bin/install-discord-bot menu`
 
-## 5) Mekanisme Deploy di VPS (Tanpa Repo Lokal)
+## 6) Mekanisme Deploy di VPS (Tanpa Repo Lokal)
 1. Unduh archive source (`tar.gz`) dengan `REF` terpin.
 2. Extract ke staging `/tmp`.
 3. Validasi struktur wajib (`gateway-ts/package.json`, `backend-py/requirements.txt`, template systemd).

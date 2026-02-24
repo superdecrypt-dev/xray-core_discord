@@ -1,5 +1,56 @@
 # Release Notes
 
+## Rilis 2026-02-25
+
+### Ringkasan
+Rilis ini memfinalkan integrasi fitur baru bot Discord untuk operasional staging, sekaligus menyiapkan dokumentasi handoff agar agent berikutnya dapat melanjutkan aktivitas tanpa kehilangan konteks.
+
+### Perubahan Utama
+1. Integrasi Fitur Bot (menu 1, 5, 12)
+- Menu `1) Status & Diagnostics` ditambah action:
+  - `observe_snapshot`
+  - `observe_status`
+  - `observe_alert_log`
+- Menu `5) Domain Control` ditambah action:
+  - `domain_guard_check`
+  - `domain_guard_status`
+  - `domain_guard_renew`
+- Menu baru `12) Traffic Analytics`:
+  - `overview`
+  - `top_users`
+  - `search_user`
+  - `export_json` (attachment file JSON)
+
+2. Standardisasi Label UX Bot
+- Label tombol pada menu gateway diseragamkan dengan pola:
+  - `View ...`
+  - `Run ...`
+  - `Set ...`
+  - `Toggle ...`
+- Sinkronisasi label juga diterapkan ke `shared/commands.json`.
+
+3. Penguatan Gate Testing Bot
+- `bot-discord/scripts/gate-all.sh` diperbarui agar:
+  - mengenali kehadiran menu `12`
+  - menambah smoke check `observe_status` dan `menu12.overview`
+  - memperluas regression read-only smoke hingga menu `12`.
+
+4. Dokumentasi Continuity Agent
+- Dokumen handoff/arsitektur/testing/release diperbarui dengan status aktivitas terbaru, ringkasan jalur uji, dan panduan kelanjutan untuk agent baru.
+
+### Commit
+- Commit ter-push: `fec6834`
+- Pesan: `feat(bot): add menu 12 analytics and observability/domain-guard controls`
+
+### Hasil Validasi
+- Validasi lokal:
+  - `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py')` -> PASS
+  - `(cd bot-discord/gateway-ts && npm run build)` -> PASS
+  - `bash -n bot-discord/scripts/gate-all.sh` -> PASS
+- Validasi staging:
+  - service `xray-discord-backend` dan `xray-discord-gateway` -> active
+  - checklist action `/panel` untuk menu `1`, `5`, `12` -> PASS semua (18/18 action).
+
 ## Rilis 2026-02-24
 
 ### Ringkasan

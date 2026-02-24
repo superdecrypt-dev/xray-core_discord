@@ -7,7 +7,7 @@
 - Deploy bot Discord tetap: `/opt/bot-discord`
 
 ## Struktur Proyek & Organisasi Modul
-Repositori ini memiliki dua area utama. Area root berisi skrip operasional server: `setup.sh` (provisioning awal), `manage.sh` (menu harian), `run.sh` (bootstrap installer), dan `install-discord-bot.sh` (installer bot Discord). Area `bot-discord/` adalah stack bot standalone dengan `gateway-ts/` (UI Discord tombol/modal), `backend-py/` (API FastAPI per menu 1-9), `shared/` (kontrak action), `systemd/`, dan `scripts/`.
+Repositori ini memiliki dua area utama. Area root berisi skrip operasional server: `setup.sh` (provisioning awal), `manage.sh` (menu harian), `run.sh` (bootstrap installer), dan `install-discord-bot.sh` (installer bot Discord). Area `bot-discord/` adalah stack bot standalone dengan `gateway-ts/` (UI Discord tombol/modal), `backend-py/` (API FastAPI per menu 1-8 dan 12), `shared/` (kontrak action), `systemd/`, dan `scripts/`.
 
 ## Build, Test, dan Command Pengembangan
 - `bash -n setup.sh manage.sh run.sh install-discord-bot.sh`: validasi syntax skrip shell.
@@ -47,6 +47,34 @@ Catatan khusus proyek ini: temuan hardcoded Cloudflare token pada lokasi legacy 
 - Update gateway terbaru memakai `flags: MessageFlags.Ephemeral` (bukan `ephemeral: true`).
 - Rilis dilakukan lewat staging terlebih dulu; production hanya setelah validasi gate/smoke selesai.
 - SOP validasi lintas shell+bot terpusat di `TESTING_PLAYBOOK.md`.
+
+## Aktivitas Terkini (Update 2026-02-25)
+- Fokus sprint terbaru: sinkronisasi UX bot Discord dengan CLI `manage.sh` + stabilisasi staging.
+- Perubahan besar yang sudah dilalui:
+  - Konsistensi select mode untuk alur yang butuh pilihan (protocol/user/action tertentu).
+  - `Add User` dan `Account Info` menampilkan ringkasan embed + lampiran file TXT akun.
+  - Domain Control disederhanakan (`Set Domain Manual` dan `Set Domain Auto`) + root domain Cloudflare via select.
+  - Speedtest output diringkas (ISP, latency, packet loss, download, upload).
+  - Fitur baru shell+bot:
+    - Observability & Alerting
+    - Domain & Cert Guard
+    - `12) Traffic Analytics`
+  - Label tombol menu bot diseragamkan dengan pola `View/Run/Set/Toggle`.
+- Commit bot terbaru yang sudah di-push: `fec6834` (`feat(bot): add menu 12 analytics and observability/domain-guard controls`).
+- Validasi staging terbaru untuk menu `/panel` yang diuji (menu 1, 5, 12): seluruh action checklist PASS.
+- Catatan workspace saat handoff ini ditulis:
+  - Perubahan bot sudah tercatat commit.
+  - `manage.sh` dan `setup.sh` masih memiliki perubahan lokal terpisah; jangan di-reset tanpa instruksi owner.
+
+## Checklist Agent Baru (Praktis)
+1. Jalankan `git status --short` untuk cek perubahan lokal sebelum mulai.
+2. Baca `HANDOFF.md` bagian "Status Operasional Terkini".
+3. Validasi cepat bot:
+   - `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py')`
+   - `cd bot-discord/gateway-ts && npm run build`
+4. Uji staging sebelum perubahan baru:
+   - `bot-discord/scripts/gate-all.sh local`
+   - lanjut E2E manual `/panel` sesuai `TESTING_PLAYBOOK.md`.
 
 ## Kalimat Anchor Owner (Wajib Lanjutkan Dari Sini)
 - Kalimat referensi wajib: "oke saat ini kamu mengingatnya bahwa menggunakan repo superdecrypt-dev/autoscript".
