@@ -101,6 +101,9 @@ MAIN_INFO_CACHE_IP="-"
 MAIN_INFO_CACHE_ISP="-"
 MAIN_INFO_CACHE_COUNTRY="-"
 MAIN_INFO_CACHE_DOMAIN="-"
+ACCOUNT_INFO_DOMAIN_SYNC_STATE_FILE="${WORK_DIR}/account-info-domain.state"
+ACCOUNT_INFO_DOMAIN_SYNC_CHECK_TTL=15
+ACCOUNT_INFO_DOMAIN_SYNC_LAST_CHECK_TS=0
 
 # Cache metadata quota (proto:username -> "quota_gb|expired|created|ip_enabled|ip_limit")
 declare -Ag QUOTA_FIELDS_CACHE=()
@@ -645,6 +648,128 @@ detect_public_ip_ipapi() {
   echo "${ip}"
 }
 
+account_info_domain_sync_state_read() {
+  local state=""
+  if [[ -s "${ACCOUNT_INFO_DOMAIN_SYNC_STATE_FILE}" ]]; then
+    state="$(head -n1 "${ACCOUNT_INFO_DOMAIN_SYNC_STATE_FILE}" 2>/dev/null | tr -d '\r')"
+    state="$(echo "${state}" | awk '{print $1}' | tr -d ';')"
+  fi
+  echo "${state}"
+}
+
+account_info_domain_sync_state_write() {
+  local domain="${1:-}"
+  [[ -n "${domain}" ]] || domain="-"
+  printf '%s\n' "${domain}" > "${ACCOUNT_INFO_DOMAIN_SYNC_STATE_FILE}" 2>/dev/null || true
+  chmod 600 "${ACCOUNT_INFO_DOMAIN_SYNC_STATE_FILE}" 2>/dev/null || true
+}
+
+account_info_probe_domain_from_any_account_file() {
+  local proto dir f dom
+  for proto in "${ACCOUNT_PROTO_DIRS[@]}"; do
+    dir="${ACCOUNT_ROOT}/${proto}"
+    [[ -d "${dir}" ]] || continue
+    f="$(find "${dir}" -maxdepth 1 -type f -name '*.txt' -print -quit 2>/dev/null || true)"
+    [[ -n "${f}" ]] || continue
+    dom="$(grep -E '^Domain[[:space:]]*:' "${f}" 2>/dev/null | head -n1 | sed -E 's/^Domain[[:space:]]*:[[:space:]]*//')"
+    dom="$(echo "${dom}" | awk '{print $1}' | tr -d ';')"
+    if [[ -n "${dom}" ]]; then
+      echo "${dom}"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+account_info_sync_after_domain_change_if_needed() {
+  local now elapsed current_domain previous_domain ip
+  now="$(date +%s 2>/dev/null || echo 0)"
+  elapsed=$(( now - ACCOUNT_INFO_DOMAIN_SYNC_LAST_CHECK_TS ))
+  if (( ACCOUNT_INFO_DOMAIN_SYNC_LAST_CHECK_TS > 0 && elapsed >= 0 && elapsed < ACCOUNT_INFO_DOMAIN_SYNC_CHECK_TTL )); then
+    return 0
+  fi
+  ACCOUNT_INFO_DOMAIN_SYNC_LAST_CHECK_TS="${now}"
+
+  current_domain="$(detect_domain)"
+  current_domain="$(echo "${current_domain}" | awk '{print $1}' | tr -d ';')"
+  [[ -n "${current_domain}" ]] || current_domain="-"
+
+  previous_domain="$(account_info_domain_sync_state_read)"
+  if [[ -z "${previous_domain}" ]]; then
+    previous_domain="$(account_info_probe_domain_from_any_account_file)"
+  fi
+  if [[ -z "${previous_domain}" ]]; then
+    account_info_domain_sync_state_write "${current_domain}"
+    return 0
+  fi
+
+  if [[ "${previous_domain}" == "${current_domain}" ]]; then
+    account_info_domain_sync_state_write "${current_domain}"
+    return 0
+  fi
+
+  if [[ "${current_domain}" != *.* ]]; then
+    warn "Domain aktif tidak valid (${current_domain}), skip sinkronisasi XRAY ACCOUNT INFO."
+    account_info_domain_sync_state_write "${current_domain}"
+    return 0
+  fi
+
+  log "Perubahan domain terdeteksi (${previous_domain} -> ${current_domain}), sinkronisasi XRAY ACCOUNT INFO..."
+  ip="$(detect_public_ip_ipapi)"
+  if account_refresh_all_info_files "${current_domain}" "${ip}"; then
+    log "XRAY ACCOUNT INFO berhasil disinkronkan otomatis."
+    account_info_domain_sync_state_write "${current_domain}"
+  else
+    warn "Sebagian XRAY ACCOUNT INFO gagal disinkronkan otomatis. Cek file di ${ACCOUNT_ROOT}."
+    warn "State sinkronisasi dipertahankan (${previous_domain}) agar retry otomatis berjalan."
+  fi
+}
+
+cert_snapshot_create() {
+  # args: backup_dir
+  local backup_dir="$1"
+  mkdir -p "${backup_dir}"
+  chmod 700 "${backup_dir}" 2>/dev/null || true
+
+  if [[ -f "${CERT_FULLCHAIN}" ]]; then
+    cp -a "${CERT_FULLCHAIN}" "${backup_dir}/fullchain.pem" 2>/dev/null || true
+    echo "1" > "${backup_dir}/fullchain.exists"
+  else
+    echo "0" > "${backup_dir}/fullchain.exists"
+  fi
+
+  if [[ -f "${CERT_PRIVKEY}" ]]; then
+    cp -a "${CERT_PRIVKEY}" "${backup_dir}/privkey.pem" 2>/dev/null || true
+    echo "1" > "${backup_dir}/privkey.exists"
+  else
+    echo "0" > "${backup_dir}/privkey.exists"
+  fi
+}
+
+cert_snapshot_restore() {
+  # args: backup_dir
+  local backup_dir="$1"
+  local fullchain_exists privkey_exists
+  [[ -d "${backup_dir}" ]] || return 0
+
+  fullchain_exists="$(cat "${backup_dir}/fullchain.exists" 2>/dev/null || echo "0")"
+  privkey_exists="$(cat "${backup_dir}/privkey.exists" 2>/dev/null || echo "0")"
+
+  if [[ "${fullchain_exists}" == "1" && -f "${backup_dir}/fullchain.pem" ]]; then
+    cp -a "${backup_dir}/fullchain.pem" "${CERT_FULLCHAIN}" 2>/dev/null || true
+  else
+    rm -f "${CERT_FULLCHAIN}" 2>/dev/null || true
+  fi
+
+  if [[ "${privkey_exists}" == "1" && -f "${backup_dir}/privkey.pem" ]]; then
+    cp -a "${backup_dir}/privkey.pem" "${CERT_PRIVKEY}" 2>/dev/null || true
+  else
+    rm -f "${CERT_PRIVKEY}" 2>/dev/null || true
+  fi
+
+  chmod 600 "${CERT_PRIVKEY}" "${CERT_FULLCHAIN}" 2>/dev/null || true
+}
+
 main_info_os_get() {
   local pretty=""
   if [[ -r /etc/os-release ]]; then
@@ -1056,7 +1181,8 @@ cf_prepare_subdomain_a_record() {
 
   log "Validasi DNS A record Cloudflare untuk: $fqdn"
 
-  local json rec_ips any_same any_diff
+  local json rec_ips any_same any_diff target_ready
+  target_ready="0"
   json="$(cf_api GET "/zones/${zone_id}/dns_records?type=A&name=${fqdn}&per_page=100" || true)"
   if [[ -n "${json:-}" ]] && echo "$json" | jq -e '.success == true' >/dev/null 2>&1; then
     mapfile -t rec_ips < <(echo "$json" | jq -r '.result[].content' 2>/dev/null || true)
@@ -1077,15 +1203,16 @@ cf_prepare_subdomain_a_record() {
         local ask_rc=0
         if confirm_yn_or_back "Lanjut menggunakan domain ini?"; then
           log "Melanjutkan proses."
-          return 0
+          target_ready="1"
+        else
+          ask_rc=$?
+          if (( ask_rc == 2 )); then
+            warn "Dibatalkan oleh pengguna (kembali)."
+            return 2
+          fi
+          warn "Dibatalkan oleh pengguna."
+          return 1
         fi
-        ask_rc=$?
-        if (( ask_rc == 2 )); then
-          warn "Dibatalkan oleh pengguna (kembali)."
-          return 2
-        fi
-        warn "Dibatalkan oleh pengguna."
-        return 1
       fi
 
       if [[ "$any_diff" == "1" ]]; then
@@ -1094,6 +1221,14 @@ cf_prepare_subdomain_a_record() {
     fi
   fi
 
+  if [[ "${target_ready}" != "1" ]]; then
+    log "Membuat DNS A record: $fqdn -> $ip"
+    cf_create_a_record "$zone_id" "$fqdn" "$ip" "$proxied"
+    target_ready="1"
+  fi
+
+  # Cleanup record domain lain dengan IP yang sama dilakukan setelah target fqdn siap,
+  # supaya tidak ada jeda putus bila create record target gagal.
   local same_ip=()
   mapfile -t same_ip < <(cf_list_a_records_by_ip "$zone_id" "$ip" || true)
   if [[ ${#same_ip[@]} -gt 0 ]]; then
@@ -1108,9 +1243,6 @@ cf_prepare_subdomain_a_record() {
       fi
     done
   fi
-
-  log "Membuat DNS A record: $fqdn -> $ip"
-  cf_create_a_record "$zone_id" "$fqdn" "$ip" "$proxied"
 }
 
 domain_menu_v2() {
@@ -1244,8 +1376,9 @@ domain_menu_v2() {
   DOMAIN="${sub}.${ACME_ROOT_DOMAIN}"
   log "Domain final: $DOMAIN"
 
-  if ! cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED"; then
-    local cf_rc=$?
+  local cf_rc=0
+  cf_prepare_subdomain_a_record "$CF_ZONE_ID" "$DOMAIN" "$VPS_IPV4" "$CF_PROXIED" || cf_rc=$?
+  if (( cf_rc != 0 )); then
     if (( cf_rc == 1 || cf_rc == 2 )); then
       warn "Input domain dibatalkan, kembali ke menu Domain Control."
       return 2
@@ -1391,6 +1524,8 @@ install_acme_and_issue_cert() {
 
 domain_control_apply_nginx_domain() {
   local domain="$1"
+  local applied_domain
+  domain="$(printf '%s' "${domain}" | tr -d '\r\n' | awk '{print $1}' | tr -d ';')"
   [[ -n "${domain}" ]] || die "Domain kosong."
   [[ -f "${NGINX_CONF}" ]] || die "Nginx conf tidak ditemukan: ${NGINX_CONF}"
   ensure_path_writable "${NGINX_CONF}"
@@ -1404,11 +1539,10 @@ domain_control_apply_nginx_domain() {
     die "Gagal update server_name di nginx conf."
   fi
 
-  local domain_re
-  domain_re="$(printf '%s\n' "${domain}" | sed -e "s/[.[\\\\*^\\$()+?{|]/\\\\\\\\&/g")"
-  if ! grep -Eq "^[[:space:]]*server_name[[:space:]]+${domain_re};" "${NGINX_CONF}"; then
+  applied_domain="$(grep -E '^[[:space:]]*server_name[[:space:]]+' "${NGINX_CONF}" 2>/dev/null | head -n1 | sed -E 's/^[[:space:]]*server_name[[:space:]]+//; s/;.*$//' | awk '{print $1}' | tr -d ';')"
+  if [[ -z "${applied_domain}" || "${applied_domain}" != "${domain}" ]]; then
     cp -a "${backup}" "${NGINX_CONF}" >/dev/null 2>&1 || true
-    die "server_name ${domain}; tidak ditemukan setelah update."
+    die "server_name nginx tidak sesuai setelah update (expect=${domain}, got=${applied_domain:-<kosong>})."
   fi
 
   if ! nginx -t >/dev/null 2>&1; then
@@ -1445,14 +1579,27 @@ domain_control_set_domain_now() {
     fi
     return "${domain_input_rc}"
   fi
+  local cert_backup_dir
+  cert_backup_dir="${WORK_DIR}/cert-snapshot.$(date +%s).$$"
+  cert_snapshot_create "${cert_backup_dir}"
+
   install_acme_and_issue_cert
-  domain_control_apply_nginx_domain "${DOMAIN}"
+  if ! ( domain_control_apply_nginx_domain "${DOMAIN}" ); then
+    warn "Apply domain ke nginx gagal. Mengembalikan sertifikat sebelumnya..."
+    cert_snapshot_restore "${cert_backup_dir}"
+    systemctl restart nginx >/dev/null 2>&1 || true
+    rm -rf "${cert_backup_dir}" >/dev/null 2>&1 || true
+    die "Set domain dibatalkan karena update nginx gagal; sertifikat dipulihkan."
+  fi
+  rm -rf "${cert_backup_dir}" >/dev/null 2>&1 || true
   MAIN_INFO_CACHE_TS=0
 
   if account_refresh_all_info_files "${DOMAIN}" "$(detect_public_ip_ipapi)"; then
     log "XRAY ACCOUNT INFO berhasil disinkronkan ke domain baru."
+    account_info_domain_sync_state_write "${DOMAIN}"
   else
     warn "Sebagian XRAY ACCOUNT INFO gagal disinkronkan. Cek file di ${ACCOUNT_ROOT}."
+    warn "State sinkronisasi domain tidak diubah agar auto-sync bisa retry."
   fi
 
   hr
@@ -11203,6 +11350,7 @@ maintenance_menu() {
 main_menu() {
   while true; do
     title
+    account_info_sync_after_domain_change_if_needed
     main_menu_info_header_print
     echo -e "${UI_BOLD}${UI_ACCENT}Main Menu${UI_RESET}"
     hr
