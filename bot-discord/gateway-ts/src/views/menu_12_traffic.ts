@@ -1,7 +1,7 @@
 import type { MenuDefinition } from "./types";
 
 export const menu12: MenuDefinition = {
-  id: "12",
+  id: "9",
   label: "Traffic Analytics",
   description: "Analitik traffic user berdasarkan metadata quota (overview, top users, search, dan export).",
   actions: [

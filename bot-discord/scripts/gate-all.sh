@@ -3,6 +3,7 @@ set -euo pipefail
 
 BOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 REPO_DIR="$(cd -- "${BOT_DIR}/.." >/dev/null 2>&1 && pwd -P)"
+export BOT_DIR REPO_DIR
 
 PROFILE="${1:-local}"
 PROD_INSTANCE="${PROD_INSTANCE:-xray-itg-1771777921}"
@@ -28,8 +29,9 @@ run_gate_1() {
 
   python3 - <<'PY'
 import json
+import os
 from pathlib import Path
-p = Path("bot-discord/shared/commands.json")
+p = Path(os.environ["BOT_DIR"]) / "shared" / "commands.json"
 obj = json.loads(p.read_text(encoding="utf-8"))
 print(f"gate1_commands_json_ok menus={len(obj.get('menus', []))}")
 PY
@@ -44,10 +46,11 @@ run_gate_2() {
   log "Gate 2: API Smoke (service layer)"
 
   python3 - <<'PY'
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path("bot-discord/backend-py").resolve()))
+sys.path.insert(0, str((Path(os.environ["BOT_DIR"]) / "backend-py").resolve()))
 from app.services import menu_5_domain
 
 settings_on = type("S", (), {"enable_dangerous_actions": True})()
@@ -173,15 +176,15 @@ s, b = get("/health")
 rec("health", s == 200 and b.get("status") == "ok")
 s, b = get("/api/main-menu", headers={"X-Internal-Shared-Secret": SECRET})
 menu_ids = [str(m.get("id")) for m in (b.get("menus") or []) if isinstance(m, dict)]
-rec("main_menu_auth", s == 200 and b.get("menu_count", 0) >= 9 and "12" in menu_ids)
+rec("main_menu_auth", s == 200 and b.get("menu_count", 0) >= 9 and "9" in menu_ids)
 s, b = get_allow_error("/api/main-menu")
 rec("auth_guard", s == 401)
 s, b = post("/api/menu/5/action", {"action": "domain_info", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
 rec("menu5_domain_info", s == 200 and b.get("code") == "ok")
 s, b = post("/api/menu/1/action", {"action": "observe_status", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
 rec("menu1_observe_status", s == 200 and b.get("code") == "ok")
-s, b = post("/api/menu/12/action", {"action": "overview", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
-rec("menu12_overview", s == 200 and b.get("code") == "ok")
+s, b = post("/api/menu/9/action", {"action": "overview", "params": {}}, headers={"X-Internal-Shared-Secret": SECRET})
+rec("menu9_overview", s == 200 and b.get("code") == "ok")
 
 if not all(ok for _, ok in checks):
     raise SystemExit("gate3_failed")
@@ -233,15 +236,15 @@ s,b=get("/health")
 rec("health", s==200 and b.get("status")=="ok")
 s,b=get("/api/main-menu", headers={"X-Internal-Shared-Secret":SECRET})
 menu_ids=[str(m.get("id")) for m in (b.get("menus") or []) if isinstance(m, dict)]
-rec("main_menu_auth", s==200 and b.get("menu_count", 0)>=9 and "12" in menu_ids)
+rec("main_menu_auth", s==200 and b.get("menu_count", 0)>=9 and "9" in menu_ids)
 s,b=get_allow_error("/api/main-menu")
 rec("auth_guard", s==401)
 s,b=post("/api/menu/5/action", {"action":"domain_info","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
 rec("menu5_domain_info", s==200 and b.get("code")=="ok")
 s,b=post("/api/menu/1/action", {"action":"observe_status","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
 rec("menu1_observe_status", s==200 and b.get("code")=="ok")
-s,b=post("/api/menu/12/action", {"action":"overview","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
-rec("menu12_overview", s==200 and b.get("code")=="ok")
+s,b=post("/api/menu/9/action", {"action":"overview","params":{}}, headers={"X-Internal-Shared-Secret":SECRET})
+rec("menu9_overview", s==200 and b.get("code")=="ok")
 
 if not all(ok for _,ok in checks):
     raise SystemExit("gate3_1_failed")
@@ -338,7 +341,7 @@ cases=[
   ("6","version",{}),
   ("7","sysctl_summary",{}),
   ("8","service_status",{}),
-  ("12","overview",{}),
+  ("9","overview",{}),
 ]
 
 def post(menu, action, params):

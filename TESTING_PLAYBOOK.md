@@ -102,7 +102,7 @@ Catatan:
 3. Gate 3/3.1: Integration endpoint + auth guard.
 4. Gate 4: Negative/Failure (invalid param, unauthorized).
 5. Gate 5: Discord E2E server-side check (`/panel` terdaftar).
-6. Gate 6: Regression read-only menu 1-8 dan 12.
+6. Gate 6: Regression read-only menu 1-9.
 
 ### 4.2 E2E Manual di Discord (staging)
 1. Jalankan `/panel`.
@@ -130,7 +130,7 @@ Gunakan checklist ini saat regresi fitur bot terbaru:
 - `View Nginx Name`
 - `Refresh Accounts`
 
-3. Menu `12) Traffic Analytics`
+3. Menu `9) Traffic Analytics`
 - `View Overview`
 - `View Top Users` (isi limit)
 - `Search User` (isi query)
@@ -147,12 +147,12 @@ Contoh format ringkas:
 ```text
 Tanggal:
 Environment: staging
-Checklist: /panel manual (menu 1, 5, 12)
+Checklist: /panel manual (menu 1, 5, 9)
 
 1.overview: PASS
 1.xray_test: PASS
 ...
-12.export_json: PASS
+9.export_json: PASS
 
 Total PASS:
 Total FAIL:

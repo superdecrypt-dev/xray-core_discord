@@ -19,5 +19,7 @@ MENU_HANDLERS = {
     "6": menu_6_speedtest.handle,
     "7": menu_7_security.handle,
     "8": menu_8_maintenance.handle,
+    "9": menu_12_traffic.handle,
+    # Backward compatibility for older cached interaction payloads.
     "12": menu_12_traffic.handle,
 }

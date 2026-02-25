@@ -1158,7 +1158,21 @@ def _speedtest_parse_json(raw: str) -> tuple[bool, dict[str, Any] | str]:
     if not text:
         return False, "Output speedtest kosong."
 
+    def has_speed_metrics(payload: dict[str, Any]) -> bool:
+        ping = payload.get("ping")
+        download = payload.get("download")
+        upload = payload.get("upload")
+        return (
+            isinstance(ping, dict)
+            and isinstance(download, dict)
+            and isinstance(upload, dict)
+            and "latency" in ping
+            and "bandwidth" in download
+            and "bandwidth" in upload
+        )
+
     candidates = [line.strip() for line in text.splitlines() if line.strip()]
+    fallback_dict: dict[str, Any] | None = None
     for chunk in reversed(candidates):
         if not (chunk.startswith("{") and chunk.endswith("}")):
             continue
@@ -1167,14 +1181,26 @@ def _speedtest_parse_json(raw: str) -> tuple[bool, dict[str, Any] | str]:
         except Exception:
             continue
         if isinstance(payload, dict):
-            return True, payload
+            if has_speed_metrics(payload):
+                return True, payload
+            if fallback_dict is None:
+                fallback_dict = payload
 
     try:
         payload = json.loads(text)
     except Exception:
         payload = None
     if isinstance(payload, dict):
-        return True, payload
+        if has_speed_metrics(payload):
+            return True, payload
+        if fallback_dict is None:
+            fallback_dict = payload
+
+    if fallback_dict is not None:
+        # Fallback terakhir agar error message tetap informatif saat CLI speedtest
+        # hanya mengembalikan log/noise tanpa metrik result.
+        return True, fallback_dict
+
     return False, "Output speedtest tidak valid (JSON tidak ditemukan)."
 
 
