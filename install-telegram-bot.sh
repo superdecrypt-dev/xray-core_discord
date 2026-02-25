@@ -575,9 +575,14 @@ deploy_or_update_files() {
     command_exists "${cmd}" || die "Dependency '${cmd}' belum tersedia. Jalankan menu 2) Install Dependencies."
   done
 
-  local tmp archive checksum_file src_root src_dir
+  local tmp archive checksum_file src_root src_dir archive_ext archive_url_no_query
   tmp="$(mktemp -d /tmp/bot-telegram-src.XXXXXX)"
-  archive="${tmp}/src.archive"
+  archive_url_no_query="${SRC_ARCHIVE_URL%%\?*}"
+  archive_ext="tar.gz"
+  if [[ "${archive_url_no_query,,}" == *.zip ]]; then
+    archive_ext="zip"
+  fi
+  archive="${tmp}/src.${archive_ext}"
   checksum_file="${tmp}/src.archive.sha256"
 
   log "Download source archive: ${SRC_ARCHIVE_URL}"
