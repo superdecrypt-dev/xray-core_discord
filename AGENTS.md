@@ -43,6 +43,7 @@ Catatan khusus proyek ini: temuan hardcoded Cloudflare token pada lokasi legacy 
 
 ## Catatan Handoff (Ringkas)
 - Bot Discord dijaga standalone dan tidak mengeksekusi `manage.sh` secara langsung.
+- Bot Discord diposisikan sebagai pelengkap CLI `manage.sh`, bukan pengganti penuh alur CLI.
 - Target UX bot: profesional, minim teks tidak perlu, dan anti-spam output panjang.
 - Update gateway terbaru memakai `flags: MessageFlags.Ephemeral` (bukan `ephemeral: true`).
 - Rilis dilakukan lewat staging terlebih dulu; production hanya setelah validasi gate/smoke selesai.

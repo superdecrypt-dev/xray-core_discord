@@ -46,6 +46,7 @@ Agent AI baru wajib memulai dari konteks di atas.
 - Gunakan `staging` untuk test/R&D.
 - Production hanya untuk layanan live dan rollout setelah validasi.
 - Bot Discord standalone; tidak mengeksekusi `manage.sh` langsung.
+- Bot Discord berfungsi sebagai pelengkap CLI `manage.sh`, bukan pengganti penuh operasi CLI.
 
 ## Checklist Mulai Agent Baru
 1. Baca `AGENTS.md`, `bot-discord/ARCHITECTURE_LOCK.md`, `RELEASE_NOTES.md`, `TESTING_PLAYBOOK.md`, dan file ini.
