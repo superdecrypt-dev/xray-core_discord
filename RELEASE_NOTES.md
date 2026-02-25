@@ -1,5 +1,54 @@
 # Release Notes
 
+## Rilis 2026-02-25 (Telegram WARP Parity + Hardening)
+
+### Ringkasan
+Rilis ini menambahkan full parity WARP untuk bot Telegram agar setara kontrol network di CLI, sekaligus hardening akses, output, dan runtime gateway.
+
+### Perubahan Utama
+1. Full parity WARP di bot Telegram (menu 4)
+- Action baru:
+  - `warp_status`, `warp_restart`
+  - `set_warp_global_mode`
+  - `set_warp_user_mode`
+  - `set_warp_inbound_mode`
+  - `set_warp_domain_mode`
+  - `warp_tier_status`
+  - `warp_tier_switch_free`
+  - `warp_tier_switch_plus`
+  - `warp_tier_reconnect`
+- Endpoint opsi dinamis ditambahkan untuk picker `inbound_tag` dan `domain/geosite` agar input minim typo.
+
+2. Hardening backend + gateway Telegram
+- Endpoint backend `/health` kini wajib header `X-Internal-Shared-Secret`.
+- Verifikasi shared secret memakai pembandingan aman (`hmac.compare_digest`).
+- Gateway menerapkan default-deny ACL:
+  - wajib `TELEGRAM_ADMIN_CHAT_IDS` atau `TELEGRAM_ADMIN_USER_IDS`
+  - override hanya via `TELEGRAM_ALLOW_UNRESTRICTED_ACCESS=true`.
+- Ditambahkan action cooldown + cleanup cooldown untuk mencegah spam/double-trigger.
+- Sanitasi output/konfirmasi action agar token/secret/license tersamarkan.
+- Polling update dipersempit ke `message` dan `callback_query` untuk mengurangi attack surface.
+
+3. Hardening installer dan skrip operasional Telegram
+- `install-telegram-bot.sh` menambah env default:
+  - `TELEGRAM_ALLOW_UNRESTRICTED_ACCESS=false`
+  - `TELEGRAM_ACTION_COOLDOWN_SECONDS=1`
+  - `TELEGRAM_CLEANUP_COOLDOWN_SECONDS=30`
+  - `TELEGRAM_MAX_INPUT_LENGTH=128`
+- `smoke-test.sh`, `monitor-lite.sh`, dan `gate-all.sh` disesuaikan ke health endpoint ber-auth secret.
+
+### Commit
+- `af6aabe` — `feat(telegram): full warp parity and hardening baseline`
+
+### Hasil Validasi
+- `python3 -m py_compile $(find bot-telegram/backend-py/app -name '*.py') $(find bot-telegram/gateway-py/app -name '*.py')` -> PASS
+- `bash -n install-telegram-bot.sh bot-telegram/scripts/smoke-test.sh bot-telegram/scripts/monitor-lite.sh bot-telegram/scripts/gate-all.sh` -> PASS
+- `shellcheck install-telegram-bot.sh bot-telegram/scripts/smoke-test.sh bot-telegram/scripts/monitor-lite.sh bot-telegram/scripts/gate-all.sh` -> PASS
+- `bash bot-telegram/scripts/gate-all.sh` -> PASS
+- Runtime deploy:
+  - `systemctl is-active xray-telegram-backend xray-telegram-gateway` -> `active active`
+  - smoke Telegram -> PASS
+
 ## Rilis 2026-02-25 (Update Malam)
 
 ### Ringkasan

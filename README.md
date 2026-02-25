@@ -25,6 +25,7 @@ Untuk automasi chatops, tersedia bot standalone Discord (`bot-discord/`) dan Tel
 - Operasional harian terpusat via `manage.sh` menu 1-11 (status, user, quota, network, security, maintenance, analytics, installer bot).
 - Bot Discord standalone dengan UX interaktif tombol/select/modal (`/panel` sebagai entry point minimal).
 - Bot Telegram standalone dengan UX interaktif tombol/select/modal (`/panel` + `/cleanup`).
+- Bot Telegram kini setara penuh kontrol WARP (status/restart/global/per-user/per-inbound/per-domain/tier/reconnect).
 - Installer bot terpisah (`install-discord-bot.sh`) dengan mode menu + quick setup all-in-one.
 - Installer bot Telegram terpisah (`install-telegram-bot.sh`) dengan mode menu + quick setup all-in-one.
 - Deploy source bot memakai verifikasi checksum archive sebelum extract (lebih aman dari archive corrupt/tampered).
@@ -162,6 +163,15 @@ Highlight kemampuan:
 - Flow interaktif button/select/modal untuk menu operasi yang sinkron dengan backend.
 - Add User mendukung speed limit saat provisioning akun (`speed_limit_enabled`, `speed_down_mbit`, `speed_up_mbit`).
 - Delete User memakai picker protocol + daftar username agar admin tidak perlu hafal user.
+- Menu `4) Network Controls` sekarang memiliki parity WARP penuh:
+  - `warp_status`, `warp_restart`
+  - `set_warp_global_mode`, `set_warp_user_mode`, `set_warp_inbound_mode`, `set_warp_domain_mode`
+  - `warp_tier_status`, `warp_tier_switch_free`, `warp_tier_switch_plus`, `warp_tier_reconnect`
+- Hardening Telegram terbaru:
+  - Backend `/health` sekarang wajib header `X-Internal-Shared-Secret`.
+  - ACL default-deny (wajib isi admin IDs, kecuali override eksplisit).
+  - Output hasil action disanitasi agar token/secret sensitif tidak bocor ke chat.
+  - Throttle/cooldown action dan cleanup untuk menekan spam/double-trigger.
 - Deploy produksi via `install-telegram-bot.sh` ke `/opt/bot-telegram` + systemd service terpisah.
 
 ## Transport Yang Didukung

@@ -14,16 +14,25 @@ Agent AI baru wajib memulai dari konteks di atas.
 
 ## Status Operasional Terkini (2026-02-25)
 - Commit terbaru di `main`:
+  - `af6aabe` — `feat(telegram): full warp parity and hardening baseline`
   - `b86e6d8` — `feat(bot-telegram): polish panel flows and add user speed-limit fields`
   - `8bcf1d4` — `fix(xray): remove xhttp transport from setup, manage, and bot links`
 - Perubahan penting terbaru:
+  - Bot Telegram sekarang punya full parity WARP di menu `4) Network Controls` (status/restart/global/per-user/per-inbound/per-domain/tier/reconnect).
+  - Hardening Telegram aktif:
+    - backend health butuh secret header
+    - ACL default-deny (admin IDs wajib, kecuali override eksplisit)
+    - cooldown action/cleanup
+    - masking output sensitif.
   - UX bot Telegram dipoles (flow panel, picker user delete, cleanup, Add User speed limit).
   - Transport `xhttp` dihapus dari template `setup.sh`, generator `manage.sh`, dan backend bot Discord/Telegram.
   - Menu CLI sekarang menampilkan `10) Traffic Analytics` dan `11) Install BOT Telegram` (input `12` tetap kompatibel ke Traffic Analytics).
-- Validasi runtime terakhir setelah patch `xhttp`:
+- Validasi runtime terakhir:
   - `xray run -test -confdir /usr/local/etc/xray/conf.d` -> `Configuration OK`
   - `nginx -t` -> valid
   - `systemctl is-active xray nginx` -> `active`
+  - `systemctl is-active xray-telegram-backend xray-telegram-gateway` -> `active active`
+  - `set -a; . /etc/xray-telegram-bot/bot.env; set +a; /opt/bot-telegram/scripts/smoke-test.sh` -> PASS
 
 ## Riwayat Aktivitas Yang Sudah Dilalui (Ringkas)
 1. Sinkronisasi UX bot agar alur pilih protocol/user minim typo.
@@ -32,10 +41,11 @@ Agent AI baru wajib memulai dari konteks di atas.
 4. Penambahan Observability + Domain Guard + Traffic Analytics.
 5. Penambahan installer Telegram (`install-telegram-bot.sh`) sebagai pelengkap menu CLI.
 6. Penghapusan `xhttp` untuk menstabilkan skenario domain fronting.
+7. Full parity WARP + hardening baseline bot Telegram.
 
 ## Catatan Working Tree Saat Handoff
-- Working tree saat ini clean (`git status --short` kosong).
-- Perubahan utama sudah commit + push ke `main`.
+- Selalu verifikasi kondisi terbaru dengan `git status --short` sebelum mulai.
+- Perubahan utama Telegram WARP + hardening sudah commit + push ke `main` (`af6aabe`).
 
 ## Prinsip Operasional
 - Gunakan `staging` untuk test/R&D; production hanya setelah validasi.
@@ -50,7 +60,8 @@ Agent AI baru wajib memulai dari konteks di atas.
    - `bash -n setup.sh manage.sh run.sh install-discord-bot.sh install-telegram-bot.sh`
    - `shellcheck setup.sh manage.sh`
    - `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py')`
-   - `python3 -m py_compile $(find bot-telegram/backend-py/app -name '*.py')`
+   - `python3 -m py_compile $(find bot-telegram/backend-py/app -name '*.py') $(find bot-telegram/gateway-py/app -name '*.py')`
+   - `bash bot-telegram/scripts/gate-all.sh`
 5. Jika menyentuh runtime Xray/Nginx, wajib cek:
    - `xray run -test -confdir /usr/local/etc/xray/conf.d`
    - `nginx -t`
