@@ -1634,7 +1634,7 @@ domain_control_apply_nginx_domain() {
 
 domain_control_set_domain_now() {
   title
-  echo "5) Domain Control > Set Domain (setup flow)"
+  echo "6) Domain Control > Set Domain (setup flow)"
   hr
   have_cmd curl || die "curl tidak ditemukan."
   have_cmd jq || die "jq tidak ditemukan."
@@ -1679,7 +1679,7 @@ domain_control_set_domain_now() {
 
 domain_control_show_info() {
   title
-  echo "5) Domain Control > Show Current Domain"
+  echo "6) Domain Control > Show Current Domain"
   hr
   echo "Domain aktif : $(detect_domain)"
   echo "Cert file    : ${CERT_FULLCHAIN}"
@@ -1695,7 +1695,7 @@ domain_control_show_info() {
 
 domain_control_guard_check() {
   title
-  echo "5) Domain Control > Domain & Cert Guard Check"
+  echo "6) Domain Control > Domain & Cert Guard Check"
   hr
 
   if [[ ! -x "${XRAY_DOMAIN_GUARD_BIN}" ]]; then
@@ -1728,7 +1728,7 @@ domain_control_guard_check() {
 
 domain_control_guard_renew_if_needed() {
   title
-  echo "5) Domain Control > Domain & Cert Guard Renew-if-Needed"
+  echo "6) Domain Control > Domain & Cert Guard Renew-if-Needed"
   hr
 
   if [[ ! -x "${XRAY_DOMAIN_GUARD_BIN}" ]]; then
@@ -1770,7 +1770,7 @@ domain_control_guard_renew_if_needed() {
 domain_control_menu() {
   while true; do
     title
-    echo -e "${UI_BOLD}${UI_ACCENT}5) Domain Control${UI_RESET}"
+    echo -e "${UI_BOLD}${UI_ACCENT}6) Domain Control${UI_RESET}"
     hr
     echo -e "  ${UI_ACCENT}1)${UI_RESET} Set Domain + Issue Certificate"
     echo -e "  ${UI_ACCENT}2)${UI_RESET} Show Current Domain"
@@ -6145,7 +6145,7 @@ quota_menu() {
 
   while true; do
     title
-    echo "3) Quota & Access Control"
+    echo "4) Quota & Access Control"
     hr
 
     quota_collect_files
@@ -6241,6 +6241,7 @@ manage_source_required() {
 manage_source_required "features/network.sh"
 manage_source_required "features/analytics.sh"
 manage_source_required "menus/maintenance_menu.sh"
+manage_source_required "menus/wg_inbound_menu.sh"
 manage_source_required "menus/main_menu.sh"
 manage_source_required "app/main.sh"
 

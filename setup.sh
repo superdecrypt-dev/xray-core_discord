@@ -4876,6 +4876,19 @@ sync_manage_modules_layout() {
   tmpdir="$(mktemp -d)"
   bundle_file="${tmpdir}/manage_bundle.zip"
 
+  install_bot_installer_if_present() {
+    # args: src_path dst_path label
+    local src_path="$1"
+    local dst_path="$2"
+    local label="$3"
+    if [[ -f "${src_path}" ]]; then
+      mkdir -p "$(dirname "${dst_path}")"
+      install -m 0755 "${src_path}" "${dst_path}"
+      chown root:root "${dst_path}" 2>/dev/null || true
+      ok "Installer ${label} disegarkan: ${dst_path}"
+    fi
+  }
+
   ok "Sinkronisasi modular manage ke ${MANAGE_MODULES_DST_DIR} ..."
 
   if curl -fsSL --connect-timeout 15 --max-time 120 "${MANAGE_BUNDLE_URL}" -o "${bundle_file}"; then
@@ -4989,6 +5002,8 @@ PY
     then
       chown -R root:root "${MANAGE_MODULES_DST_DIR}" 2>/dev/null || true
       chown root:root "${MANAGE_BIN}" 2>/dev/null || true
+      install_bot_installer_if_present "${SCRIPT_DIR}/install-discord-bot.sh" "/usr/local/bin/install-discord-bot" "Discord"
+      install_bot_installer_if_present "${SCRIPT_DIR}/install-telegram-bot.sh" "/usr/local/bin/install-telegram-bot" "Telegram"
       ok "Template modular manage siap di: ${MANAGE_MODULES_DST_DIR}"
       ok "Binary manage disegarkan dari bundle: ${MANAGE_BIN}"
       rm -rf "${tmpdir}" >/dev/null 2>&1 || true
@@ -5013,6 +5028,8 @@ PY
     chown root:root "${MANAGE_BIN}" 2>/dev/null || true
     ok "Binary manage disegarkan dari source lokal: ${MANAGE_BIN}"
   fi
+  install_bot_installer_if_present "${SCRIPT_DIR}/install-discord-bot.sh" "/usr/local/bin/install-discord-bot" "Discord"
+  install_bot_installer_if_present "${SCRIPT_DIR}/install-telegram-bot.sh" "/usr/local/bin/install-telegram-bot" "Telegram"
   ok "Template modular manage siap di: ${MANAGE_MODULES_DST_DIR} (fallback lokal)"
   rm -rf "${tmpdir}" >/dev/null 2>&1 || true
 }

@@ -1281,7 +1281,7 @@ network_show_summary() {
 egress_menu() {
   while true; do
     title
-    echo "4) Network Controls > Egress Mode & Balancer"
+    echo "5) Network Controls > Egress Mode & Balancer"
     hr
     xray_routing_default_rule_get || true
     echo ""
@@ -1538,7 +1538,7 @@ egress_observatory_settings_menu() {
 egress_menu_simple() {
   while true; do
     title
-    echo "4) Network Controls > Egress Mode & Balancer"
+    echo "5) Network Controls > Egress Mode & Balancer"
     hr
     printf "Current Egress Mode: %s\n" "$(warp_global_mode_pretty_get)"
     hr
@@ -2462,7 +2462,7 @@ adblock_menu() {
     asset_status="$(adblock_custom_dat_status_get)"
 
     title
-    echo "4) Network Controls > Adblock (Custom Geosite)"
+    echo "5) Network Controls > Adblock (Custom Geosite)"
     hr
     printf "Geosite File : %s\n" "${CUSTOM_GEOSITE_DAT}"
     printf "Asset Status : %s\n" "${asset_status}"
@@ -3308,7 +3308,7 @@ warp_tier_show_status() {
 
 warp_tier_switch_free() {
   title
-  echo "4) Network Controls > WARP Controls > Switch ke WARP Free"
+  echo "5) Network Controls > WARP Controls > Switch ke WARP Free"
   hr
 
   if ! have_cmd wgcf; then
@@ -3362,7 +3362,7 @@ warp_tier_switch_free() {
 warp_tier_switch_plus() {
   local saved_key key masked
   title
-  echo "4) Network Controls > WARP Controls > Switch ke WARP Plus"
+  echo "5) Network Controls > WARP Controls > Switch ke WARP Plus"
   hr
 
   if ! have_cmd wgcf; then
@@ -3431,7 +3431,7 @@ warp_tier_switch_plus() {
 warp_tier_reconnect_regenerate() {
   local target key
   title
-  echo "4) Network Controls > WARP Controls > Reconnect/Regenerate"
+  echo "5) Network Controls > WARP Controls > Reconnect/Regenerate"
   hr
 
   if ! have_cmd wgcf; then
@@ -3495,7 +3495,7 @@ warp_tier_reconnect_regenerate() {
 warp_tier_menu() {
   while true; do
     title
-    echo "4) Network Controls > WARP Controls > WARP Tier (Free/Plus)"
+    echo "5) Network Controls > WARP Controls > WARP Tier (Free/Plus)"
     hr
     warp_tier_show_status
     hr
@@ -3509,7 +3509,7 @@ warp_tier_menu() {
     case "${c}" in
       1)
         title
-        echo "4) Network Controls > WARP Controls > WARP Tier Status"
+        echo "5) Network Controls > WARP Controls > WARP Tier Status"
         hr
         warp_tier_show_status
         hr
@@ -3527,7 +3527,7 @@ warp_tier_menu() {
 warp_controls_menu() {
   while true; do
     title
-    echo "4) Network Controls > WARP Controls"
+    echo "5) Network Controls > WARP Controls"
     hr
     echo "  1) WARP (wireproxy) status"
     echo "  2) Restart WARP (wireproxy)"
@@ -3568,7 +3568,7 @@ domain_geosite_menu() {
   need_python3
   while true; do
     title
-    echo "4) Network Controls > Domain/Geosite Routing (Direct List)"
+    echo "5) Network Controls > Domain/Geosite Routing (Direct List)"
     hr
     echo "Template (readonly):"
     python3 - <<'PY' "${XRAY_ROUTING_CONF}" 2>/dev/null || true
@@ -4212,7 +4212,7 @@ dns_show_status() {
 dns_settings_menu() {
   while true; do
     title
-    echo "4) Network Controls > DNS Settings"
+    echo "5) Network Controls > DNS Settings"
     hr
     echo "  1) Set Primary DNS"
     echo "  2) Set Secondary DNS"
@@ -4278,7 +4278,7 @@ dns_settings_menu() {
 dns_addons_menu() {
   while true; do
     title
-    echo "4) Network Controls > DNS Add-ons"
+    echo "5) Network Controls > DNS Add-ons"
     hr
     if [[ -f "${XRAY_DNS_CONF}" ]]; then
       echo "DNS conf: ${XRAY_DNS_CONF}"
@@ -4318,7 +4318,7 @@ dns_addons_menu() {
 network_diagnostics_menu() {
   while true; do
     title
-    echo "4) Network Controls > Diagnostics"
+    echo "5) Network Controls > Diagnostics"
     hr
     echo "  1) Show summary (routing/balancer/observatory)"
     echo "  2) Validate conf.d JSON (jq)"
@@ -4374,7 +4374,7 @@ network_diagnostics_menu() {
 network_menu() {
   while true; do
     title
-    echo "4) Network Controls"
+    echo "5) Network Controls"
     hr
     echo "  1) Egress Mode & Balancer"
     echo "  2) WARP Controls"
@@ -4418,7 +4418,7 @@ speedtest_bin_get() {
 
 speedtest_run_now() {
   title
-  echo "6) Speedtest > Run Speedtest"
+  echo "7) Speedtest > Run Speedtest"
   hr
 
   local speedtest_bin
@@ -4441,7 +4441,7 @@ speedtest_run_now() {
 
 speedtest_show_version() {
   title
-  echo "6) Speedtest > Version"
+  echo "7) Speedtest > Version"
   hr
 
   local speedtest_bin
@@ -4463,7 +4463,7 @@ speedtest_show_version() {
 speedtest_menu() {
   while true; do
     title
-    echo "6) Speedtest"
+    echo "7) Speedtest"
     hr
     echo "  1) Run Speedtest (Ookla)"
     echo "  2) Show Speedtest Version"

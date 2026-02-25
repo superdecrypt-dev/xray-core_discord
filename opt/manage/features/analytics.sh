@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Traffic Analytics
 # - Sumber data: metadata quota /opt/quota/{vless,vmess,trojan}/*.json
 # - Menggunakan quota_used sebagai dasar traffic usage.
@@ -126,7 +127,7 @@ traffic_analytics_dataset_make_tmp() {
 
 traffic_analytics_overview_show() {
   title
-  echo "9) Traffic Analytics > Overview"
+  echo "10) Traffic Analytics > Overview"
   hr
 
   local dataset
@@ -206,7 +207,7 @@ PY
 
 traffic_analytics_top_users_show() {
   title
-  echo "9) Traffic Analytics > Top Users by Usage"
+  echo "10) Traffic Analytics > Top Users by Usage"
   hr
 
   local n
@@ -283,7 +284,7 @@ PY
 
 traffic_analytics_search_user_show() {
   title
-  echo "9) Traffic Analytics > Search User Traffic"
+  echo "10) Traffic Analytics > Search User Traffic"
   hr
 
   local q
@@ -364,7 +365,7 @@ PY
 
 traffic_analytics_export_json() {
   title
-  echo "9) Traffic Analytics > Export JSON Report"
+  echo "10) Traffic Analytics > Export JSON Report"
   hr
 
   local dataset out
@@ -391,7 +392,7 @@ traffic_analytics_export_json() {
 traffic_analytics_menu() {
   while true; do
     title
-    echo "9) Traffic Analytics"
+    echo "10) Traffic Analytics"
     hr
     echo "  1) Overview"
     echo "  2) Top Users by Usage"
@@ -1102,7 +1103,7 @@ security_overview_menu() {
 fail2ban_menu() {
   while true; do
     title
-    echo "7) Security"
+    echo "8) Security"
     hr
     echo "  1) TLS & Certificate"
     echo "  2) Fail2ban Protection"
@@ -1129,7 +1130,7 @@ fail2ban_menu() {
 # -------------------------
 wireproxy_status_menu() {
   title
-  echo "8) Maintenance > Wireproxy (WARP) Status"
+  echo "9) Maintenance > Wireproxy (WARP) Status"
   hr
 
   if ! svc_exists wireproxy; then
@@ -1202,7 +1203,7 @@ wireproxy_status_menu() {
 
 wireproxy_restart_menu() {
   title
-  echo "8) Maintenance > Restart Wireproxy (WARP)"
+  echo "9) Maintenance > Restart Wireproxy (WARP)"
   hr
 
   if ! svc_exists wireproxy; then
@@ -1222,7 +1223,7 @@ daemon_log_tail_show() {
   local svc="$1"
   local lines="${2:-20}"
   title
-  echo "8) Maintenance > Log ${svc}"
+  echo "9) Maintenance > Log ${svc}"
   hr
   if svc_exists "${svc}"; then
     journalctl -u "${svc}" --no-pager -n "${lines}" 2>/dev/null || true
@@ -1236,7 +1237,7 @@ daemon_log_tail_show() {
 install_discord_bot_menu() {
   local installer_cmd="/usr/local/bin/install-discord-bot"
   title
-  echo "10) Install BOT Discord"
+  echo "11) Install BOT Discord"
   hr
 
   if [[ ! -x "${installer_cmd}" ]]; then
@@ -1263,7 +1264,7 @@ install_discord_bot_menu() {
 install_telegram_bot_menu() {
   local installer_cmd="/usr/local/bin/install-telegram-bot"
   title
-  echo "11) Install BOT Telegram"
+  echo "12) Install BOT Telegram"
   hr
 
   if [[ ! -x "${installer_cmd}" ]]; then
@@ -1289,7 +1290,7 @@ install_telegram_bot_menu() {
 
 daemon_status_menu() {
   title
-  echo "8) Maintenance > Daemon Status"
+  echo "9) Maintenance > Daemon Status"
   hr
 
   local daemons=("xray" "nginx" "xray-expired" "xray-quota" "xray-limit-ip" "xray-speed" "wireproxy")

@@ -1,9 +1,10 @@
+# shellcheck shell=bash
 # Maintenance
 # -------------------------
 maintenance_menu() {
   while true; do
     title
-    echo "8) Maintenance"
+    echo "9) Maintenance"
     hr
     echo "  1. Restart xray"
     echo "  2. Restart nginx"
