@@ -1459,12 +1459,74 @@ with open(src, "r", encoding="utf-8") as f:
   cfg = json.load(f)
 
 routing = cfg.get("routing") or {}
+inbounds_fresh = cfg.get("inbounds") or []
+if not isinstance(inbounds_fresh, list):
+  inbounds_fresh = []
+
+def load_json_silent(path):
+  try:
+    with open(path, "r", encoding="utf-8") as fh:
+      return json.load(fh)
+  except Exception:
+    return {}
+
+def extract_wireguard_inbounds(doc):
+  if not isinstance(doc, dict):
+    return []
+  arr = doc.get("inbounds")
+  if not isinstance(arr, list):
+    return []
+  out = []
+  for ib in arr:
+    if not isinstance(ib, dict):
+      continue
+    if str(ib.get("protocol") or "").strip().lower() != "wireguard":
+      continue
+    out.append(ib)
+  return out
+
+# Hardening migrate:
+# preserve existing wireguard inbound dari config modular lama (10/11)
+# agar setup rerun tidak menghapus WG inbound yang sudah aktif.
+existing_10 = load_json_silent(os.path.join(outdir, "10-inbounds.json"))
+existing_11 = load_json_silent(os.path.join(outdir, "11-wireguard-inbound.json"))
+wg_candidates = extract_wireguard_inbounds(existing_10) + extract_wireguard_inbounds(existing_11)
+
+def wireguard_identity(ib):
+  if not isinstance(ib, dict):
+    return ""
+  tag = str(ib.get("tag") or "").strip()
+  if tag:
+    return f"tag:{tag}"
+  settings = ib.get("settings") if isinstance(ib.get("settings"), dict) else {}
+  secret = str(settings.get("secretKey") or "").strip()
+  listen = str(ib.get("listen") or "").strip()
+  try:
+    port = int(ib.get("port") or 0)
+  except Exception:
+    port = 0
+  return f"anon:{listen}:{port}:{secret}"
+
+seen_wg_ids = set()
+for ib in inbounds_fresh:
+  if not isinstance(ib, dict):
+    continue
+  if str(ib.get("protocol") or "").strip().lower() != "wireguard":
+    continue
+  seen_wg_ids.add(wireguard_identity(ib))
+
+for wg_ib in wg_candidates:
+  ident = wireguard_identity(wg_ib)
+  if ident in seen_wg_ids:
+    continue
+  inbounds_fresh.append(wg_ib)
+  seen_wg_ids.add(ident)
 
 parts = [
   ("00-log.json", {"log": cfg.get("log") or {}}),
   ("01-api.json", {"api": cfg.get("api") or {}}),
   ("02-dns.json", {"dns": cfg.get("dns") or {}}),
-  ("10-inbounds.json", {"inbounds": cfg.get("inbounds") or []}),
+  ("10-inbounds.json", {"inbounds": inbounds_fresh}),
   ("20-outbounds.json", {"outbounds": cfg.get("outbounds") or []}),
   ("30-routing.json", {"routing": routing}),
   ("40-policy.json", {"policy": cfg.get("policy") or {}}),

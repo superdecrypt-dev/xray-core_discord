@@ -3,7 +3,8 @@
 WG_INBOUND_ROOT="${WG_INBOUND_ROOT:-/opt/wg-inbound}"
 WG_INBOUND_META="${WG_INBOUND_META:-${WG_INBOUND_ROOT}/peers.json}"
 WG_INBOUND_CLIENT_DIR="${WG_INBOUND_CLIENT_DIR:-${WG_INBOUND_ROOT}/clients}"
-WG_INBOUND_CONF="${WG_INBOUND_CONF:-${XRAY_CONFDIR}/11-wireguard-inbound.json}"
+WG_INBOUND_CONF="${WG_INBOUND_CONF:-${XRAY_INBOUNDS_CONF:-${XRAY_CONFDIR}/10-inbounds.json}}"
+WG_INBOUND_LEGACY_CONF="${WG_INBOUND_LEGACY_CONF:-${XRAY_CONFDIR}/11-wireguard-inbound.json}"
 WG_INBOUND_DEFAULT_ADDR="${WG_INBOUND_DEFAULT_ADDR:-10.66.66.1/24}"
 WG_INBOUND_DEFAULT_PORT="${WG_INBOUND_DEFAULT_PORT:-443}"
 WG_INBOUND_DEFAULT_MTU="${WG_INBOUND_DEFAULT_MTU:-1420}"
@@ -147,6 +148,32 @@ EOF
 }
 
 
+wg_inbound_conf_has_managed_tag() {
+  need_python3
+  python3 - <<'PY' "${WG_INBOUND_CONF}" "${WG_INBOUND_TAG}"
+import json
+import sys
+
+path, tag = sys.argv[1:3]
+try:
+  cfg = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+  raise SystemExit(1)
+
+inbounds = cfg.get("inbounds")
+if not isinstance(inbounds, list):
+  raise SystemExit(1)
+
+for ib in inbounds:
+  if not isinstance(ib, dict):
+    continue
+  if str(ib.get("tag") or "") == tag:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+
 wg_inbound_meta_init_if_missing() {
   local keypair server_priv server_pub
   wg_inbound_ensure_layout
@@ -246,6 +273,14 @@ PY
 wg_inbound_bootstrap() {
   wg_inbound_meta_init_if_missing || return 1
   wg_inbound_ensure_conf_seed || return 1
+  # Migrasi kompatibilitas:
+  # Jika host lama masih memakai file terpisah 11-wireguard-inbound.json dan
+  # managed tag belum ada di 10-inbounds.json, apply sekali dari metadata.
+  if [[ "${WG_INBOUND_LEGACY_CONF}" != "${WG_INBOUND_CONF}" ]] && [[ -f "${WG_INBOUND_LEGACY_CONF}" ]]; then
+    if ! wg_inbound_conf_has_managed_tag; then
+      wg_inbound_apply_runtime_from_meta >/dev/null 2>&1 || true
+    fi
+  fi
   return 0
 }
 
@@ -774,7 +809,7 @@ PY
 }
 
 
-wg_inbound_build_config_tmp() {
+wg_inbound_build_inbound_tmp() {
   # args: out_path
   local out_path="$1"
   need_python3
@@ -830,28 +865,90 @@ for p in peers_src:
   peers.append(item)
 
 cfg = {
-  "inbounds": [
-    {
-      "listen": listen,
-      "port": port,
-      "protocol": "wireguard",
-      "tag": tag,
-      "settings": {
-        "secretKey": server_priv,
-        "address": [server_addr],
-        "mtu": mtu,
-        "peers": peers,
-      },
-      "sniffing": {
-        "enabled": False,
-      },
-    }
-  ]
+  "listen": listen,
+  "port": port,
+  "protocol": "wireguard",
+  "tag": tag,
+  "settings": {
+    "secretKey": server_priv,
+    "address": [server_addr],
+    "mtu": mtu,
+    "peers": peers,
+  },
+  "sniffing": {
+    "enabled": False,
+  },
 }
 
 with open(out_path, "w", encoding="utf-8") as f:
   json.dump(cfg, f, ensure_ascii=False, indent=2)
   f.write("\n")
+PY
+}
+
+
+wg_inbound_merge_inbound_into_inbounds_tmp() {
+  # args: inbound_tmp out_inbounds_tmp
+  local inbound_tmp="$1"
+  local out_tmp="$2"
+  need_python3
+  python3 - <<'PY' "${WG_INBOUND_CONF}" "${inbound_tmp}" "${out_tmp}" "${WG_INBOUND_TAG}"
+import json
+import os
+import sys
+
+conf_path, inbound_path, out_path, wg_tag = sys.argv[1:5]
+
+def load_json(path, default):
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      return json.load(f)
+  except Exception:
+    return default
+
+cfg = load_json(conf_path, {})
+if not isinstance(cfg, dict):
+  cfg = {}
+
+inbounds = cfg.get("inbounds")
+if not isinstance(inbounds, list):
+  inbounds = []
+
+wg_inbound = load_json(inbound_path, {})
+if not isinstance(wg_inbound, dict):
+  raise SystemExit("wg inbound payload invalid")
+if str(wg_inbound.get("protocol") or "").strip().lower() != "wireguard":
+  raise SystemExit("wg inbound protocol invalid")
+if not str(wg_inbound.get("tag") or "").strip():
+  wg_inbound["tag"] = wg_tag
+
+merged = []
+replaced = False
+for ib in inbounds:
+  if not isinstance(ib, dict):
+    merged.append(ib)
+    continue
+  tag = str(ib.get("tag") or "").strip()
+  proto = str(ib.get("protocol") or "").strip().lower()
+  if tag == wg_tag and proto == "wireguard":
+    if not replaced:
+      merged.append(wg_inbound)
+      replaced = True
+    continue
+  merged.append(ib)
+
+if not replaced:
+  merged.append(wg_inbound)
+
+cfg["inbounds"] = merged
+
+tmp = f"{out_path}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+  f.flush()
+  os.fsync(f.fileno())
+os.replace(tmp, out_path)
 PY
 }
 
@@ -863,9 +960,12 @@ wg_inbound_conf_write_atomic() {
   local dir base target mode uid gid xray_gid
   dir="$(dirname "${dst}")"
   base="$(basename "${dst}")"
-  target="${dir}/.${base}.new.$$"
 
   mkdir -p "${dir}" 2>/dev/null || return 1
+  if declare -F ensure_path_writable >/dev/null 2>&1 && [[ -f "${dst}" ]]; then
+    ensure_path_writable "${dst}" || return 1
+  fi
+
   # WG inbound config wajib readable oleh service user/group xray.
   mode='640'
   uid='0'
@@ -876,6 +976,9 @@ wg_inbound_conf_write_atomic() {
       gid="${xray_gid}"
     fi
   fi
+
+  target="$(mktemp "${dir}/.${base}.new.XXXXXX" 2>/dev/null || true)"
+  [[ -n "${target}" ]] || return 1
 
   cp -f "${src_tmp}" "${target}" || return 1
   chmod "${mode}" "${target}" 2>/dev/null || chmod 600 "${target}" || true
@@ -888,36 +991,78 @@ wg_inbound_conf_write_atomic() {
 }
 
 
+wg_inbound_backup_file() {
+  # args: src dst label
+  local src="$1"
+  local dst="$2"
+  local label="${3:-file}"
+
+  if [[ ! -f "${src}" ]]; then
+    warn "Source backup ${label} tidak ditemukan: ${src}"
+    return 1
+  fi
+  if ! cp -a "${src}" "${dst}"; then
+    warn "Gagal membuat backup ${label}: ${src}"
+    return 1
+  fi
+  return 0
+}
+
+
 wg_inbound_apply_runtime_from_meta() {
-  local tmp_cfg tmp_log
-  tmp_cfg="$(mktemp "/tmp/wg-inbound-conf.XXXXXX.json")" || return 1
+  local tmp_wg tmp_cfg tmp_log backup_conf lock_file
+  tmp_wg="$(mktemp "/tmp/wg-inbound-wireguard.XXXXXX.json")" || return 1
+  tmp_cfg="$(mktemp "/tmp/wg-inbound-conf.XXXXXX.json")" || {
+    rm -f "${tmp_wg}" >/dev/null 2>&1 || true
+    return 1
+  }
   tmp_log="$(mktemp "/tmp/wg-inbound-test.XXXXXX.log")" || {
-    rm -f "${tmp_cfg}" >/dev/null 2>&1 || true
+    rm -f "${tmp_wg}" "${tmp_cfg}" >/dev/null 2>&1 || true
+    return 1
+  }
+  backup_conf="$(mktemp "${WORK_DIR}/wg-inbounds.prev.XXXXXX")" || {
+    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
+    return 1
+  }
+  lock_file="${ROUTING_LOCK_FILE:-/var/lock/xray-routing.lock}"
+  mkdir -p "$(dirname "${lock_file}")" 2>/dev/null || true
+
+  if ! wg_inbound_build_inbound_tmp "${tmp_wg}"; then
+    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  (
+    flock -x 200
+    if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+      exit 1
+    fi
+
+    if ! wg_inbound_merge_inbound_into_inbounds_tmp "${tmp_wg}" "${tmp_cfg}"; then
+      exit 1
+    fi
+    if ! wg_inbound_conf_write_atomic "${tmp_cfg}" "${WG_INBOUND_CONF}"; then
+      restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      exit 1
+    fi
+    if ! xray run -test -confdir "${XRAY_CONFDIR}" >"${tmp_log}" 2>&1; then
+      tail -n 80 "${tmp_log}" 2>/dev/null || true
+      restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      exit 1
+    fi
+
+    svc_restart xray || true
+    if ! svc_wait_active xray 20; then
+      restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      systemctl restart xray >/dev/null 2>&1 || true
+      exit 1
+    fi
+  ) 200>"${lock_file}" || {
+    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
     return 1
   }
 
-  if ! wg_inbound_build_config_tmp "${tmp_cfg}"; then
-    rm -f "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
-    return 1
-  fi
-  if ! wg_inbound_conf_write_atomic "${tmp_cfg}" "${WG_INBOUND_CONF}"; then
-    rm -f "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
-    return 1
-  fi
-
-  if ! xray run -test -confdir "${XRAY_CONFDIR}" >"${tmp_log}" 2>&1; then
-    tail -n 80 "${tmp_log}" 2>/dev/null || true
-    rm -f "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
-    return 1
-  fi
-
-  svc_restart xray || true
-  if ! svc_wait_active xray 20; then
-    rm -f "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
-    return 1
-  fi
-
-  rm -f "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
+  rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -1079,8 +1224,18 @@ wg_inbound_add_peer() {
     pause
     return 0
   }
-  cp -a "${WG_INBOUND_META}" "${backup_meta}" || true
-  cp -a "${WG_INBOUND_CONF}" "${backup_conf}" || true
+  if ! wg_inbound_backup_file "${WG_INBOUND_META}" "${backup_meta}" "WG metadata"; then
+    rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
+    hr
+    pause
+    return 0
+  fi
+  if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+    rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
+    hr
+    pause
+    return 0
+  fi
 
   if ! wg_inbound_meta_add_peer "${username}" "${allowed_ip}" "${client_priv}" "${client_pub}" "${psk}"; then
     warn "Gagal menambah peer ke metadata."
@@ -1157,8 +1312,18 @@ wg_inbound_delete_peer() {
     pause
     return 0
   }
-  cp -a "${WG_INBOUND_META}" "${backup_meta}" || true
-  cp -a "${WG_INBOUND_CONF}" "${backup_conf}" || true
+  if ! wg_inbound_backup_file "${WG_INBOUND_META}" "${backup_meta}" "WG metadata"; then
+    rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
+    hr
+    pause
+    return 0
+  fi
+  if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+    rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
+    hr
+    pause
+    return 0
+  fi
 
   if ! wg_inbound_meta_delete_peer "${username}"; then
     warn "Gagal menghapus peer dari metadata."
@@ -1472,7 +1637,12 @@ wg_inbound_reload_menu() {
     pause
     return 0
   }
-  cp -a "${WG_INBOUND_CONF}" "${backup_conf}" || true
+  if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+    rm -f "${backup_conf}" >/dev/null 2>&1 || true
+    hr
+    pause
+    return 0
+  fi
 
   if ! wg_inbound_apply_runtime_from_meta; then
     warn "Reload gagal. Restore config WG inbound dari backup."
