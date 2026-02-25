@@ -4937,15 +4937,10 @@ EOF
 }
 
 sync_manage_modules_layout() {
-  local tmpdir bundle_file downloaded="0" bundle_expected_sha="" local_bundle_file=""
+  local tmpdir bundle_file downloaded="0" bundle_expected_sha=""
   tmpdir="$(mktemp -d)"
   bundle_file="${tmpdir}/manage_bundle.zip"
   bundle_expected_sha="${MANAGE_BUNDLE_SHA256:-}"
-  local_bundle_file="${SCRIPT_DIR}/manage_bundle.zip"
-
-  if [[ -z "${bundle_expected_sha}" && -f "${local_bundle_file}" ]] && command -v sha256sum >/dev/null 2>&1; then
-    bundle_expected_sha="$(sha256sum "${local_bundle_file}" | awk '{print tolower($1)}')"
-  fi
 
   install_bot_installer_if_present() {
     # args: src_path dst_path label
