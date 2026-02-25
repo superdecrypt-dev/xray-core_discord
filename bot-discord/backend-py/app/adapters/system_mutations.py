@@ -32,6 +32,7 @@ XRAY_OUTBOUNDS_CONF = XRAY_CONFDIR / "20-outbounds.json"
 XRAY_ROUTING_CONF = XRAY_CONFDIR / "30-routing.json"
 XRAY_DNS_CONF = XRAY_CONFDIR / "02-dns.json"
 NGINX_CONF = Path("/etc/nginx/conf.d/xray.conf")
+XRAY_DOMAIN_FILE = Path("/etc/xray/domain")
 CERT_DIR = Path("/opt/cert")
 CERT_FULLCHAIN = CERT_DIR / "fullchain.pem"
 CERT_PRIVKEY = CERT_DIR / "privkey.pem"
@@ -69,14 +70,27 @@ ACME_SH_DNS_CF_HOOK_URL = (
 )
 
 
-def _run_cmd(argv: list[str], timeout: int = 25, env: dict[str, str] | None = None) -> tuple[bool, str]:
+def _run_cmd(
+    argv: list[str],
+    timeout: int = 25,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> tuple[bool, str]:
     try:
         proc = shutil.which(argv[0])
         if proc is None:
             return False, f"Command tidak ditemukan: {argv[0]}"
         import subprocess
 
-        cp = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False, env=env)
+        cp = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+            cwd=cwd,
+        )
     except Exception as exc:
         return False, f"Gagal menjalankan {' '.join(argv)}: {exc}"
 
@@ -2445,6 +2459,13 @@ def _apply_nginx_domain(domain: str) -> tuple[bool, str]:
             pass
         return False, f"Gagal apply domain ke nginx: {exc}"
 
+    # Keep compatibility with legacy scripts that still read active domain from /etc/xray/domain.
+    try:
+        XRAY_DOMAIN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _write_text_atomic(XRAY_DOMAIN_FILE, f"{domain}\n")
+    except Exception:
+        pass
+
     return True, "ok"
 
 
@@ -2524,6 +2545,7 @@ def _ensure_acme_installed() -> tuple[bool, str]:
         ok_install, out_install = _run_cmd(
             ["bash", str(script), "--install", "--home", "/root/.acme.sh", "--accountemail", account_email],
             timeout=240,
+            cwd=str(src_dir),
         )
         if not ok_install:
             return False, f"Install acme.sh gagal:\n{out_install}"
