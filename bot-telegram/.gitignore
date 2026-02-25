@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+runtime/logs/*
+!runtime/logs/.gitkeep
+runtime/tmp/*
+!runtime/tmp/.gitkeep
