@@ -236,7 +236,11 @@ prompt_yes_no() {
   local prompt="$1"
   local ans
   while true; do
-    read -r -p "${prompt} (y/n): " ans || true
+    if ! read -r -p "${prompt} (y/n): " ans; then
+      echo
+      warn "Input ditutup (EOF). Aksi dibatalkan."
+      return 1
+    fi
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no) return 1 ;;
@@ -249,7 +253,11 @@ prompt_yes_no_or_back() {
   local prompt="$1"
   local ans
   while true; do
-    read -r -p "${prompt} (y/n/kembali): " ans || true
+    if ! read -r -p "${prompt} (y/n/kembali): " ans; then
+      echo
+      warn "Input ditutup (EOF). Kembali ke menu."
+      return 2
+    fi
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no) return 1 ;;

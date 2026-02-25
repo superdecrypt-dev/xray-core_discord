@@ -161,8 +161,12 @@ clone_repo() {
   fi
 
   log "Mengkloning repositori ke ${REPO_DIR} ..."
-  if ! git clone --depth=1 "${REPO_URL}" "${REPO_DIR}" 2>&1; then
-    die "Gagal mengkloning repositori: ${REPO_URL}\n  Pastikan server memiliki koneksi internet dan URL repo benar."
+  local clone_err=""
+  if ! clone_err="$(git clone --depth=1 "${REPO_URL}" "${REPO_DIR}" 2>&1)"; then
+    if grep -Eqi 'could not create work tree dir|permission denied|operation not permitted|read-only file system' <<<"${clone_err}"; then
+      die "Gagal mengkloning repositori: ${REPO_URL}\n  Penyebab: path tujuan tidak bisa ditulis (${REPO_DIR}). Cek permission/ownership direktori.\n  Detail git: ${clone_err}"
+    fi
+    die "Gagal mengkloning repositori: ${REPO_URL}\n  Pastikan server memiliki koneksi internet dan URL repo benar.\n  Detail git: ${clone_err}"
   fi
   ok "Repositori berhasil diunduh."
 }
