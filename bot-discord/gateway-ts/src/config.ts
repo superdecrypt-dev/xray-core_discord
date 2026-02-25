@@ -11,6 +11,7 @@ export interface AppConfig {
   adminRoleIds: Set<string>;
   adminUserIds: Set<string>;
   commandsFile: string;
+  channelPolicyFile: string;
 }
 
 function loadEnv(): void {
@@ -51,6 +52,8 @@ export function loadConfig(): AppConfig {
   if (!fs.existsSync(commandsFile)) {
     throw new Error(`commands file tidak ditemukan: ${commandsFile}`);
   }
+  const channelPolicyFile =
+    process.env.DISCORD_CHANNEL_POLICY_FILE?.trim() || path.resolve(__dirname, "../../runtime/channel-policy.json");
 
   return {
     token: requireEnv("DISCORD_BOT_TOKEN"),
@@ -61,5 +64,6 @@ export function loadConfig(): AppConfig {
     adminRoleIds: parseSet(process.env.DISCORD_ADMIN_ROLE_IDS),
     adminUserIds: parseSet(process.env.DISCORD_ADMIN_USER_IDS),
     commandsFile,
+    channelPolicyFile,
   };
 }

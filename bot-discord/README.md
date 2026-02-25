@@ -15,7 +15,7 @@ Bot ini berdiri sendiri dan tidak menjalankan `manage.sh`. Perilaku menunya dibu
 4. Gateway memanggil backend (`/api/menu/{id}/action`) dengan secret internal.
 5. Backend menjalankan aksi dan mengembalikan hasil ke Discord.
 
-## UX Terkini (RELEASE)
+## UX Terkini
 - Alur yang membutuhkan pilihan protokol/user diprioritaskan memakai select untuk menurunkan risiko typo.
 - `Add User`:
   - memilih protokol via select,

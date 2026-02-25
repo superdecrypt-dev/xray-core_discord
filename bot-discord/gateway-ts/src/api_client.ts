@@ -19,6 +19,19 @@ export interface BackendActionResponse {
   data?: Record<string, unknown>;
 }
 
+export interface BackendHealthResponse {
+  status?: string;
+  service?: string;
+  dangerous_actions_enabled?: boolean;
+}
+
+export interface BackendMainMenuResponse {
+  mode?: string;
+  dangerous_actions_enabled?: boolean;
+  menu_count?: number;
+  menus?: unknown[];
+}
+
 export interface BackendUserOption {
   proto: string;
   username: string;
@@ -58,5 +71,15 @@ export class BackendClient {
     });
     const users = Array.isArray(res.data?.users) ? res.data.users : [];
     return users.filter((item) => item && typeof item.proto === "string" && typeof item.username === "string");
+  }
+
+  async getHealth(timeout = 8_000): Promise<BackendHealthResponse> {
+    const res = await this.client.get<BackendHealthResponse>("/health", { timeout });
+    return res.data;
+  }
+
+  async getMainMenu(timeout = 8_000): Promise<BackendMainMenuResponse> {
+    const res = await this.client.get<BackendMainMenuResponse>("/api/main-menu", { timeout });
+    return res.data;
   }
 }
