@@ -1463,64 +1463,12 @@ inbounds_fresh = cfg.get("inbounds") or []
 if not isinstance(inbounds_fresh, list):
   inbounds_fresh = []
 
-def load_json_silent(path):
-  try:
-    with open(path, "r", encoding="utf-8") as fh:
-      return json.load(fh)
-  except Exception:
-    return {}
-
-def extract_wireguard_inbounds(doc):
-  if not isinstance(doc, dict):
-    return []
-  arr = doc.get("inbounds")
-  if not isinstance(arr, list):
-    return []
-  out = []
-  for ib in arr:
-    if not isinstance(ib, dict):
-      continue
-    if str(ib.get("protocol") or "").strip().lower() != "wireguard":
-      continue
-    out.append(ib)
-  return out
-
-# Hardening migrate:
-# preserve existing wireguard inbound dari config modular lama (10/11)
-# agar setup rerun tidak menghapus WG inbound yang sudah aktif.
-existing_10 = load_json_silent(os.path.join(outdir, "10-inbounds.json"))
-existing_11 = load_json_silent(os.path.join(outdir, "11-wireguard-inbound.json"))
-wg_candidates = extract_wireguard_inbounds(existing_10) + extract_wireguard_inbounds(existing_11)
-
-def wireguard_identity(ib):
-  if not isinstance(ib, dict):
-    return ""
-  tag = str(ib.get("tag") or "").strip()
-  if tag:
-    return f"tag:{tag}"
-  settings = ib.get("settings") if isinstance(ib.get("settings"), dict) else {}
-  secret = str(settings.get("secretKey") or "").strip()
-  listen = str(ib.get("listen") or "").strip()
-  try:
-    port = int(ib.get("port") or 0)
-  except Exception:
-    port = 0
-  return f"anon:{listen}:{port}:{secret}"
-
-seen_wg_ids = set()
-for ib in inbounds_fresh:
-  if not isinstance(ib, dict):
-    continue
-  if str(ib.get("protocol") or "").strip().lower() != "wireguard":
-    continue
-  seen_wg_ids.add(wireguard_identity(ib))
-
-for wg_ib in wg_candidates:
-  ident = wireguard_identity(wg_ib)
-  if ident in seen_wg_ids:
-    continue
-  inbounds_fresh.append(wg_ib)
-  seen_wg_ids.add(ident)
+# WireGuard inbound dinonaktifkan permanen dari autoscript:
+# buang semua inbound protocol=wireguard dari config modular.
+inbounds_fresh = [
+  ib for ib in inbounds_fresh
+  if not (isinstance(ib, dict) and str(ib.get("protocol") or "").strip().lower() == "wireguard")
+]
 
 parts = [
   ("00-log.json", {"log": cfg.get("log") or {}}),
@@ -1547,9 +1495,7 @@ for name, obj in parts:
   os.replace(tmp, path)
 
 # Hardening migrate:
-# Unified WG inbound sekarang berada di 10-inbounds.json.
-# Jika file legacy 11-wireguard-inbound.json masih ada, netralkan agar
-# tidak double-load inbound WireGuard (duplicate tag/port).
+# Netralisasi file legacy WireGuard inbound agar tidak pernah ikut ter-load.
 legacy_wg = os.path.join(outdir, "11-wireguard-inbound.json")
 if os.path.isfile(legacy_wg):
   legacy_bak = f"{legacy_wg}.legacy.bak"
@@ -1578,6 +1524,85 @@ PY
   ok "  - ${XRAY_CONFDIR}/40-policy.json"
   ok "  - ${XRAY_CONFDIR}/50-stats.json"
   ok "  - ${XRAY_CONFDIR}/60-observatory.json"
+}
+
+decommission_wg_inbound_runtime() {
+  ok "Hardening: hapus bersih runtime WireGuard inbound..."
+
+  local ts backup_root backup_tgz removed_count xray_inbounds_conf
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup_root="/var/backups/xray-manage"
+  xray_inbounds_conf="${XRAY_CONFDIR}/10-inbounds.json"
+  mkdir -p "${backup_root}" 2>/dev/null || true
+
+  if [[ -d "/opt/wg-inbound" ]]; then
+    backup_tgz="${backup_root}/wg-inbound-${ts}.tar.gz"
+    if tar -C /opt -czf "${backup_tgz}" wg-inbound >/dev/null 2>&1; then
+      rm -rf /opt/wg-inbound
+      ok "Runtime WG inbound dibackup lalu dihapus: ${backup_tgz}"
+    else
+      warn "Backup /opt/wg-inbound gagal. Runtime WG inbound tidak dihapus otomatis."
+    fi
+  fi
+
+  rm -f /var/lock/wg-inbound.lock >/dev/null 2>&1 || true
+
+  need_python3
+  removed_count="$(python3 - <<'PY' "${xray_inbounds_conf}" "${XRAY_CONFDIR}/11-wireguard-inbound.json"
+import json
+import os
+import sys
+
+inbounds_path, legacy_path = sys.argv[1:3]
+removed = 0
+
+def load_json(path, default):
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      return json.load(f)
+  except Exception:
+    return default
+
+cfg = load_json(inbounds_path, {})
+if not isinstance(cfg, dict):
+  cfg = {}
+
+inbounds = cfg.get("inbounds")
+if not isinstance(inbounds, list):
+  inbounds = []
+
+new_inbounds = []
+for ib in inbounds:
+  if isinstance(ib, dict) and str(ib.get("protocol") or "").strip().lower() == "wireguard":
+    removed += 1
+    continue
+  new_inbounds.append(ib)
+cfg["inbounds"] = new_inbounds
+
+tmp = f"{inbounds_path}.tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+os.replace(tmp, inbounds_path)
+
+legacy_tmp = f"{legacy_path}.tmp"
+with open(legacy_tmp, "w", encoding="utf-8") as f:
+  json.dump({"inbounds": []}, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+os.replace(legacy_tmp, legacy_path)
+
+print(removed)
+PY
+)"
+
+  chmod 640 "${xray_inbounds_conf}" "${XRAY_CONFDIR}/11-wireguard-inbound.json" 2>/dev/null || true
+  chown root:xray "${xray_inbounds_conf}" "${XRAY_CONFDIR}/11-wireguard-inbound.json" 2>/dev/null || true
+
+  if [[ "${removed_count:-0}" =~ ^[0-9]+$ ]] && (( removed_count > 0 )); then
+    warn "Ditemukan dan dihapus ${removed_count} inbound WireGuard dari ${xray_inbounds_conf}."
+  else
+    ok "Tidak ada inbound WireGuard aktif pada ${xray_inbounds_conf}."
+  fi
 }
 
 ensure_xray_service_user() {
@@ -5066,7 +5091,6 @@ mapping = {
   "domain_menu.sh": "menus/domain_menu.sh",
   "main_menu.sh": "menus/main_menu.sh",
   "maintenance_menu.sh": "menus/maintenance_menu.sh",
-  "wg_inbound_menu.sh": "menus/wg_inbound_menu.sh",
   "network_menu.sh": "menus/network_menu.sh",
   "user_menu.sh": "menus/user_menu.sh",
   "main.sh": "app/main.sh",
@@ -5726,6 +5750,7 @@ main() {
   install_custom_geosite_adblock
   write_xray_config
   write_xray_modular_configs
+  decommission_wg_inbound_runtime
   configure_xray_service_confdir
   write_nginx_config
   install_management_scripts

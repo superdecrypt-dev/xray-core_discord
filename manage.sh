@@ -6442,7 +6442,6 @@ manage_source_required() {
 manage_source_required "features/network.sh"
 manage_source_required "features/analytics.sh"
 manage_source_required "menus/maintenance_menu.sh"
-manage_source_required "menus/wg_inbound_menu.sh"
 manage_source_required "menus/main_menu.sh"
 manage_source_required "app/main.sh"
 
