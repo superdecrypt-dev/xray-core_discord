@@ -16,12 +16,13 @@ export PATH
 # -------------------------
 REPO_URL="https://github.com/superdecrypt-dev/autoscript.git"
 REPO_DIR="/opt/autoscript"
-LEGACY_REPO_DIR="/root/xray-core_discord"
 MANAGE_BIN="/usr/local/bin/manage"
 MANAGE_MODULES_SRC_DIR="${REPO_DIR}/opt/manage"
 MANAGE_MODULES_DST_DIR="/opt/manage"
 BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
 TELEGRAM_INSTALLER_BIN="/usr/local/bin/install-telegram-bot"
+DISCORD_BOT_HOME="/opt/bot-discord"
+DISCORD_BOT_SRC_DIR="${REPO_DIR}/bot-discord"
 
 # -------------------------
 # Warna output
@@ -43,15 +44,6 @@ die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 hr() { echo "------------------------------------------------------------"; }
 
-safe_realpath() {
-  local path="$1"
-  if command -v readlink >/dev/null 2>&1; then
-    readlink -f "${path}" 2>/dev/null || printf '%s\n' "${path}"
-    return 0
-  fi
-  printf '%s\n' "${path}"
-}
-
 repo_has_local_changes() {
   local dir="$1"
   git -C "${dir}" diff --quiet --ignore-submodules -- || return 0
@@ -64,7 +56,8 @@ repo_has_local_changes() {
 
 reclone_repo_with_backup() {
   local target="$1"
-  local backup="${target}.backup.$(date +%Y%m%d%H%M%S)"
+  local backup=""
+  backup="${target}.backup.$(date +%Y%m%d%H%M%S)"
 
   warn "Repositori existing memiliki perubahan lokal. Menyimpan backup ke: ${backup}"
   mv "${target}" "${backup}" || die "Gagal backup repositori lama: ${target}"
@@ -132,13 +125,6 @@ check_deps() {
 clone_repo() {
   mkdir -p "$(dirname "${REPO_DIR}")"
 
-  # Kompatibilitas: sebagian host lama masih memakai /root/xray-core_discord.
-  # Jika path canonical belum ada, pakai alias symlink agar SOP tetap sinkron.
-  if [[ ! -e "${REPO_DIR}" && -d "${LEGACY_REPO_DIR}/.git" ]]; then
-    log "Deteksi repo legacy di ${LEGACY_REPO_DIR}; membuat alias ${REPO_DIR}."
-    ln -s "${LEGACY_REPO_DIR}" "${REPO_DIR}"
-  fi
-
   if [[ -d "${REPO_DIR}" && ! -d "${REPO_DIR}/.git" ]]; then
     if [[ -z "$(find "${REPO_DIR}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
       rmdir "${REPO_DIR}" || true
@@ -170,26 +156,6 @@ clone_repo() {
     die "Gagal mengkloning repositori: ${REPO_URL}\n  Pastikan server memiliki koneksi internet dan URL repo benar.\n  Detail git: ${clone_err}"
   fi
   ok "Repositori berhasil diunduh."
-}
-
-sync_repo_compat_alias() {
-  if [[ ! -d "${REPO_DIR}/.git" ]]; then
-    return 0
-  fi
-
-  if [[ ! -e "${LEGACY_REPO_DIR}" ]]; then
-    if ln -s "${REPO_DIR}" "${LEGACY_REPO_DIR}" 2>/dev/null; then
-      ok "Alias kompatibilitas dibuat: ${LEGACY_REPO_DIR} -> ${REPO_DIR}"
-    fi
-    return 0
-  fi
-
-  local repo_real legacy_real
-  repo_real="$(safe_realpath "${REPO_DIR}")"
-  legacy_real="$(safe_realpath "${LEGACY_REPO_DIR}")"
-  if [[ "${repo_real}" != "${legacy_real}" ]]; then
-    warn "Terdeteksi dua path repo berbeda: ${REPO_DIR} (${repo_real}) dan ${LEGACY_REPO_DIR} (${legacy_real}). Gunakan ${REPO_DIR} sebagai path canonical."
-  fi
 }
 
 install_manage() {
@@ -226,6 +192,54 @@ install_manage() {
   ok "Installer bot Telegram tersedia di: ${TELEGRAM_INSTALLER_BIN}"
 }
 
+seed_discord_bot_home() {
+  if [[ ! -d "${DISCORD_BOT_SRC_DIR}" ]]; then
+    warn "Source bot Discord tidak ditemukan di repo (${DISCORD_BOT_SRC_DIR}); lewati bootstrap /opt/bot-discord."
+    return 0
+  fi
+
+  if [[ -d "${DISCORD_BOT_HOME}" ]] && [[ -n "$(find "${DISCORD_BOT_HOME}" -mindepth 1 -maxdepth 1 2>/dev/null || true)" ]]; then
+    ok "Bot home sudah ada: ${DISCORD_BOT_HOME}"
+    return 0
+  fi
+
+  log "Menyiapkan source awal bot Discord ke ${DISCORD_BOT_HOME} ..."
+  mkdir -p "${DISCORD_BOT_HOME}"
+  cp -a "${DISCORD_BOT_SRC_DIR}/." "${DISCORD_BOT_HOME}/"
+  chown -R root:root "${DISCORD_BOT_HOME}" 2>/dev/null || true
+  ok "Bootstrap bot Discord selesai: ${DISCORD_BOT_HOME}"
+}
+
+cleanup_repo_after_success() {
+  if [[ "${KEEP_REPO_AFTER_INSTALL:-0}" == "1" ]]; then
+    warn "KEEP_REPO_AFTER_INSTALL=1 -> lewati hapus source repo (${REPO_DIR})."
+    return 0
+  fi
+
+  if [[ ! -d "${REPO_DIR}" ]]; then
+    return 0
+  fi
+
+  local resolved=""
+  if command -v readlink >/dev/null 2>&1; then
+    resolved="$(readlink -f -- "${REPO_DIR}" 2>/dev/null || true)"
+  fi
+  [[ -n "${resolved}" ]] || resolved="${REPO_DIR}"
+
+  case "${resolved}" in
+    "/"|"/."|"/.."|"/bin"|"/boot"|"/dev"|"/etc"|"/home"|"/lib"|"/lib64"|"/media"|"/mnt"|"/opt"|"/proc"|"/root"|"/run"|"/sbin"|"/srv"|"/sys"|"/tmp"|"/usr"|"/var")
+      die "Menolak hapus path berbahaya: ${resolved}"
+      ;;
+  esac
+
+  if [[ "${PWD}/" == "${resolved}/"* ]]; then
+    cd /
+  fi
+
+  rm -rf -- "${resolved}"
+  ok "Source repo dibersihkan setelah instalasi: ${resolved}"
+}
+
 run_setup() {
   local setup="${REPO_DIR}/setup.sh"
 
@@ -253,9 +267,10 @@ main() {
   check_os
   check_deps
   clone_repo
-  sync_repo_compat_alias
   install_manage
+  seed_discord_bot_home
   run_setup
+  cleanup_repo_after_success
 
   echo
   echo -e "${BOLD}============================================================${NC}"

@@ -98,6 +98,10 @@ OBS_LOCK_FILE="/var/lock/xray-observatory.lock"
 REPORT_DIR="/var/log/xray-manage"
 WARP_TIER_STATE_KEY="warp_tier_target"
 WARP_PLUS_LICENSE_STATE_KEY="warp_plus_license_key"
+# Nilai konstanta di atas dipakai lintas modul yang di-source dinamis dari /opt/manage.
+# No-op berikut menandai variabel sebagai "used" agar shellcheck tidak false-positive.
+: "${WIREPROXY_CONF}" "${WGCF_DIR}" "${CUSTOM_GEOSITE_DAT}" "${ADBLOCK_GEOSITE_ENTRY}" "${ADBLOCK_BALANCER_TAG}" \
+  "${WARP_TIER_STATE_KEY}" "${WARP_PLUS_LICENSE_STATE_KEY}"
 
 # Main Menu header cache (best-effort, supaya render menu tetap cepat)
 MAIN_INFO_CACHE_TTL=300
@@ -6223,10 +6227,6 @@ resolve_manage_modules_dir() {
   fi
   if [[ -d "/opt/autoscript/opt/manage" ]]; then
     printf '%s\n' "/opt/autoscript/opt/manage"
-    return 0
-  fi
-  if [[ -d "/root/xray-core_discord/opt/manage" ]]; then
-    printf '%s\n' "/root/xray-core_discord/opt/manage"
     return 0
   fi
   printf '%s\n' "/opt/manage"

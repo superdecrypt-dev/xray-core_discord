@@ -298,7 +298,7 @@ generate_secret() {
 }
 
 ensure_env_file() {
-  mkdir -p "${BOT_ENV_DIR}" "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
+  mkdir -p "${BOT_HOME}" "${BOT_ENV_DIR}" "${BOT_STATE_DIR}" "${BOT_LOG_DIR}"
 
   if [[ ! -f "${BOT_ENV_FILE}" ]]; then
     cat > "${BOT_ENV_FILE}" <<ENVEOF
