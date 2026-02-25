@@ -1545,6 +1545,26 @@ for name, obj in parts:
     json.dump(obj, wf, ensure_ascii=False, indent=2)
     wf.write("\n")
   os.replace(tmp, path)
+
+# Hardening migrate:
+# Unified WG inbound sekarang berada di 10-inbounds.json.
+# Jika file legacy 11-wireguard-inbound.json masih ada, netralkan agar
+# tidak double-load inbound WireGuard (duplicate tag/port).
+legacy_wg = os.path.join(outdir, "11-wireguard-inbound.json")
+if os.path.isfile(legacy_wg):
+  legacy_bak = f"{legacy_wg}.legacy.bak"
+  if not os.path.exists(legacy_bak):
+    try:
+      with open(legacy_wg, "rb") as rf, open(legacy_bak, "wb") as wf:
+        wf.write(rf.read())
+    except Exception:
+      pass
+
+  tmp = f"{legacy_wg}.tmp"
+  with open(tmp, "w", encoding="utf-8") as wf:
+    json.dump({"inbounds": []}, wf, ensure_ascii=False, indent=2)
+    wf.write("\n")
+  os.replace(tmp, legacy_wg)
 PY
 
   chmod 640 "${XRAY_CONFDIR}"/*.json 2>/dev/null || true

@@ -1009,8 +1009,40 @@ wg_inbound_backup_file() {
 }
 
 
+wg_inbound_disable_legacy_conf() {
+  # args: legacy_backup_path
+  local legacy_backup="$1"
+  local tmp_empty
+
+  if [[ "${WG_INBOUND_LEGACY_CONF}" == "${WG_INBOUND_CONF}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${WG_INBOUND_LEGACY_CONF}" ]]; then
+    return 0
+  fi
+
+  if ! wg_inbound_backup_file "${WG_INBOUND_LEGACY_CONF}" "${legacy_backup}" "WG legacy config"; then
+    return 1
+  fi
+
+  tmp_empty="$(mktemp "/tmp/wg-legacy-empty.XXXXXX.json")" || return 1
+  cat > "${tmp_empty}" <<'EOF'
+{
+  "inbounds": []
+}
+EOF
+  if ! wg_inbound_conf_write_atomic "${tmp_empty}" "${WG_INBOUND_LEGACY_CONF}"; then
+    rm -f "${tmp_empty}" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  rm -f "${tmp_empty}" >/dev/null 2>&1 || true
+  return 0
+}
+
+
 wg_inbound_apply_runtime_from_meta() {
-  local tmp_wg tmp_cfg tmp_log backup_conf lock_file
+  local tmp_wg tmp_cfg tmp_log backup_conf legacy_backup lock_file
   tmp_wg="$(mktemp "/tmp/wg-inbound-wireguard.XXXXXX.json")" || return 1
   tmp_cfg="$(mktemp "/tmp/wg-inbound-conf.XXXXXX.json")" || {
     rm -f "${tmp_wg}" >/dev/null 2>&1 || true
@@ -1024,11 +1056,18 @@ wg_inbound_apply_runtime_from_meta() {
     rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" >/dev/null 2>&1 || true
     return 1
   }
+  legacy_backup=""
+  if [[ "${WG_INBOUND_LEGACY_CONF}" != "${WG_INBOUND_CONF}" ]] && [[ -f "${WG_INBOUND_LEGACY_CONF}" ]]; then
+    legacy_backup="$(mktemp "${WORK_DIR}/wg-legacy.prev.XXXXXX")" || {
+      rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
+      return 1
+    }
+  fi
   lock_file="${ROUTING_LOCK_FILE:-/var/lock/xray-routing.lock}"
   mkdir -p "$(dirname "${lock_file}")" 2>/dev/null || true
 
   if ! wg_inbound_build_inbound_tmp "${tmp_wg}"; then
-    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
+    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" "${legacy_backup}" >/dev/null 2>&1 || true
     return 1
   fi
 
@@ -1037,32 +1076,43 @@ wg_inbound_apply_runtime_from_meta() {
     if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
       exit 1
     fi
+    if [[ -n "${legacy_backup}" ]]; then
+      if ! wg_inbound_disable_legacy_conf "${legacy_backup}"; then
+        restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+        exit 1
+      fi
+    fi
 
     if ! wg_inbound_merge_inbound_into_inbounds_tmp "${tmp_wg}" "${tmp_cfg}"; then
+      restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      [[ -n "${legacy_backup}" ]] && restore_file_if_exists "${legacy_backup}" "${WG_INBOUND_LEGACY_CONF}"
       exit 1
     fi
     if ! wg_inbound_conf_write_atomic "${tmp_cfg}" "${WG_INBOUND_CONF}"; then
       restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      [[ -n "${legacy_backup}" ]] && restore_file_if_exists "${legacy_backup}" "${WG_INBOUND_LEGACY_CONF}"
       exit 1
     fi
     if ! xray run -test -confdir "${XRAY_CONFDIR}" >"${tmp_log}" 2>&1; then
       tail -n 80 "${tmp_log}" 2>/dev/null || true
       restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      [[ -n "${legacy_backup}" ]] && restore_file_if_exists "${legacy_backup}" "${WG_INBOUND_LEGACY_CONF}"
       exit 1
     fi
 
     svc_restart xray || true
     if ! svc_wait_active xray 20; then
       restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
+      [[ -n "${legacy_backup}" ]] && restore_file_if_exists "${legacy_backup}" "${WG_INBOUND_LEGACY_CONF}"
       systemctl restart xray >/dev/null 2>&1 || true
       exit 1
     fi
   ) 200>"${lock_file}" || {
-    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
+    rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" "${legacy_backup}" >/dev/null 2>&1 || true
     return 1
   }
 
-  rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" >/dev/null 2>&1 || true
+  rm -f "${tmp_wg}" "${tmp_cfg}" "${tmp_log}" "${backup_conf}" "${legacy_backup}" >/dev/null 2>&1 || true
   return 0
 }
 
