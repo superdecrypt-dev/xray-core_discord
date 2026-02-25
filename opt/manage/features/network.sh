@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Network Controls
 # - Egress mode: direct / warp / balancer
 # - Balancer: tag "egress-balance"
@@ -81,9 +82,9 @@ validate_email_user() {
 
 is_default_xray_email_or_tag() {
   # Default/bawaan Xray (disembunyikan dari menu WARP per-user):
-  # default@(vless|vmess|trojan)-(ws|hup|grpc|xhttp)
+  # default@(vless|vmess|trojan)-(ws|hup|grpc)
   local s="${1:-}"
-  [[ "${s}" =~ ^default@(vless|vmess|trojan)-(ws|hup|grpc|xhttp)$ ]]
+  [[ "${s}" =~ ^default@(vless|vmess|trojan)-(ws|hup|grpc)$ ]]
 }
 
 is_readonly_geosite_domain() {

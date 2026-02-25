@@ -1125,14 +1125,14 @@ def _dns_toggle_cache(cfg: dict[str, Any]) -> tuple[bool, str]:
 
 def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str, str]:
     public_paths = {
-        "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc", "xhttp": "/vless-xhttp"},
-        "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc", "xhttp": "/vmess-xhttp"},
-        "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc", "xhttp": "/trojan-xhttp"},
+        "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
+        "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
+        "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
     }
 
     def vless_link(net: str, val: str) -> str:
         q = {"encryption": "none", "security": "tls", "type": net, "sni": domain}
-        if net in {"ws", "httpupgrade", "xhttp"}:
+        if net in {"ws", "httpupgrade"}:
             q["path"] = val or "/"
         elif net == "grpc" and val:
             q["serviceName"] = val
@@ -1140,7 +1140,7 @@ def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str,
 
     def trojan_link(net: str, val: str) -> str:
         q = {"security": "tls", "type": net, "sni": domain}
-        if net in {"ws", "httpupgrade", "xhttp"}:
+        if net in {"ws", "httpupgrade"}:
             q["path"] = val or "/"
         elif net == "grpc" and val:
             q["serviceName"] = val
@@ -1160,7 +1160,7 @@ def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str,
             "tls": "tls",
             "sni": domain,
         }
-        if net in {"ws", "httpupgrade", "xhttp"}:
+        if net in {"ws", "httpupgrade"}:
             obj["path"] = val or "/"
         elif net == "grpc":
             obj["path"] = val or ""
@@ -1170,7 +1170,7 @@ def _build_links(proto: str, username: str, cred: str, domain: str) -> dict[str,
 
     links: dict[str, str] = {}
     p = public_paths.get(proto, {})
-    for net in ("ws", "httpupgrade", "grpc", "xhttp"):
+    for net in ("ws", "httpupgrade", "grpc"):
         v = p.get(net, "")
         if proto == "vless":
             links[net] = vless_link(net, v)
@@ -1232,7 +1232,6 @@ def _build_account_text(
             f"  WebSocket   : {links.get('ws', '-')}",
             f"  HTTPUpgrade : {links.get('httpupgrade', '-')}",
             f"  gRPC        : {links.get('grpc', '-')}",
-            f"  XHTTP       : {links.get('xhttp', '-')}",
             "",
         ]
     )
@@ -1492,8 +1491,8 @@ def _account_info_needs_compat_refresh() -> bool:
                 return True
 
             has_links_block = bool(re.search(r"(?m)^Links Import:\s*$", text))
-            has_xhttp_line = bool(re.search(r"(?m)^\s*XHTTP\s*:", text))
-            if is_legacy_name or not has_links_block or not has_xhttp_line:
+            has_grpc_line = bool(re.search(r"(?m)^\s*gRPC\s*:", text))
+            if is_legacy_name or not has_links_block or not has_grpc_line:
                 return True
     return False
 

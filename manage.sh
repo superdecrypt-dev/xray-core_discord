@@ -741,7 +741,7 @@ account_info_compat_needs_refresh() {
   # Kriteria:
   # - nama file legacy (username.txt, belum username@proto.txt)
   # - belum memiliki blok "Links Import" modern
-  # - belum memiliki baris link XHTTP
+  # - belum memiliki baris link gRPC
   ensure_account_quota_dirs
   account_collect_files
 
@@ -763,7 +763,7 @@ account_info_compat_needs_refresh() {
       return 0
     fi
 
-    if ! grep -Eq '^  XHTTP[[:space:]]*:' "${f}" 2>/dev/null; then
+    if ! grep -Eq '^  gRPC[[:space:]]*:' "${f}" 2>/dev/null; then
       return 0
     fi
   done
@@ -3294,9 +3294,6 @@ for ib in cfg.get('inbounds', []) or []:
   elif net in ('httpupgrade','httpUpgrade'):
     hu = ss.get('httpUpgradeSettings') or ss.get('httpupgradeSettings') or {}
     val = hu.get('path') or ''
-  elif net == 'xhttp':
-    xs = ss.get('xhttpSettings') or {}
-    val = xs.get('path') or ''
   elif net == 'grpc':
     gs = ss.get('grpcSettings') or {}
     val = gs.get('serviceName') or ''
@@ -3958,15 +3955,15 @@ def fmt_mbit(v):
 
 # Public endpoint harus selaras dengan nginx public path (setup.sh).
 PUBLIC_PATHS = {
-  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc", "xhttp": "/vless-xhttp"},
-  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc", "xhttp": "/vmess-xhttp"},
-  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc", "xhttp": "/trojan-xhttp"},
+  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
+  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
+  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
 }
 
 
 def vless_link(net, val):
   q={"encryption":"none","security":"tls","type":net,"sni":domain}
-  if net in ("ws","httpupgrade","xhttp"):
+  if net in ("ws","httpupgrade"):
     q["path"]=val or "/"
   elif net=="grpc":
     if val:
@@ -3975,7 +3972,7 @@ def vless_link(net, val):
 
 def trojan_link(net, val):
   q={"security":"tls","type":net,"sni":domain}
-  if net in ("ws","httpupgrade","xhttp"):
+  if net in ("ws","httpupgrade"):
     q["path"]=val or "/"
   elif net=="grpc":
     if val:
@@ -3996,7 +3993,7 @@ def vmess_link(net, val):
     "tls":"tls",
     "sni":domain
   }
-  if net in ("ws","httpupgrade","xhttp"):
+  if net in ("ws","httpupgrade"):
     obj["path"]=val or "/"
   elif net=="grpc":
     obj["path"]=val or ""  # many clients use path as serviceName
@@ -4006,7 +4003,7 @@ def vmess_link(net, val):
 
 links={}
 public_proto = PUBLIC_PATHS.get(proto, {})
-for net in ("ws","httpupgrade","grpc","xhttp"):
+for net in ("ws","httpupgrade","grpc"):
   val = public_proto.get(net, "")
   if proto=="vless":
     links[net]=vless_link(net,val)
@@ -4043,7 +4040,6 @@ lines.append("Links Import:")
 lines.append(f"  WebSocket   : {links.get('ws','-')}")
 lines.append(f"  HTTPUpgrade : {links.get('httpupgrade','-')}")
 lines.append(f"  gRPC        : {links.get('grpc','-')}")
-lines.append(f"  XHTTP       : {links.get('xhttp','-')}")
 lines.append("")
 
 with open(acc_file, "w", encoding="utf-8") as f:
@@ -4355,15 +4351,15 @@ if not cred:
   raise SystemExit(20)
 
 PUBLIC_PATHS = {
-  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc", "xhttp": "/vless-xhttp"},
-  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc", "xhttp": "/vmess-xhttp"},
-  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc", "xhttp": "/trojan-xhttp"},
+  "vless": {"ws": "/vless-ws", "httpupgrade": "/vless-hup", "grpc": "vless-grpc"},
+  "vmess": {"ws": "/vmess-ws", "httpupgrade": "/vmess-hup", "grpc": "vmess-grpc"},
+  "trojan": {"ws": "/trojan-ws", "httpupgrade": "/trojan-hup", "grpc": "trojan-grpc"},
 }
 
 
 def vless_link(net, val):
   q = {"encryption": "none", "security": "tls", "type": net, "sni": domain}
-  if net in ("ws", "httpupgrade", "xhttp"):
+  if net in ("ws", "httpupgrade"):
     q["path"] = val or "/"
   elif net == "grpc" and val:
     q["serviceName"] = val
@@ -4372,7 +4368,7 @@ def vless_link(net, val):
 
 def trojan_link(net, val):
   q = {"security": "tls", "type": net, "sni": domain}
-  if net in ("ws", "httpupgrade", "xhttp"):
+  if net in ("ws", "httpupgrade"):
     q["path"] = val or "/"
   elif net == "grpc" and val:
     q["serviceName"] = val
@@ -4393,7 +4389,7 @@ def vmess_link(net, val):
     "tls": "tls",
     "sni": domain,
   }
-  if net in ("ws", "httpupgrade", "xhttp"):
+  if net in ("ws", "httpupgrade"):
     obj["path"] = val or "/"
   elif net == "grpc":
     obj["path"] = val or ""
@@ -4404,7 +4400,7 @@ def vmess_link(net, val):
 
 links = {}
 public_proto = PUBLIC_PATHS.get(proto, {})
-for net in ("ws", "httpupgrade", "grpc", "xhttp"):
+for net in ("ws", "httpupgrade", "grpc"):
   val = public_proto.get(net, "")
   if proto == "vless":
     links[net] = vless_link(net, val)
@@ -4437,7 +4433,6 @@ lines.append("Links Import:")
 lines.append(f"  WebSocket   : {links.get('ws', '-')}")
 lines.append(f"  HTTPUpgrade : {links.get('httpupgrade', '-')}")
 lines.append(f"  gRPC        : {links.get('grpc', '-')}")
-lines.append(f"  XHTTP       : {links.get('xhttp', '-')}")
 lines.append("")
 
 os.makedirs(os.path.dirname(acc_file) or ".", exist_ok=True)
