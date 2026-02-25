@@ -36,8 +36,47 @@ wg_inbound_endpoint_host_detect() {
 }
 
 
+wg_inbound_try_install_wg_tools() {
+  # Best-effort bootstrap untuk host yang belum punya wireguard-tools.
+  if have_cmd wg; then
+    return 0
+  fi
+  if ! have_cmd apt-get; then
+    return 1
+  fi
+
+  warn "Command 'wg' tidak ditemukan. Mencoba install wireguard-tools..."
+
+  local rc=0
+  set +e
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Use-Pty=0 wireguard-tools >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if (( rc != 0 )); then
+    set +e
+    DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Use-Pty=0 wireguard-tools >/dev/null 2>&1
+    rc=$?
+    set -e
+  fi
+
+  if (( rc == 0 )) && have_cmd wg; then
+    log "wireguard-tools berhasil dipasang."
+    return 0
+  fi
+
+  warn "Install wireguard-tools gagal. Lanjut fallback ke 'xray x25519'."
+  return 1
+}
+
+
 wg_inbound_generate_keypair() {
   local priv pub out
+  if ! have_cmd wg; then
+    wg_inbound_try_install_wg_tools || true
+  fi
+
   if have_cmd wg; then
     priv="$(wg genkey 2>/dev/null || true)"
     if [[ -n "${priv}" ]]; then
@@ -50,9 +89,10 @@ wg_inbound_generate_keypair() {
   fi
 
   if have_cmd xray; then
-    out="$(xray x25519 2>/dev/null || true)"
-    priv="$(printf '%s\n' "${out}" | awk -F': *' '/^[Pp]rivate[[:space:]]+key/{print $2; exit}')"
-    pub="$(printf '%s\n' "${out}" | awk -F': *' '/^[Pp]ublic[[:space:]]+key/{print $2; exit}')"
+    # Sebagian build xray menulis output ke stderr; gabungkan stdout+stderr.
+    out="$(xray x25519 2>&1 || true)"
+    priv="$(printf '%s\n' "${out}" | sed -nE 's/^[Pp]rivate([[:space:]]+[Kk]ey)?[[:space:]]*:[[:space:]]*([A-Za-z0-9+\/=]+).*$/\2/p' | head -n1)"
+    pub="$(printf '%s\n' "${out}" | sed -nE 's/^[Pp]ublic([[:space:]]+[Kk]ey)?[[:space:]]*:[[:space:]]*([A-Za-z0-9+\/=]+).*$/\2/p' | head -n1)"
     if [[ -n "${priv}" && -n "${pub}" ]]; then
       printf '%s|%s\n' "${priv}" "${pub}"
       return 0
@@ -116,7 +156,8 @@ wg_inbound_meta_init_if_missing() {
   fi
 
   keypair="$(wg_inbound_generate_keypair)" || {
-    warn "Gagal generate keypair WireGuard. Pastikan command 'wg' atau 'xray x25519' tersedia."
+    warn "Gagal generate keypair WireGuard. Install manual: apt-get install -y wireguard-tools"
+    warn "Atau pastikan subcommand 'xray x25519' tersedia."
     return 1
   }
   server_priv="${keypair%%|*}"
