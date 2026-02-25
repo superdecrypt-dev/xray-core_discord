@@ -5,12 +5,14 @@ WG_INBOUND_META="${WG_INBOUND_META:-${WG_INBOUND_ROOT}/peers.json}"
 WG_INBOUND_CLIENT_DIR="${WG_INBOUND_CLIENT_DIR:-${WG_INBOUND_ROOT}/clients}"
 WG_INBOUND_CONF="${WG_INBOUND_CONF:-${XRAY_INBOUNDS_CONF:-${XRAY_CONFDIR}/10-inbounds.json}}"
 WG_INBOUND_LEGACY_CONF="${WG_INBOUND_LEGACY_CONF:-${XRAY_CONFDIR}/11-wireguard-inbound.json}"
+WG_INBOUND_OP_LOCK_FILE="${WG_INBOUND_OP_LOCK_FILE:-/var/lock/wg-inbound.lock}"
 WG_INBOUND_DEFAULT_ADDR="${WG_INBOUND_DEFAULT_ADDR:-10.66.66.1/24}"
 WG_INBOUND_DEFAULT_PORT="${WG_INBOUND_DEFAULT_PORT:-443}"
 WG_INBOUND_DEFAULT_MTU="${WG_INBOUND_DEFAULT_MTU:-1420}"
 WG_INBOUND_DEFAULT_KEEPALIVE="${WG_INBOUND_DEFAULT_KEEPALIVE:-25}"
 WG_INBOUND_DEFAULT_DNS="${WG_INBOUND_DEFAULT_DNS:-1.1.1.1,8.8.8.8}"
 WG_INBOUND_TAG="${WG_INBOUND_TAG:-wg-inbound}"
+WG_INBOUND_OP_LOCK_FD=""
 
 
 wg_inbound_trim() {
@@ -171,6 +173,32 @@ for ib in inbounds:
     raise SystemExit(0)
 raise SystemExit(1)
 PY
+}
+
+
+wg_inbound_op_lock_acquire() {
+  if [[ -n "${WG_INBOUND_OP_LOCK_FD:-}" ]]; then
+    return 0
+  fi
+  if ! have_cmd flock; then
+    return 0
+  fi
+  mkdir -p "$(dirname "${WG_INBOUND_OP_LOCK_FILE}")" 2>/dev/null || true
+  exec {WG_INBOUND_OP_LOCK_FD}> "${WG_INBOUND_OP_LOCK_FILE}" || return 1
+  if ! flock -x "${WG_INBOUND_OP_LOCK_FD}"; then
+    exec {WG_INBOUND_OP_LOCK_FD}>&- || true
+    WG_INBOUND_OP_LOCK_FD=""
+    return 1
+  fi
+  return 0
+}
+
+
+wg_inbound_op_lock_release() {
+  if [[ -n "${WG_INBOUND_OP_LOCK_FD:-}" ]]; then
+    exec {WG_INBOUND_OP_LOCK_FD}>&- || true
+    WG_INBOUND_OP_LOCK_FD=""
+  fi
 }
 
 
@@ -408,6 +436,122 @@ try:
   os.chmod(path, 0o600)
 except Exception:
   pass
+PY
+}
+
+
+wg_inbound_meta_add_peer_auto_ip() {
+  # args: username preferred_ip client_priv client_pub psk
+  local username="$1"
+  local preferred_ip="$2"
+  local client_priv="$3"
+  local client_pub="$4"
+  local psk="$5"
+  need_python3
+  python3 - <<'PY' \
+    "${WG_INBOUND_META}" \
+    "${username}" \
+    "${preferred_ip}" \
+    "${client_priv}" \
+    "${client_pub}" \
+    "${psk}"
+import ipaddress
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+(
+  path,
+  username,
+  preferred_ip,
+  client_priv,
+  client_pub,
+  psk,
+) = sys.argv[1:7]
+
+meta = json.load(open(path, "r", encoding="utf-8"))
+server = meta.get("server") or {}
+peers = meta.get("peers")
+if not isinstance(peers, list):
+  peers = []
+  meta["peers"] = peers
+
+for p in peers:
+  if str(p.get("username") or "") == username:
+    raise SystemExit(10)
+  if str(p.get("client_public_key") or "") == client_pub:
+    raise SystemExit(12)
+
+address = str(server.get("address") or "").strip()
+if not address:
+  raise SystemExit(20)
+iface = ipaddress.ip_interface(address)
+net = iface.network
+server_ip = iface.ip
+
+used = {server_ip}
+for p in peers:
+  raw = str(p.get("allowed_ip") or "").strip()
+  if not raw:
+    continue
+  try:
+    used.add(ipaddress.ip_interface(raw).ip)
+  except Exception:
+    continue
+
+selected = None
+preferred_raw = str(preferred_ip or "").strip()
+if preferred_raw:
+  try:
+    pref = ipaddress.ip_interface(preferred_raw).ip
+    if pref in net and pref not in used:
+      selected = pref
+  except Exception:
+    pass
+
+if selected is None:
+  for host in net.hosts():
+    if host in used:
+      continue
+    selected = host
+    break
+
+if selected is None:
+  raise SystemExit(11)
+
+allowed_ip = f"{selected}/32" if selected.version == 4 else f"{selected}/128"
+
+peers.append(
+  {
+    "username": username,
+    "allowed_ip": allowed_ip,
+    "client_private_key": client_priv,
+    "client_public_key": client_pub,
+    "preshared_key": psk,
+    "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "quota_bytes": 0,
+    "quota_used_bytes": 0,
+    "ip_lock_enabled": False,
+    "speed_enabled": False,
+    "speed_down_mbit": 0.0,
+    "speed_up_mbit": 0.0,
+  }
+)
+
+tmp = f"{path}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as f:
+  json.dump(meta, f, ensure_ascii=False, indent=2)
+  f.write("\n")
+  f.flush()
+  os.fsync(f.fileno())
+os.replace(tmp, path)
+try:
+  os.chmod(path, 0o600)
+except Exception:
+  pass
+
+print(allowed_ip)
 PY
 }
 
@@ -1260,14 +1404,23 @@ wg_inbound_add_peer() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
+
   local backup_meta backup_conf endpoint_host out_conf
   backup_meta="$(mktemp "${WORK_DIR}/wg-meta.prev.XXXXXX")" || {
+    wg_inbound_op_lock_release
     warn "Gagal menyiapkan backup metadata."
     hr
     pause
     return 0
   }
   backup_conf="$(mktemp "${WORK_DIR}/wg-conf.prev.XXXXXX")" || {
+    wg_inbound_op_lock_release
     rm -f "${backup_meta}" >/dev/null 2>&1 || true
     warn "Gagal menyiapkan backup config."
     hr
@@ -1275,19 +1428,24 @@ wg_inbound_add_peer() {
     return 0
   }
   if ! wg_inbound_backup_file "${WG_INBOUND_META}" "${backup_meta}" "WG metadata"; then
+    wg_inbound_op_lock_release
     rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
     hr
     pause
     return 0
   fi
   if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+    wg_inbound_op_lock_release
     rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
     hr
     pause
     return 0
   fi
 
-  if ! wg_inbound_meta_add_peer "${username}" "${allowed_ip}" "${client_priv}" "${client_pub}" "${psk}"; then
+  local final_allowed_ip
+  final_allowed_ip="$(wg_inbound_meta_add_peer_auto_ip "${username}" "${allowed_ip}" "${client_priv}" "${client_pub}" "${psk}" 2>/dev/null || true)"
+  if [[ -z "${final_allowed_ip}" ]]; then
+    wg_inbound_op_lock_release
     warn "Gagal menambah peer ke metadata."
     restore_file_if_exists "${backup_meta}" "${WG_INBOUND_META}"
     restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
@@ -1298,6 +1456,7 @@ wg_inbound_add_peer() {
   fi
 
   if ! wg_inbound_apply_runtime_from_meta; then
+    wg_inbound_op_lock_release
     warn "Gagal apply runtime WG inbound. Mengembalikan perubahan..."
     restore_file_if_exists "${backup_meta}" "${WG_INBOUND_META}"
     restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
@@ -1310,9 +1469,13 @@ wg_inbound_add_peer() {
 
   endpoint_host="$(wg_inbound_endpoint_host_detect)"
   out_conf="$(wg_inbound_write_client_config "${username}" "${endpoint_host}" 2>/dev/null || true)"
+  wg_inbound_op_lock_release
 
   rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
   log "Peer WG berhasil ditambahkan: ${username}"
+  if [[ "${allowed_ip}" != "${final_allowed_ip}" ]]; then
+    warn "Slot IP diperbarui saat commit: ${allowed_ip} -> ${final_allowed_ip}"
+  fi
   log "Client config: ${out_conf:-${WG_INBOUND_CLIENT_DIR}/${username}.conf}"
   hr
   pause
@@ -1348,14 +1511,23 @@ wg_inbound_delete_peer() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
+
   local backup_meta backup_conf
   backup_meta="$(mktemp "${WORK_DIR}/wg-meta.prev.XXXXXX")" || {
+    wg_inbound_op_lock_release
     warn "Gagal menyiapkan backup metadata."
     hr
     pause
     return 0
   }
   backup_conf="$(mktemp "${WORK_DIR}/wg-conf.prev.XXXXXX")" || {
+    wg_inbound_op_lock_release
     rm -f "${backup_meta}" >/dev/null 2>&1 || true
     warn "Gagal menyiapkan backup config."
     hr
@@ -1363,12 +1535,14 @@ wg_inbound_delete_peer() {
     return 0
   }
   if ! wg_inbound_backup_file "${WG_INBOUND_META}" "${backup_meta}" "WG metadata"; then
+    wg_inbound_op_lock_release
     rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
     hr
     pause
     return 0
   fi
   if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+    wg_inbound_op_lock_release
     rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
     hr
     pause
@@ -1376,6 +1550,7 @@ wg_inbound_delete_peer() {
   fi
 
   if ! wg_inbound_meta_delete_peer "${username}"; then
+    wg_inbound_op_lock_release
     warn "Gagal menghapus peer dari metadata."
     restore_file_if_exists "${backup_meta}" "${WG_INBOUND_META}"
     restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
@@ -1386,6 +1561,7 @@ wg_inbound_delete_peer() {
   fi
 
   if ! wg_inbound_apply_runtime_from_meta; then
+    wg_inbound_op_lock_release
     warn "Gagal apply runtime WG inbound. Mengembalikan perubahan..."
     restore_file_if_exists "${backup_meta}" "${WG_INBOUND_META}"
     restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
@@ -1396,6 +1572,7 @@ wg_inbound_delete_peer() {
     return 0
   fi
 
+  wg_inbound_op_lock_release
   rm -f "${WG_INBOUND_CLIENT_DIR}/${username}.conf" >/dev/null 2>&1 || true
   rm -f "${backup_meta}" "${backup_conf}" >/dev/null 2>&1 || true
   log "Peer WG berhasil dihapus: ${username}"
@@ -1447,12 +1624,20 @@ wg_inbound_set_quota_menu() {
   fi
 
   quota_bytes="$(bytes_from_gb "${quota_gb}")"
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
   if ! wg_inbound_meta_set_quota_bytes "${username}" "${quota_bytes}"; then
+    wg_inbound_op_lock_release
     warn "Gagal menyimpan quota metadata."
     hr
     pause
     return 0
   fi
+  wg_inbound_op_lock_release
 
   log "Quota metadata diset untuk ${username}: ${quota_gb} GB"
   warn "Catatan: enforcement quota WG inbound belum aktif (metadata-only)."
@@ -1485,12 +1670,20 @@ wg_inbound_reset_quota_used_menu() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
   if ! wg_inbound_meta_reset_quota_used "${username}"; then
+    wg_inbound_op_lock_release
     warn "Gagal reset quota_used metadata."
     hr
     pause
     return 0
   fi
+  wg_inbound_op_lock_release
   log "quota_used metadata direset untuk ${username}."
   warn "Catatan: enforcement quota WG inbound belum aktif (metadata-only)."
   hr
@@ -1522,7 +1715,14 @@ wg_inbound_toggle_ip_lock_menu() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
   state="$(wg_inbound_meta_toggle_ip_lock "${username}" 2>/dev/null || true)"
+  wg_inbound_op_lock_release
   if [[ -z "${state}" ]]; then
     warn "Gagal toggle IP lock metadata."
     hr
@@ -1578,12 +1778,20 @@ wg_inbound_set_speed_limit_menu() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
   if ! wg_inbound_meta_set_speed_limit "${username}" "${down}" "${up}"; then
+    wg_inbound_op_lock_release
     warn "Gagal menyimpan speed metadata."
     hr
     pause
     return 0
   fi
+  wg_inbound_op_lock_release
   log "Speed limit metadata untuk ${username}: DOWN=${down} Mbps, UP=${up} Mbps (ON)"
   warn "Catatan: enforcement speed WG inbound belum aktif (metadata-only)."
   hr
@@ -1615,7 +1823,14 @@ wg_inbound_toggle_speed_limit_menu() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
   state="$(wg_inbound_meta_toggle_speed_limit "${username}" 2>/dev/null || true)"
+  wg_inbound_op_lock_release
   if [[ -z "${state}" ]]; then
     warn "Gagal toggle speed metadata."
     hr
@@ -1680,14 +1895,23 @@ wg_inbound_reload_menu() {
     return 0
   fi
 
+  if ! wg_inbound_op_lock_acquire; then
+    warn "Gagal mengambil lock operasi WG inbound."
+    hr
+    pause
+    return 0
+  fi
+
   local backup_conf
   backup_conf="$(mktemp "${WORK_DIR}/wg-conf.prev.XXXXXX")" || {
+    wg_inbound_op_lock_release
     warn "Gagal menyiapkan backup config."
     hr
     pause
     return 0
   }
   if ! wg_inbound_backup_file "${WG_INBOUND_CONF}" "${backup_conf}" "WG inbound config"; then
+    wg_inbound_op_lock_release
     rm -f "${backup_conf}" >/dev/null 2>&1 || true
     hr
     pause
@@ -1695,6 +1919,7 @@ wg_inbound_reload_menu() {
   fi
 
   if ! wg_inbound_apply_runtime_from_meta; then
+    wg_inbound_op_lock_release
     warn "Reload gagal. Restore config WG inbound dari backup."
     restore_file_if_exists "${backup_conf}" "${WG_INBOUND_CONF}"
     systemctl restart xray >/dev/null 2>&1 || true
@@ -1704,6 +1929,7 @@ wg_inbound_reload_menu() {
     return 0
   fi
 
+  wg_inbound_op_lock_release
   rm -f "${backup_conf}" >/dev/null 2>&1 || true
   log "WG inbound berhasil direload."
   hr
