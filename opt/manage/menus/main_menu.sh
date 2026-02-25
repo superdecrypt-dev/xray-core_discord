@@ -15,8 +15,8 @@ main_menu() {
     echo -e "  ${UI_ACCENT}6)${UI_RESET} Speedtest"
     echo -e "  ${UI_ACCENT}7)${UI_RESET} Security"
     echo -e "  ${UI_ACCENT}8)${UI_RESET} Maintenance"
-    echo -e "  ${UI_ACCENT}9)${UI_RESET} Install BOT Discord"
-    echo -e "  ${UI_ACCENT}10)${UI_RESET} Traffic Analytics"
+    echo -e "  ${UI_ACCENT}9)${UI_RESET} Traffic Analytics"
+    echo -e "  ${UI_ACCENT}10)${UI_RESET} Install BOT Discord"
     echo -e "  ${UI_ACCENT}11)${UI_RESET} Install BOT Telegram"
     echo -e "  ${UI_ACCENT}0)${UI_RESET} Keluar"
     hr
@@ -33,8 +33,8 @@ main_menu() {
       6) run_action "Speedtest" speedtest_menu ;;
       7) run_action "Security" fail2ban_menu ;;
       8) run_action "Maintenance" maintenance_menu ;;
-      9) run_action "Install BOT Discord" install_discord_bot_menu ;;
-      10|12) run_action "Traffic Analytics" traffic_analytics_menu ;;
+      9|12) run_action "Traffic Analytics" traffic_analytics_menu ;;
+      10) run_action "Install BOT Discord" install_discord_bot_menu ;;
       11) run_action "Install BOT Telegram" install_telegram_bot_menu ;;
       0|kembali|k|back|b) exit 0 ;;
       *) invalid_choice ;;

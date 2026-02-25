@@ -126,7 +126,7 @@ traffic_analytics_dataset_make_tmp() {
 
 traffic_analytics_overview_show() {
   title
-  echo "10) Traffic Analytics > Overview"
+  echo "9) Traffic Analytics > Overview"
   hr
 
   local dataset
@@ -206,7 +206,7 @@ PY
 
 traffic_analytics_top_users_show() {
   title
-  echo "10) Traffic Analytics > Top Users by Usage"
+  echo "9) Traffic Analytics > Top Users by Usage"
   hr
 
   local n
@@ -283,7 +283,7 @@ PY
 
 traffic_analytics_search_user_show() {
   title
-  echo "10) Traffic Analytics > Search User Traffic"
+  echo "9) Traffic Analytics > Search User Traffic"
   hr
 
   local q
@@ -364,7 +364,7 @@ PY
 
 traffic_analytics_export_json() {
   title
-  echo "10) Traffic Analytics > Export JSON Report"
+  echo "9) Traffic Analytics > Export JSON Report"
   hr
 
   local dataset out
@@ -391,7 +391,7 @@ traffic_analytics_export_json() {
 traffic_analytics_menu() {
   while true; do
     title
-    echo "10) Traffic Analytics"
+    echo "9) Traffic Analytics"
     hr
     echo "  1) Overview"
     echo "  2) Top Users by Usage"
@@ -1236,7 +1236,7 @@ daemon_log_tail_show() {
 install_discord_bot_menu() {
   local installer_cmd="/usr/local/bin/install-discord-bot"
   title
-  echo "9) Install BOT Discord"
+  echo "10) Install BOT Discord"
   hr
 
   if [[ ! -x "${installer_cmd}" ]]; then
