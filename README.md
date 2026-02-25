@@ -8,9 +8,9 @@
 ![Mode](https://img.shields.io/badge/Mode-Menu%20Driven-2EA043)
 
 `setup.sh` dipakai sekali untuk provisioning. `manage.sh` dipakai terus untuk operasi harian.  
-Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan interaksi tombol, select, dan modal.
+Untuk automasi chatops, tersedia bot standalone Discord (`bot-discord/`) dan Telegram (`bot-telegram/`).
 
-[Quick Install](#quick-install-root) | [Fitur Utama](#fitur-utama-highlight) | [Fitur manage.sh](#fitur-unggulan-managesh) | [Bot Discord](#fitur-bot-discord-standalone) | [Troubleshooting](#troubleshooting-cepat)
+[Quick Install](#quick-install-root) | [Fitur Utama](#fitur-utama-highlight) | [Fitur manage.sh](#fitur-unggulan-managesh) | [Bot Discord](#fitur-bot-discord-standalone) | [Bot Telegram](#fitur-bot-telegram-standalone) | [Transport](#transport-yang-didukung) | [Troubleshooting](#troubleshooting-cepat)
 
 ## Kenapa Project Ini
 | Nilai Utama | Penjelasan Singkat |
@@ -22,10 +22,13 @@ Untuk automasi dari Discord, tersedia bot standalone (`bot-discord/`) dengan int
 
 ## Fitur Utama (Highlight)
 - One-time provisioning lengkap via `setup.sh`: Xray, Nginx, TLS, WARP, daemon runtime.
-- Operasional harian terpusat via `manage.sh` menu 1-9 dan 12 (status, user, quota, network, security, maintenance, analytics).
+- Operasional harian terpusat via `manage.sh` menu 1-11 (status, user, quota, network, security, maintenance, analytics, installer bot).
 - Bot Discord standalone dengan UX interaktif tombol/select/modal (`/panel` sebagai entry point minimal).
+- Bot Telegram standalone dengan UX interaktif tombol/select/modal (`/panel` + `/cleanup`).
 - Installer bot terpisah (`install-discord-bot.sh`) dengan mode menu + quick setup all-in-one.
+- Installer bot Telegram terpisah (`install-telegram-bot.sh`) dengan mode menu + quick setup all-in-one.
 - Deploy source bot memakai verifikasi checksum archive sebelum extract (lebih aman dari archive corrupt/tampered).
+- Transport `xhttp` sudah dinonaktifkan dari stack default karena kompatibilitas domain fronting.
 
 ## Quick Install (Root)
 ```bash
@@ -56,6 +59,7 @@ flowchart LR
 | `manage.sh` | Menu operasional harian (runtime changes) |
 | `run.sh` | Bootstrap installer cepat |
 | `install-discord-bot.sh` | Installer bot Discord standalone (menu + quick setup) |
+| `install-telegram-bot.sh` | Installer bot Telegram standalone (menu + quick setup) |
 
 ## Fitur Unggulan `manage.sh`
 `manage.sh` adalah pusat kontrol runtime untuk pekerjaan harian admin.
@@ -72,9 +76,13 @@ Main Menu
   7) Security
   8) Maintenance
   9) Install BOT Discord
-  12) Traffic Analytics
+  10) Traffic Analytics
+  11) Install BOT Telegram
   0) Exit
 ```
+
+Catatan kompatibilitas:
+- Input `12` tetap diarahkan ke menu Traffic Analytics (alias lama).
 
 Header realtime di Main Menu menampilkan:
 - `SYSTEM OS`, `RAM`, `UPTIME`
@@ -94,7 +102,8 @@ Header realtime di Main Menu menampilkan:
 | `7) Security` | TLS ops, fail2ban, hardening status | Meningkatkan keamanan operasional |
 | `8) Maintenance` | Restart service/daemon, tail log, wireproxy status | Maintenance tanpa keluar panel |
 | `9) Install BOT Discord` | Launcher installer bot standalone (`/usr/local/bin/install-discord-bot`) | Setup, deploy, update, restart, dan uninstall bot dari menu |
-| `12) Traffic Analytics` | Overview traffic, top users, search user, export JSON report | Observabilitas pemakaian traffic lebih cepat |
+| `10) Traffic Analytics` | Overview traffic, top users, search user, export JSON report | Observabilitas pemakaian traffic lebih cepat |
+| `11) Install BOT Telegram` | Launcher installer bot standalone (`/usr/local/bin/install-telegram-bot`) | Setup, deploy, update, restart, dan uninstall bot dari menu |
 
 ### Detail Penting: `3) Quota & Access Control`
 ```text
@@ -132,7 +141,7 @@ Bot Discord berada di `bot-discord/` dan sengaja berdiri sendiri (tidak mengekse
 Highlight kemampuan:
 - Status rilis saat ini: **Stabil** (siap produksi, tetap disarankan staging-first sebelum perubahan besar).
 - UX Discord: dominan button/select/modal, slash command minimal (`/panel`).
-- Cakupan menu mengikuti pola `manage.sh` (menu 1-8 + 12) agar familiar untuk admin.
+- Cakupan menu mengikuti pola `manage.sh` (menu 1-8 + Traffic Analytics) agar familiar untuk admin.
 - Menu `1)` sudah mencakup observability action (`snapshot`, `status`, `alert log`).
 - Menu `5)` sudah mencakup domain guard action (`check`, `status`, `renew-if-needed`).
 - Menu `12)` menyediakan traffic analytics (`overview`, `top users`, `search`, `export JSON`).
@@ -144,6 +153,26 @@ Highlight kemampuan:
 - Arsitektur terpisah gateway TypeScript (`discord.js`) + backend Python (`FastAPI`).
 - Role-based access lewat `DISCORD_ADMIN_ROLE_IDS` dan `DISCORD_ADMIN_USER_IDS`.
 - Deploy produksi via `install-discord-bot.sh` ke `/opt/bot-discord` + systemd service terpisah.
+
+## Fitur Bot Telegram (Standalone)
+Bot Telegram berada di `bot-telegram/` dan berdiri sendiri (tidak mengeksekusi `manage.sh`).
+
+Highlight kemampuan:
+- Slash command minimal: `/panel` dan `/cleanup`.
+- Flow interaktif button/select/modal untuk menu operasi yang sinkron dengan backend.
+- Add User mendukung speed limit saat provisioning akun (`speed_limit_enabled`, `speed_down_mbit`, `speed_up_mbit`).
+- Delete User memakai picker protocol + daftar username agar admin tidak perlu hafal user.
+- Deploy produksi via `install-telegram-bot.sh` ke `/opt/bot-telegram` + systemd service terpisah.
+
+## Transport Yang Didukung
+Stack default saat ini menyediakan endpoint berikut:
+- `ws`
+- `httpupgrade`
+- `grpc`
+
+Catatan:
+- Transport `xhttp` sudah dihapus dari template `setup.sh`, `manage.sh`, dan generator link bot.
+- Tujuan perubahan: mencegah masalah koneksi pada skenario domain fronting.
 
 ## Ringkasan `setup.sh` (One-Time)
 `setup.sh` menangani provisioning awal end-to-end:

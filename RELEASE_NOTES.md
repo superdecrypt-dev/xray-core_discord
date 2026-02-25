@@ -1,5 +1,56 @@
 # Release Notes
 
+## Rilis 2026-02-25 (Update Malam)
+
+### Ringkasan
+Update ini menutup dua pekerjaan besar: penyempurnaan UX bot Telegram untuk operasi harian, dan penghapusan transport `xhttp` dari stack default karena tidak stabil untuk mode domain fronting.
+
+### Perubahan Utama
+1. Bot Telegram: UX flow dipoles untuk operasional nyata
+- Perbaikan alur panel interaktif (button/select/manual fallback) agar input minim typo.
+- `Add User` sekarang mendukung speed limit saat create akun:
+  - `speed_limit_enabled`
+  - `speed_down_mbit`
+  - `speed_up_mbit`
+- `Delete User` memakai picker protocol + daftar username, jadi admin tidak perlu mengetik username manual.
+- `/cleanup` diperbarui agar mode default membersihkan chat dan menyisakan 1 pesan hasil cleanup.
+
+2. Penghapusan Transport `xhttp` dari Stack Default
+- `setup.sh`:
+  - inbound `xhttp` dihapus dari template Xray
+  - route/mapping/location `xhttp` di template Nginx dihapus
+- `manage.sh`:
+  - generator link account tidak lagi membuat link `xhttp`
+  - compat checker account info diperbarui (basis validasi ke baris `gRPC`)
+- Bot backend (`bot-discord` + `bot-telegram`):
+  - generator link account tidak lagi memasukkan `xhttp`
+  - output account info tidak lagi menampilkan baris `XHTTP`
+- `opt/manage/features/network.sh`:
+  - deteksi tag default Xray disesuaikan tanpa suffix `-xhttp`
+
+3. Sinkronisasi Runtime Live
+- Konfigurasi runtime ikut dibersihkan:
+  - `/usr/local/etc/xray/conf.d/10-inbounds.json`
+  - `/etc/nginx/conf.d/xray.conf`
+- Validasi runtime setelah patch:
+  - `xray run -test -confdir /usr/local/etc/xray/conf.d` -> `Configuration OK`
+  - `nginx -t` -> syntax valid
+  - `systemctl is-active xray nginx` -> `active`
+
+### Commit
+- `b86e6d8` — `feat(bot-telegram): polish panel flows and add user speed-limit fields`
+- `8bcf1d4` — `fix(xray): remove xhttp transport from setup, manage, and bot links`
+
+### Hasil Validasi
+- Shell:
+  - `bash -n setup.sh manage.sh run.sh install-discord-bot.sh` -> PASS
+  - `shellcheck setup.sh manage.sh opt/manage/features/network.sh` -> PASS
+- Python:
+  - `python3 -m py_compile $(find bot-discord/backend-py/app -name '*.py') $(find bot-telegram/backend-py/app -name '*.py')` -> PASS
+- Runtime:
+  - `xray run -test -confdir /usr/local/etc/xray/conf.d` -> PASS
+  - `nginx -t` -> PASS
+
 ## Rilis 2026-02-25
 
 ### Ringkasan
