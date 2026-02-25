@@ -616,6 +616,158 @@
           }
         },
         {
+          "id": "warp_status",
+          "label": "View WARP Status",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "warp_restart",
+          "label": "Restart WARP",
+          "mode": "direct",
+          "style": "secondary",
+          "confirm": true
+        },
+        {
+          "id": "set_warp_global_mode",
+          "label": "Set WARP Global",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set WARP Global Mode",
+            "fields": [
+              {
+                "id": "mode",
+                "label": "Mode",
+                "style": "short",
+                "required": true,
+                "placeholder": "direct / warp"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_warp_user_mode",
+          "label": "Set WARP per User",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set WARP Per User",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "mode",
+                "label": "Mode",
+                "style": "short",
+                "required": true,
+                "placeholder": "direct / warp / off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_warp_inbound_mode",
+          "label": "Set WARP Inbound",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set WARP Per Inbound",
+            "fields": [
+              {
+                "id": "inbound_tag",
+                "label": "Inbound Tag",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: vless-ws-tls"
+              },
+              {
+                "id": "mode",
+                "label": "Mode",
+                "style": "short",
+                "required": true,
+                "placeholder": "direct / warp / off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_warp_domain_mode",
+          "label": "Set WARP Domain",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set WARP Per Domain",
+            "fields": [
+              {
+                "id": "mode",
+                "label": "Mode",
+                "style": "short",
+                "required": true,
+                "placeholder": "direct / warp / off"
+              },
+              {
+                "id": "entry",
+                "label": "Domain/Geosite",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: domain:openai.com"
+              }
+            ]
+          }
+        },
+        {
+          "id": "warp_tier_status",
+          "label": "View WARP Tier",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "warp_tier_switch_free",
+          "label": "Switch Tier Free",
+          "mode": "direct",
+          "style": "secondary",
+          "confirm": true
+        },
+        {
+          "id": "warp_tier_switch_plus",
+          "label": "Switch Tier Plus",
+          "mode": "modal",
+          "style": "secondary",
+          "confirm": true,
+          "modal": {
+            "title": "Switch WARP Tier Plus",
+            "fields": [
+              {
+                "id": "license_key",
+                "label": "WARP+ License",
+                "style": "short",
+                "required": false,
+                "placeholder": "kosongkan untuk pakai key tersimpan"
+              }
+            ]
+          }
+        },
+        {
+          "id": "warp_tier_reconnect",
+          "label": "Reconnect WARP",
+          "mode": "direct",
+          "style": "secondary",
+          "confirm": true
+        },
+        {
           "id": "dns_summary",
           "label": "View DNS Summary",
           "mode": "direct",

@@ -2,6 +2,7 @@ from __future__ import annotations
 import io
 import logging
 import socket
+import time
 from dataclasses import dataclass
 import html
 
@@ -17,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 
-from .backend_client import BackendClient, BackendError, BackendUserOption
+from .backend_client import BackendClient, BackendDomainOption, BackendError, BackendInboundOption, BackendUserOption
 from .commands_loader import ActionSpec, CommandCatalog, MenuSpec
 from .config import AppConfig, load_config
 from .render import (
@@ -35,9 +36,11 @@ CALLBACK_SEP = "|"
 ACTIONS_PER_PAGE = 6
 BUTTONS_PER_ROW = 2
 BUTTON_LABEL_MAX = 28
+CALLBACK_DATA_MAX_LEN = 96
 CLEANUP_FULL_SWEEP = -1
 CLEANUP_MAX_LIMIT = 200
 CLEANUP_KEEP_MESSAGES = 1
+CLEANUP_MAX_SCAN_IDS = 2000
 DELETE_PICK_PAGE_SIZE = 12
 DELETE_PICK_PROTOCOLS = ("vless", "vmess", "trojan")
 FORM_CHOICE_PAGE_SIZE = 12
@@ -57,10 +60,13 @@ FORM_CHOICE_USERNAME_ACTIONS = {
     "set_speed_download",
     "set_speed_upload",
     "speed_limit",
+    "set_warp_user_mode",
 }
 KEY_PENDING_FORM = "pending_form"
 KEY_PENDING_CONFIRM = "pending_confirm"
 KEY_PENDING_DELETE_PICK = "pending_delete_pick"
+KEY_LAST_ACTION_TS = "last_action_ts"
+KEY_LAST_CLEANUP_TS = "last_cleanup_ts"
 
 
 @dataclass
@@ -79,6 +85,9 @@ def _get_runtime(context: ContextTypes.DEFAULT_TYPE) -> Runtime:
 
 
 def _is_authorized(runtime: Runtime, update: Update) -> tuple[bool, str]:
+    if runtime.config.allow_unrestricted_access:
+        return True, ""
+
     user_id = str(update.effective_user.id) if update.effective_user else ""
     chat_id = str(update.effective_chat.id) if update.effective_chat else ""
 
@@ -95,6 +104,38 @@ def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(KEY_PENDING_FORM, None)
     context.user_data.pop(KEY_PENDING_CONFIRM, None)
     context.user_data.pop(KEY_PENDING_DELETE_PICK, None)
+
+
+def _cooldown_remaining(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: str,
+    key: str,
+    min_interval_sec: float,
+) -> float:
+    if min_interval_sec <= 0:
+        return 0.0
+
+    now = time.monotonic()
+    scope = context.application.bot_data.setdefault("_cooldowns", {})
+    user_scope = scope.setdefault(user_id, {})
+    try:
+        prev = float(user_scope.get(key, 0.0))
+    except Exception:
+        prev = 0.0
+
+    elapsed = now - prev
+    if elapsed < min_interval_sec:
+        return min_interval_sec - elapsed
+
+    user_scope[key] = now
+    return 0.0
+
+
+def _throttle_message(seconds_left: float) -> str:
+    if seconds_left <= 1:
+        return "Terlalu cepat. Coba lagi dalam ~1 detik."
+    return f"Terlalu cepat. Coba lagi dalam ~{int(seconds_left + 0.99)} detik."
 
 
 def _short_button_label(text: str, max_len: int = BUTTON_LABEL_MAX) -> str:
@@ -421,6 +462,10 @@ async def _resolve_form_choice_options(runtime: Runtime, pending: dict, field_id
             return [("Extend (+hari)", "extend"), ("Set Tanggal", "set")]
         if action_id == "set_egress_mode":
             return [("Direct", "direct"), ("Warp", "warp"), ("Balancer", "balancer")]
+        if action_id == "set_warp_global_mode":
+            return [("Direct", "direct"), ("Warp", "warp")]
+        if action_id in {"set_warp_user_mode", "set_warp_inbound_mode", "set_warp_domain_mode"}:
+            return [("Direct", "direct"), ("Warp", "warp"), ("Off (inherit)", "off")]
 
     if field_id == "strategy":
         if action_id == "set_balancer_strategy":
@@ -465,6 +510,24 @@ async def _resolve_form_choice_options(runtime: Runtime, pending: dict, field_id
             return []
         usernames = list(dict.fromkeys([o.username for o in options if o.proto == proto and o.username]))
         return [(u, u) for u in usernames]
+
+    if field_id == "inbound_tag" and action_id == "set_warp_inbound_mode":
+        try:
+            options: list[BackendInboundOption] = await runtime.backend.list_inbound_options()
+        except BackendError:
+            return []
+        tags = list(dict.fromkeys([o.tag for o in options if o.tag]))
+        return [(tag, tag) for tag in tags]
+
+    if field_id == "entry" and action_id == "set_warp_domain_mode":
+        mode = str(params.get("mode") or "").strip().lower()
+        mode_q = mode if mode in {"direct", "warp"} else None
+        try:
+            options: list[BackendDomainOption] = await runtime.backend.list_warp_domain_options(mode=mode_q)
+        except BackendError:
+            return []
+        entries = list(dict.fromkeys([o.entry for o in options if o.entry]))
+        return [(ent, ent) for ent in entries]
 
     return []
 
@@ -635,6 +698,17 @@ async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if chat is None or msg is None:
         return
 
+    user_id = str(update.effective_user.id) if update.effective_user else ""
+    wait = _cooldown_remaining(
+        context,
+        user_id=user_id,
+        key=KEY_LAST_CLEANUP_TS,
+        min_interval_sec=runtime.config.cleanup_cooldown_seconds,
+    )
+    if wait > 0:
+        await msg.reply_text(_throttle_message(wait))
+        return
+
     limit, err = _parse_cleanup_limit(context)
     if limit is None:
         await msg.reply_text(err)
@@ -648,19 +722,26 @@ async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     scan_message_id = anchor_message_id
     full_sweep = limit == CLEANUP_FULL_SWEEP
     target_deleted = max(anchor_message_id - CLEANUP_KEEP_MESSAGES, 0) if full_sweep else int(limit)
+    max_scan = max(CLEANUP_MAX_SCAN_IDS, int(limit) + CLEANUP_KEEP_MESSAGES) if not full_sweep else CLEANUP_MAX_SCAN_IDS
+    scanned = 0
 
     # Hapus sampai target jumlah pesan TERHAPUS tercapai, bukan sekadar jumlah ID yang dipindai.
-    while scan_message_id >= 1 and deleted < target_deleted:
+    while scan_message_id >= 1 and deleted < target_deleted and scanned < max_scan:
         try:
             await context.bot.delete_message(chat_id=chat.id, message_id=scan_message_id)
             deleted += 1
         except Exception:
             skipped += 1
         scan_message_id -= 1
+        scanned += 1
+
+    suffix = ""
+    if full_sweep and scanned >= max_scan and deleted < target_deleted:
+        suffix = f" (dibatasi scan maksimal {max_scan} message-id)"
 
     await context.bot.send_message(
         chat_id=chat.id,
-        text=f"🧹 Cleanup selesai: {deleted} pesan dihapus, {skipped} dilewati.",
+        text=f"🧹 Cleanup selesai: {deleted} pesan dihapus, {skipped} dilewati.{suffix}",
     )
 
 
@@ -754,6 +835,14 @@ async def _submit_pending_form_value(
     field = action.modal.fields[idx]
     value = str(raw_value or "").strip()
     manual_entry = bool(pending.get("manual_entry"))
+    if manual_entry and len(value) > runtime.config.max_manual_input_len:
+        msg = f"Input terlalu panjang (maks {runtime.config.max_manual_input_len} karakter)."
+        if reply_message is not None:
+            await reply_message.reply_text(msg)
+        elif query is not None:
+            await query.answer(msg, show_alert=True)
+        return
+
     choice_options = _pending_choice_options(pending)
     if choice_options and not manual_entry:
         allowed = {str(item.get("value") or "") for item in choice_options}
@@ -908,8 +997,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     data = str(query.data or "")
+    if not data or len(data) > CALLBACK_DATA_MAX_LEN:
+        await query.answer("Payload callback tidak valid.", show_alert=True)
+        return
     await query.answer()
     chat_id = _callback_chat_id(update)
+    user_id = str(update.effective_user.id) if update.effective_user else ""
 
     if data == "noop":
         return
@@ -1104,6 +1197,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("Tidak ada aksi yang menunggu konfirmasi.", show_alert=True)
             return
 
+        wait = _cooldown_remaining(
+            context,
+            user_id=user_id,
+            key=KEY_LAST_ACTION_TS,
+            min_interval_sec=runtime.config.action_cooldown_seconds,
+        )
+        if wait > 0:
+            await query.answer(_throttle_message(wait), show_alert=True)
+            return
+
         menu_id = str(pending.get("menu_id", ""))
         action_id = str(pending.get("action_id", ""))
         params = pending.get("params") if isinstance(pending.get("params"), dict) else {}
@@ -1216,6 +1319,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
+        wait = _cooldown_remaining(
+            context,
+            user_id=user_id,
+            key=KEY_LAST_ACTION_TS,
+            min_interval_sec=runtime.config.action_cooldown_seconds,
+        )
+        if wait > 0:
+            await query.answer(_throttle_message(wait), show_alert=True)
+            return
+
         await _send_or_edit(
             query=query,
             chat_id=chat_id,
@@ -1285,7 +1398,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_input))
 
     LOGGER.info("Starting xray-telegram-gateway")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

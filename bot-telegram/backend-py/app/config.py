@@ -21,6 +21,17 @@ def _get_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _get_port(name: str, default: int) -> int:
+    raw = (os.getenv(name) or str(default)).strip()
+    try:
+        value = int(raw)
+    except Exception as exc:
+        raise RuntimeError(f"{name} tidak valid: {raw}") from exc
+    if value < 1 or value > 65535:
+        raise RuntimeError(f"{name} di luar rentang 1-65535: {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     internal_shared_secret: str
@@ -46,7 +57,7 @@ def get_settings() -> Settings:
         _SETTINGS = Settings(
             internal_shared_secret=os.getenv("INTERNAL_SHARED_SECRET", "").strip(),
             backend_host=os.getenv("BACKEND_HOST", "127.0.0.1").strip(),
-            backend_port=int(os.getenv("BACKEND_PORT", "8080")),
+            backend_port=_get_port("BACKEND_PORT", 8080),
             commands_file=os.getenv("COMMANDS_FILE", _default_commands_file()).strip(),
             enable_dangerous_actions=_get_bool("ENABLE_DANGEROUS_ACTIONS", True),
         )

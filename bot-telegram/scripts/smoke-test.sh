@@ -16,7 +16,7 @@ systemctl is-active "${BACKEND_SERVICE}" || true
 systemctl is-active "${GATEWAY_SERVICE}" || true
 
 echo "[smoke] backend health"
-curl -fsS --max-time 8 "${BACKEND_BASE_URL%/}/health"
+curl -fsS --max-time 8 -H "X-Internal-Shared-Secret: ${SECRET}" "${BACKEND_BASE_URL%/}/health"
 
 echo "[smoke] auth guard + menu endpoint"
 curl -fsS --max-time 8 -H "X-Internal-Shared-Secret: ${SECRET}" "${BACKEND_BASE_URL%/}/api/main-menu" >/dev/null

@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import base64
 import html
+import re
 from datetime import datetime, timezone
 
 from .backend_client import BackendActionResponse
 from .commands_loader import ActionSpec, FieldSpec, MenuSpec
+
+
+SENSITIVE_KEY_RE = re.compile(r"(token|secret|password|license|api[_-]?key|authorization)", re.IGNORECASE)
+TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+DISCORD_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{20,}\b")
+KV_SECRET_RE = re.compile(
+    r"(?i)\b([A-Za-z0-9_-]*(?:token|secret|password|license(?:[_-]?key)?|api[_-]?key|authorization)[A-Za-z0-9_-]*)\s*([:=])\s*([^\s]+)"
+)
+BEARER_RE = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~-]{16,})")
 
 
 def now_utc_text() -> str:
@@ -22,6 +32,36 @@ def _trim(text: str, max_len: int) -> str:
 
 def as_pre(text: str, max_len: int = 3300) -> str:
     return f"<pre>{html.escape(_trim(text, max_len))}</pre>"
+
+
+def _mask_secret(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    if len(raw) <= 8:
+        return "********"
+    return f"{raw[:4]}****{raw[-4:]}"
+
+
+def _sanitize_output_text(value: str) -> str:
+    text = str(value or "")
+    text = TELEGRAM_TOKEN_RE.sub(lambda m: _mask_secret(m.group(0)), text)
+    text = DISCORD_TOKEN_RE.sub(lambda m: _mask_secret(m.group(0)), text)
+    text = BEARER_RE.sub(lambda m: f"Bearer {_mask_secret(m.group(1))}", text)
+
+    def _mask_kv(match: re.Match[str]) -> str:
+        key = match.group(1)
+        sep = match.group(2)
+        val = match.group(3)
+        return f"{key}{sep}{_mask_secret(val)}"
+
+    return KV_SECRET_RE.sub(_mask_kv, text)
+
+
+def _mask_param_if_sensitive(key: str, value: str) -> str:
+    if SENSITIVE_KEY_RE.search(key):
+        return _mask_secret(value)
+    return _sanitize_output_text(value)
 
 
 def main_menu_text(hostname: str, menu_count: int) -> str:
@@ -77,7 +117,12 @@ def confirm_text(menu: MenuSpec, action: ActionSpec, params: dict[str, str]) -> 
     if not params:
         lines.append("Tanpa parameter.")
     else:
-        lines.append(as_pre("\n".join([f"{k}={v}" for k, v in params.items()]), max_len=1200))
+        lines.append(
+            as_pre(
+                "\n".join([f"{k}={_mask_param_if_sensitive(k, v)}" for k, v in params.items()]),
+                max_len=1200,
+            )
+        )
     lines.append("")
     lines.append("Lanjutkan eksekusi?")
     return "\n".join(lines)
@@ -86,7 +131,7 @@ def confirm_text(menu: MenuSpec, action: ActionSpec, params: dict[str, str]) -> 
 def action_result_text(result: BackendActionResponse) -> str:
     icon = "✅" if result.ok else "❌"
     title = html.escape(result.title or "Result")
-    message = result.message or "(no output)"
+    message = _sanitize_output_text(result.message or "(no output)")
 
     lines = [
         f"<b>{icon} {title}</b>",

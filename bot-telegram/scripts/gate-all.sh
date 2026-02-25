@@ -59,7 +59,7 @@ if [[ -x "${BOT_DIR}/.venv/bin/python" ]]; then
     trap 'kill "${uv_pid}" >/dev/null 2>&1 || true' EXIT
 
     for _ in $(seq 1 80); do
-      if curl -fsS "http://127.0.0.1:18084/health" >/dev/null 2>&1; then
+      if curl -fsS -H "X-Internal-Shared-Secret: ${INTERNAL_SHARED_SECRET}" "http://127.0.0.1:18084/health" >/dev/null 2>&1; then
         break
       fi
       sleep 0.25
@@ -95,7 +95,7 @@ def rec(name, ok):
     status = 'PASS' if ok else 'FAIL'
     print(f'gate_{name}={status}')
 
-s, b = get('/health')
+s, b = get('/health', headers={'X-Internal-Shared-Secret': SECRET})
 rec('health', s == 200 and b.get('status') == 'ok')
 s, b = get('/api/main-menu', headers={'X-Internal-Shared-Secret': SECRET})
 menu_ids = [str(m.get('id')) for m in (b.get('menus') or []) if isinstance(m, dict)]

@@ -56,6 +56,22 @@ def get_user_options(proto: str | None = None) -> dict:
     }
 
 
+@router.get("/api/inbounds/options", dependencies=[Depends(verify_shared_secret)])
+def get_inbound_options() -> dict:
+    tags = system.list_inbound_tags()
+    return {
+        "inbounds": [{"tag": tag} for tag in tags],
+    }
+
+
+@router.get("/api/network/domain-options", dependencies=[Depends(verify_shared_secret)])
+def get_network_domain_options(mode: str | None = None) -> dict:
+    entries = system.list_warp_domain_options(mode=mode)
+    return {
+        "entries": [{"entry": item} for item in entries],
+    }
+
+
 @router.post(
     "/api/menu/{menu_id}/action",
     dependencies=[Depends(verify_shared_secret)],

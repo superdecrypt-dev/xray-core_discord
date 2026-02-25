@@ -1,6 +1,6 @@
 from ..adapters import system, system_mutations
 from ..utils.response import error_response, ok_response
-from ..utils.validators import require_param
+from ..utils.validators import require_param, require_protocol, require_username
 
 
 def handle(action: str, params: dict, settings) -> dict:
@@ -48,6 +48,104 @@ def handle(action: str, params: dict, settings) -> dict:
         if ok_op:
             return ok_response(title, msg)
         return error_response("network_balancer_selector_failed", title, msg)
+
+    if action == "warp_status":
+        title, msg = system.op_network_warp_status_report()
+        return ok_response(title, msg)
+
+    if action == "warp_restart":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        ok_op, title, msg = system_mutations.op_network_warp_restart()
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_restart_failed", title, msg)
+
+    if action == "set_warp_global_mode":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        ok_m, mode_or_err = require_param(params, "mode", "Network Controls - WARP Global Mode")
+        if not ok_m:
+            return mode_or_err
+        ok_op, title, msg = system_mutations.op_network_warp_set_global_mode(str(mode_or_err))
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_global_mode_failed", title, msg)
+
+    if action == "set_warp_user_mode":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        title = "Network Controls - WARP per-user"
+        ok_p, proto_or_err = require_protocol(params, title)
+        if not ok_p:
+            return proto_or_err
+        ok_u, user_or_err = require_username(params, title)
+        if not ok_u:
+            return user_or_err
+        ok_m, mode_or_err = require_param(params, "mode", title)
+        if not ok_m:
+            return mode_or_err
+        ok_op, t, m = system_mutations.op_network_warp_set_user_mode(proto_or_err, user_or_err, str(mode_or_err))
+        if ok_op:
+            return ok_response(t, m)
+        return error_response("network_warp_user_mode_failed", t, m)
+
+    if action == "set_warp_inbound_mode":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        ok_t, tag_or_err = require_param(params, "inbound_tag", "Network Controls - WARP per-inbound")
+        if not ok_t:
+            return tag_or_err
+        ok_m, mode_or_err = require_param(params, "mode", "Network Controls - WARP per-inbound")
+        if not ok_m:
+            return mode_or_err
+        ok_op, title, msg = system_mutations.op_network_warp_set_inbound_mode(str(tag_or_err), str(mode_or_err))
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_inbound_mode_failed", title, msg)
+
+    if action == "set_warp_domain_mode":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        ok_m, mode_or_err = require_param(params, "mode", "Network Controls - WARP per-domain")
+        if not ok_m:
+            return mode_or_err
+        ok_e, entry_or_err = require_param(params, "entry", "Network Controls - WARP per-domain")
+        if not ok_e:
+            return entry_or_err
+        ok_op, title, msg = system_mutations.op_network_warp_set_domain_mode(str(mode_or_err), str(entry_or_err))
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_domain_mode_failed", title, msg)
+
+    if action == "warp_tier_status":
+        title, msg = system.op_network_warp_tier_status()
+        return ok_response(title, msg)
+
+    if action == "warp_tier_switch_free":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        ok_op, title, msg = system_mutations.op_network_warp_tier_switch_free()
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_tier_switch_failed", title, msg)
+
+    if action == "warp_tier_switch_plus":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        license_key = str(params.get("license_key", "")).strip()
+        ok_op, title, msg = system_mutations.op_network_warp_tier_switch_plus(license_key)
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_tier_switch_failed", title, msg)
+
+    if action == "warp_tier_reconnect":
+        if not settings.enable_dangerous_actions:
+            return error_response("forbidden", "Network Controls", "Dangerous actions dinonaktifkan via env.")
+        ok_op, title, msg = system_mutations.op_network_warp_tier_reconnect()
+        if ok_op:
+            return ok_response(title, msg)
+        return error_response("network_warp_tier_reconnect_failed", title, msg)
 
     if action == "dns_summary":
         title, msg = system.op_dns_summary()

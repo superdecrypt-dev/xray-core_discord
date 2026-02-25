@@ -9,6 +9,7 @@ BACKEND_SERVICE="${BACKEND_SERVICE:-xray-telegram-backend}"
 GATEWAY_SERVICE="${GATEWAY_SERVICE:-xray-telegram-gateway}"
 BACKEND_BASE_URL="${BACKEND_BASE_URL:-http://127.0.0.1:8080}"
 BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-${BACKEND_BASE_URL%/}/health}"
+INTERNAL_SHARED_SECRET="${INTERNAL_SHARED_SECRET:-}"
 BOT_LOG_DIR="${BOT_LOG_DIR:-/var/log/xray-telegram-bot}"
 BOT_MONITOR_LOG_FILE="${BOT_MONITOR_LOG_FILE:-${BOT_LOG_DIR}/monitor-lite.log}"
 BOT_MONITOR_MAX_LINES="${BOT_MONITOR_MAX_LINES:-1000}"
@@ -52,8 +53,13 @@ check_service() {
 }
 
 check_health() {
+  if [[ -z "${INTERNAL_SHARED_SECRET}" ]]; then
+    printf '%s\n' "missing-secret"
+    return 1
+  fi
+
   local body
-  body="$(curl -fsS --max-time 8 "${BACKEND_HEALTH_URL}" 2>/dev/null || true)"
+  body="$(curl -fsS --max-time 8 -H "X-Internal-Shared-Secret: ${INTERNAL_SHARED_SECRET}" "${BACKEND_HEALTH_URL}" 2>/dev/null || true)"
   if [[ -n "${body}" ]] && printf '%s' "${body}" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
     printf '%s\n' "ok"
     return 0

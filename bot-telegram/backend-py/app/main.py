@@ -1,8 +1,9 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from .adapters import system_mutations
+from .auth import verify_shared_secret
 from .config import get_settings
 from .routes.menus import router as menu_router
 
@@ -23,7 +24,7 @@ def startup_account_info_compat_refresh() -> None:
         logger.warning("Startup compat refresh gagal: %s", exc)
 
 
-@app.get("/health")
+@app.get("/health", dependencies=[Depends(verify_shared_secret)])
 def health() -> dict:
     settings = get_settings()
     return {

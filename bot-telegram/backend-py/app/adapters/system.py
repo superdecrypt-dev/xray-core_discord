@@ -13,6 +13,7 @@ XRAY_CONFDIR = Path("/usr/local/etc/xray/conf.d")
 NGINX_CONF = Path("/etc/nginx/conf.d/xray.conf")
 CERT_FULLCHAIN = Path("/opt/cert/fullchain.pem")
 NETWORK_STATE_FILE = Path("/var/lib/xray-manage/network_state.json")
+WIREPROXY_CONF = Path("/etc/wireproxy/config.conf")
 XRAY_OBSERVE_BIN = Path("/usr/local/bin/xray-observe")
 XRAY_OBSERVE_CONFIG_FILE = Path("/etc/xray-observe/config.env")
 XRAY_OBSERVE_ALERT_LOG = Path("/var/log/xray-observe/alerts.log")
@@ -20,6 +21,17 @@ XRAY_OBSERVE_REPORT_FILE = Path("/var/lib/xray-observe/last-report.txt")
 XRAY_DOMAIN_GUARD_BIN = Path("/usr/local/bin/xray-domain-guard")
 XRAY_DOMAIN_GUARD_CONFIG_FILE = Path("/etc/xray-domain-guard/config.env")
 XRAY_DOMAIN_GUARD_LOG_FILE = Path("/var/log/xray-observe/domain-guard.log")
+WARP_TIER_STATE_KEY = "warp_tier_target"
+WARP_PLUS_LICENSE_STATE_KEY = "warp_plus_license_key"
+READONLY_GEOSITE_DOMAINS = (
+    "geosite:apple",
+    "geosite:meta",
+    "geosite:google",
+    "geosite:openai",
+    "geosite:spotify",
+    "geosite:netflix",
+    "geosite:reddit",
+)
 PROTOCOLS = ("vless", "vmess", "trojan")
 QUOTA_UNIT_DECIMAL = {"decimal", "gb", "1000", "gigabyte"}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -935,6 +947,312 @@ def op_network_state_raw() -> tuple[str, str]:
     if not ok:
         return "Network Controls - State File", str(payload)
     return "Network Controls - State File", json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def list_inbound_tags() -> list[str]:
+    src = XRAY_CONFDIR / "10-inbounds.json"
+    ok, payload = read_json(src)
+    if not ok or not isinstance(payload, dict):
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    inbounds = payload.get("inbounds")
+    if not isinstance(inbounds, list):
+        return []
+
+    for item in inbounds:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag") or "").strip()
+        if not tag or tag == "api" or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    out.sort()
+    return out
+
+
+def list_warp_domain_options(mode: str | None = None) -> list[str]:
+    src = XRAY_CONFDIR / "30-routing.json"
+    ok, payload = read_json(src)
+    if not ok or not isinstance(payload, dict):
+        return []
+
+    routing = payload.get("routing")
+    rules = routing.get("rules") if isinstance(routing, dict) else None
+    if not isinstance(rules, list):
+        return []
+
+    def collect_custom(outbound: str, marker: str) -> list[str]:
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("type") != "field":
+                continue
+            if str(rule.get("outboundTag") or "") != outbound:
+                continue
+            domains = rule.get("domain")
+            if not isinstance(domains, list) or marker not in domains:
+                continue
+            found: list[str] = []
+            for entry in domains:
+                if not isinstance(entry, str):
+                    continue
+                ent = entry.strip()
+                if not ent or ent == marker or ent in READONLY_GEOSITE_DOMAINS:
+                    continue
+                found.append(ent)
+            return found
+        return []
+
+    requested = str(mode or "").strip().lower()
+    selected: list[str] = []
+    if requested == "direct":
+        selected = collect_custom("direct", "regexp:^$")
+    elif requested == "warp":
+        selected = collect_custom("warp", "regexp:^$WARP")
+    else:
+        selected = collect_custom("direct", "regexp:^$") + collect_custom("warp", "regexp:^$WARP")
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for entry in selected:
+        if entry in seen:
+            continue
+        seen.add(entry)
+        ordered.append(entry)
+    return ordered
+
+
+def _warp_state_get(key: str) -> str:
+    ok, payload = read_json(NETWORK_STATE_FILE)
+    if not ok or not isinstance(payload, dict):
+        return ""
+    value = payload.get(key)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _warp_mask_license(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "(kosong)"
+    if len(raw) <= 8:
+        return raw
+    return f"{raw[:4]}****{raw[-4:]}"
+
+
+def _wireproxy_socks_bind_address() -> str:
+    if not WIREPROXY_CONF.exists():
+        return "127.0.0.1:40000"
+    current_section = ""
+    for raw in WIREPROXY_CONF.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line[1:-1].strip().lower()
+            continue
+        if current_section not in {"socks", "socks5"}:
+            continue
+        if "=" not in line:
+            continue
+        key, value = [x.strip() for x in line.split("=", 1)]
+        if key.lower() == "bindaddress" and value:
+            return value
+    return "127.0.0.1:40000"
+
+
+def _warp_live_tier() -> str:
+    if shutil.which("curl") is None:
+        return "unknown"
+    bind_addr = _wireproxy_socks_bind_address()
+    ok, out = run_cmd(
+        [
+            "curl",
+            "-fsS",
+            "--max-time",
+            "8",
+            "--socks5",
+            bind_addr,
+            "https://www.cloudflare.com/cdn-cgi/trace",
+        ],
+        timeout=12,
+    )
+    if not ok:
+        return "unknown"
+    warp_val = ""
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip() == "warp":
+            warp_val = v.strip().lower()
+            break
+    if warp_val == "plus":
+        return "plus"
+    if warp_val == "on":
+        return "free"
+    if warp_val == "off":
+        return "off"
+    return "unknown"
+
+
+def _current_egress_mode_summary() -> str:
+    rt_src = XRAY_CONFDIR / "30-routing.json"
+    ok, payload = read_json(rt_src)
+    if not ok or not isinstance(payload, dict):
+        return "unknown"
+
+    routing = payload.get("routing")
+    rules = routing.get("rules") if isinstance(routing, dict) else None
+    if not isinstance(rules, list):
+        return "unknown"
+
+    target: dict | None = None
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") != "field":
+            continue
+        port = str(rule.get("port") or "").strip()
+        if port not in {"1-65535", "0-65535"}:
+            continue
+        if rule.get("user") or rule.get("domain") or rule.get("ip") or rule.get("protocol"):
+            continue
+        target = rule
+    if not isinstance(target, dict):
+        return "unknown"
+
+    balancer = str(target.get("balancerTag") or "").strip()
+    if balancer:
+        return f"balancer ({balancer})"
+    outbound = str(target.get("outboundTag") or "").strip().lower()
+    if outbound in {"direct", "warp"}:
+        return outbound
+    return "unknown"
+
+
+def op_network_warp_status_report() -> tuple[str, str]:
+    title = "Network Controls - WARP Status"
+    rt_src = XRAY_CONFDIR / "30-routing.json"
+    ok, payload = read_json(rt_src)
+    if not ok or not isinstance(payload, dict):
+        return title, f"Gagal baca routing: {payload}"
+
+    routing = payload.get("routing")
+    rules = routing.get("rules") if isinstance(routing, dict) else None
+    if not isinstance(rules, list):
+        return title, "Format routing.rules tidak valid."
+
+    def _rule_list_user(marker: str, outbound: str) -> list[str]:
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("type") != "field" or str(rule.get("outboundTag") or "") != outbound:
+                continue
+            users = rule.get("user")
+            if not isinstance(users, list) or marker not in users:
+                continue
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in users:
+                if not isinstance(item, str):
+                    continue
+                value = item.strip()
+                if not value or value == marker or value in seen:
+                    continue
+                seen.add(value)
+                out.append(value)
+            return out
+        return []
+
+    def _rule_list_inbound(marker: str, outbound: str) -> list[str]:
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("type") != "field" or str(rule.get("outboundTag") or "") != outbound:
+                continue
+            tags = rule.get("inboundTag")
+            if not isinstance(tags, list) or marker not in tags:
+                continue
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in tags:
+                if not isinstance(item, str):
+                    continue
+                value = item.strip()
+                if not value or value == marker or value in seen:
+                    continue
+                seen.add(value)
+                out.append(value)
+            return out
+        return []
+
+    def _rule_list_domain(marker: str, outbound: str) -> list[str]:
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("type") != "field" or str(rule.get("outboundTag") or "") != outbound:
+                continue
+            domains = rule.get("domain")
+            if not isinstance(domains, list) or marker not in domains:
+                continue
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in domains:
+                if not isinstance(item, str):
+                    continue
+                value = item.strip()
+                if not value or value == marker or value in seen:
+                    continue
+                seen.add(value)
+                out.append(value)
+            return out
+        return []
+
+    user_warp = _rule_list_user("dummy-warp-user", "warp")
+    user_direct = _rule_list_user("dummy-direct-user", "direct")
+    inb_warp = _rule_list_inbound("dummy-warp-inbounds", "warp")
+    inb_direct = _rule_list_inbound("dummy-direct-inbounds", "direct")
+    dom_direct = _rule_list_domain("regexp:^$", "direct")
+    dom_warp = _rule_list_domain("regexp:^$WARP", "warp")
+
+    lines = [
+        f"Egress Global : {_current_egress_mode_summary()}",
+        f"wireproxy     : {service_state('wireproxy')}",
+        f"User Override : warp={len(user_warp)}, direct={len(user_direct)}",
+        f"Inbound Ovr   : warp={len(inb_warp)}, direct={len(inb_direct)}",
+        f"Domain List   : direct={len(dom_direct)}, warp={len(dom_warp)}",
+        "",
+        "User warp (sample): " + (", ".join(user_warp[:8]) if user_warp else "-"),
+        "User direct (sample): " + (", ".join(user_direct[:8]) if user_direct else "-"),
+        "Inbound warp (sample): " + (", ".join(inb_warp[:8]) if inb_warp else "-"),
+        "Inbound direct (sample): " + (", ".join(inb_direct[:8]) if inb_direct else "-"),
+        "Domain direct (sample): " + (", ".join(dom_direct[:8]) if dom_direct else "-"),
+        "Domain warp (sample): " + (", ".join(dom_warp[:8]) if dom_warp else "-"),
+        "",
+        f"Tier target   : {_warp_state_get(WARP_TIER_STATE_KEY) or 'unknown'}",
+        f"Tier live     : {_warp_live_tier()}",
+        f"WARP+ License : {_warp_mask_license(_warp_state_get(WARP_PLUS_LICENSE_STATE_KEY))}",
+    ]
+    return title, "\n".join(lines)
+
+
+def op_network_warp_tier_status() -> tuple[str, str]:
+    title = "Network Controls - WARP Tier Status"
+    lines = [
+        f"Target Tier   : {_warp_state_get(WARP_TIER_STATE_KEY) or 'unknown'}",
+        f"Live Tier     : {_warp_live_tier()}",
+        f"wireproxy     : {service_state('wireproxy')}",
+        f"WARP+ License : {_warp_mask_license(_warp_state_get(WARP_PLUS_LICENSE_STATE_KEY))}",
+        f"WGCF Account  : {'OK' if Path('/etc/wgcf/wgcf-account.toml').exists() else 'missing'}",
+        f"WGCF Profile  : {'OK' if Path('/etc/wgcf/wgcf-profile.conf').exists() else 'missing'}",
+    ]
+    return title, "\n".join(lines)
 
 
 def op_domain_info() -> tuple[str, str]:

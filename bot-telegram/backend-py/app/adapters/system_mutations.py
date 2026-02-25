@@ -32,6 +32,9 @@ XRAY_OUTBOUNDS_CONF = XRAY_CONFDIR / "20-outbounds.json"
 XRAY_ROUTING_CONF = XRAY_CONFDIR / "30-routing.json"
 XRAY_DNS_CONF = XRAY_CONFDIR / "02-dns.json"
 NGINX_CONF = Path("/etc/nginx/conf.d/xray.conf")
+WIREPROXY_CONF = Path("/etc/wireproxy/config.conf")
+WGCF_DIR = Path("/etc/wgcf")
+NETWORK_STATE_FILE = Path("/var/lib/xray-manage/network_state.json")
 XRAY_DOMAIN_FILE = Path("/etc/xray/domain")
 CERT_DIR = Path("/opt/cert")
 CERT_FULLCHAIN = CERT_DIR / "fullchain.pem"
@@ -52,6 +55,18 @@ BALANCER_ALLOWED_STRATEGIES = {"random", "roundRobin", "leastPing", "leastLoad"}
 DEFAULT_EGRESS_PORTS = {"1-65535", "0-65535"}
 DNS_LOCK_FILE = "/var/lock/xray-dns.lock"
 DNS_QUERY_STRATEGY_ALLOWED = {"UseIP", "UseIPv4", "UseIPv6", "PreferIPv4", "PreferIPv6"}
+WARP_TIER_STATE_KEY = "warp_tier_target"
+WARP_PLUS_LICENSE_STATE_KEY = "warp_plus_license_key"
+WARP_TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+READONLY_GEOSITE_DOMAINS = {
+    "geosite:apple",
+    "geosite:meta",
+    "geosite:google",
+    "geosite:openai",
+    "geosite:spotify",
+    "geosite:netflix",
+    "geosite:reddit",
+}
 CLOUDFLARE_API_TOKEN = os.getenv(
     "CLOUDFLARE_API_TOKEN",
     "ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtdxsMiAZ",
@@ -334,6 +349,255 @@ def _detect_domain() -> str:
     if ok2 and host.strip():
         return host.splitlines()[0].strip()
     return "-"
+
+
+def _network_state_get(key: str) -> str:
+    ok, payload = _read_json(NETWORK_STATE_FILE)
+    if not ok or not isinstance(payload, dict):
+        return ""
+    value = payload.get(key)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _network_state_set(key: str, value: str) -> None:
+    payload: dict[str, Any] = {}
+    ok, raw = _read_json(NETWORK_STATE_FILE)
+    if ok and isinstance(raw, dict):
+        payload = raw
+    payload[str(key)] = str(value)
+    _write_json_atomic(NETWORK_STATE_FILE, payload)
+    _chmod_600(NETWORK_STATE_FILE)
+
+
+def _warp_mask_license(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "(kosong)"
+    if len(raw) <= 8:
+        return raw
+    return f"{raw[:4]}****{raw[-4:]}"
+
+
+def _wireproxy_socks_bind_address() -> str:
+    if not WIREPROXY_CONF.exists():
+        return "127.0.0.1:40000"
+    section = ""
+    try:
+        lines = WIREPROXY_CONF.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return "127.0.0.1:40000"
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        if section not in {"socks", "socks5"}:
+            continue
+        if "=" not in line:
+            continue
+        key, value = [x.strip() for x in line.split("=", 1)]
+        if key.lower() == "bindaddress" and value:
+            return value
+    return "127.0.0.1:40000"
+
+
+def _wireproxy_socks_block() -> list[str]:
+    if not WIREPROXY_CONF.exists():
+        return ["[Socks5]", "BindAddress = 127.0.0.1:40000"]
+    section = ""
+    captured: list[str] = []
+    found = False
+    try:
+        lines = WIREPROXY_CONF.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return ["[Socks5]", "BindAddress = 127.0.0.1:40000"]
+
+    for raw in lines:
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            name = stripped[1:-1].strip().lower()
+            if name in {"socks", "socks5"}:
+                section = name
+                found = True
+                captured = ["[Socks5]"]
+            else:
+                section = ""
+            continue
+        if section in {"socks", "socks5"}:
+            captured.append(line)
+    if found and captured:
+        return captured
+    return ["[Socks5]", "BindAddress = 127.0.0.1:40000"]
+
+
+def _warp_wireproxy_apply_profile(profile_path: Path) -> tuple[bool, str]:
+    if not profile_path.exists() or profile_path.stat().st_size <= 0:
+        return False, f"Profile wgcf tidak ditemukan: {profile_path}"
+
+    socks_block = _wireproxy_socks_block()
+    try:
+        raw_lines = profile_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as exc:
+        return False, f"Gagal membaca profile wgcf: {exc}"
+
+    output: list[str] = []
+    in_socks = False
+    for raw in raw_lines:
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section_name = stripped[1:-1].strip().lower()
+            in_socks = section_name in {"socks", "socks5"}
+            if in_socks:
+                continue
+        if in_socks:
+            continue
+        output.append(raw.rstrip("\n"))
+
+    output.extend(["", *socks_block, ""])
+    try:
+        if WIREPROXY_CONF.exists():
+            backup = WIREPROXY_CONF.with_suffix(WIREPROXY_CONF.suffix + f".bak.{int(time.time())}")
+            shutil.copy2(WIREPROXY_CONF, backup)
+        _write_text_atomic(WIREPROXY_CONF, "\n".join(output))
+        _chmod_600(WIREPROXY_CONF)
+    except Exception as exc:
+        return False, f"Gagal menulis wireproxy config: {exc}"
+    return True, "wireproxy config updated"
+
+
+def _warp_live_tier() -> str:
+    if shutil.which("curl") is None:
+        return "unknown"
+    bind_addr = _wireproxy_socks_bind_address()
+    ok, out = _run_cmd(
+        [
+            "curl",
+            "-fsS",
+            "--max-time",
+            "8",
+            "--socks5",
+            bind_addr,
+            WARP_TRACE_URL,
+        ],
+        timeout=12,
+    )
+    if not ok:
+        return "unknown"
+    warp_val = ""
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip() == "warp":
+            warp_val = v.strip().lower()
+            break
+    if warp_val == "plus":
+        return "plus"
+    if warp_val == "on":
+        return "free"
+    if warp_val == "off":
+        return "off"
+    return "unknown"
+
+
+def _warp_tier_target_get() -> str:
+    raw = _network_state_get(WARP_TIER_STATE_KEY).strip().lower()
+    if raw in {"free", "plus"}:
+        return raw
+    return "unknown"
+
+
+def _warp_tier_status_message() -> str:
+    target = _warp_tier_target_get()
+    live = _warp_live_tier()
+    license_masked = _warp_mask_license(_network_state_get(WARP_PLUS_LICENSE_STATE_KEY))
+    wireproxy_state = "not-installed"
+    if _service_exists("wireproxy"):
+        wireproxy_state = "active" if _service_is_active("wireproxy") else "inactive"
+    lines = [
+        f"Target Tier   : {target}",
+        f"Live Tier     : {live}",
+        f"wireproxy     : {wireproxy_state}",
+        f"WARP+ License : {license_masked}",
+    ]
+    return "\n".join(lines)
+
+
+def _warp_wgcf_register_noninteractive() -> tuple[bool, str]:
+    WGCF_DIR.mkdir(parents=True, exist_ok=True)
+    account_file = WGCF_DIR / "wgcf-account.toml"
+    if account_file.exists():
+        return True, "wgcf account exists"
+
+    ok, out = _run_cmd(["bash", "-lc", "set -euo pipefail; yes | wgcf register"], timeout=240, cwd=str(WGCF_DIR))
+    if account_file.exists():
+        return True, "wgcf register ok"
+    if ok and account_file.exists():
+        return True, "wgcf register ok"
+    return False, f"wgcf register gagal: {out}"
+
+
+def _warp_wgcf_build_profile(tier: str, license_key: str = "") -> tuple[bool, str]:
+    WGCF_DIR.mkdir(parents=True, exist_ok=True)
+    tier_n = str(tier or "").strip().lower()
+    if tier_n not in {"free", "plus"}:
+        return False, "Tier harus free/plus."
+
+    ok_reg, msg_reg = _warp_wgcf_register_noninteractive()
+    if not ok_reg:
+        return False, msg_reg
+
+    if tier_n == "plus":
+        key = str(license_key or "").strip()
+        if not key:
+            return False, "License key WARP+ kosong."
+        ok_upd, out_upd = _run_cmd(
+            ["wgcf", "update", "--license-key", key],
+            timeout=180,
+            cwd=str(WGCF_DIR),
+        )
+        if not ok_upd:
+            return False, f"wgcf update --license-key gagal: {out_upd}"
+
+    profile_path = WGCF_DIR / "wgcf-profile.conf"
+    ok_gen, out_gen = _run_cmd(
+        ["wgcf", "generate", "-p", str(profile_path)],
+        timeout=180,
+        cwd=str(WGCF_DIR),
+    )
+    if not ok_gen:
+        return False, f"wgcf generate gagal: {out_gen}"
+    if not profile_path.exists() or profile_path.stat().st_size <= 0:
+        return False, "wgcf-profile.conf tidak ditemukan setelah generate."
+    return True, str(profile_path)
+
+
+def _routing_default_mode_pretty(rt_cfg: dict[str, Any]) -> str:
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        return "unknown"
+    rules = routing.get("rules")
+    if not isinstance(rules, list):
+        return "unknown"
+    idx = _routing_default_rule_index(rules)
+    if idx < 0:
+        return "unknown"
+    target = rules[idx] if idx < len(rules) else None
+    if not isinstance(target, dict):
+        return "unknown"
+    bal = str(target.get("balancerTag") or "").strip()
+    if bal:
+        return f"balancer ({bal})"
+    ot = str(target.get("outboundTag") or "").strip().lower()
+    if ot in {"direct", "warp"}:
+        return ot
+    return "unknown"
 
 
 def _parse_date_only(raw: Any) -> date | None:
@@ -910,6 +1174,334 @@ def _routing_set_balancer_selector(rt_cfg: dict[str, Any], out_cfg: dict[str, An
         return False, msg_bal
     rt_cfg["routing"] = routing
     return True, f"Balancer selector di-set: {', '.join(selector)}"
+
+
+def _routing_find_user_rule_index(rules: list[Any], marker: str, outbound: str) -> int:
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") != "field":
+            continue
+        if str(rule.get("outboundTag") or "") != outbound:
+            continue
+        users = rule.get("user")
+        if not isinstance(users, list):
+            continue
+        # Rule per-user harus tidak mengandung inboundTag.
+        if "inboundTag" in rule:
+            continue
+        if marker in users:
+            return i
+    return -1
+
+
+def _routing_find_inbound_rule_index(rules: list[Any], marker: str, outbound: str) -> int:
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") != "field":
+            continue
+        if str(rule.get("outboundTag") or "") != outbound:
+            continue
+        tags = rule.get("inboundTag")
+        if not isinstance(tags, list):
+            continue
+        if marker in tags:
+            return i
+    return -1
+
+
+def _routing_list_marker_users(rules: list[Any], marker: str, outbound: str) -> list[str]:
+    idx = _routing_find_user_rule_index(rules, marker, outbound)
+    if idx < 0:
+        return []
+    rule = rules[idx]
+    if not isinstance(rule, dict):
+        return []
+    users = rule.get("user")
+    if not isinstance(users, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in users:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value == marker or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _routing_list_marker_inbounds(rules: list[Any], marker: str, outbound: str) -> list[str]:
+    idx = _routing_find_inbound_rule_index(rules, marker, outbound)
+    if idx < 0:
+        return []
+    rule = rules[idx]
+    if not isinstance(rule, dict):
+        return []
+    tags = rule.get("inboundTag")
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in tags:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value == marker or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _routing_find_domain_rule_index(rules: list[Any], marker: str, outbound: str) -> int:
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") != "field":
+            continue
+        if str(rule.get("outboundTag") or "") != outbound:
+            continue
+        domains = rule.get("domain")
+        if not isinstance(domains, list):
+            continue
+        if marker in domains:
+            return i
+    return -1
+
+
+def _routing_list_marker_domains(rules: list[Any], marker: str, outbound: str) -> list[str]:
+    idx = _routing_find_domain_rule_index(rules, marker, outbound)
+    if idx < 0:
+        return []
+    rule = rules[idx]
+    if not isinstance(rule, dict):
+        return []
+    domains = rule.get("domain")
+    if not isinstance(domains, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in domains:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value == marker or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _routing_set_user_warp_mode(rt_cfg: dict[str, Any], email: str, mode: str) -> tuple[bool, str]:
+    mode_n = str(mode or "").strip().lower()
+    if mode_n not in {"direct", "warp", "off"}:
+        return False, "Mode user harus direct/warp/off."
+
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    rules = routing.get("rules")
+    if not isinstance(rules, list):
+        return False, "Invalid routing config: routing.rules bukan list"
+
+    default_idx = _routing_default_rule_index(rules)
+    if default_idx < 0:
+        return False, "Default rule (port 1-65535 / 0-65535) tidak ditemukan."
+
+    def toggle_user_marker(marker: str, outbound: str, enable: bool) -> None:
+        nonlocal default_idx
+        idx = _routing_find_user_rule_index(rules, marker, outbound)
+        if idx < 0 and not enable:
+            return
+        if idx < 0 and enable:
+            rules.insert(default_idx, {"type": "field", "user": [marker], "outboundTag": outbound})
+            idx = default_idx
+            default_idx += 1
+
+        rule = rules[idx]
+        if not isinstance(rule, dict):
+            rule = {"type": "field", "user": [marker], "outboundTag": outbound}
+        users = rule.get("user")
+        if not isinstance(users, list):
+            users = []
+        users = [u for u in users if u != marker and u != email]
+        users.insert(0, marker)
+        if enable and email not in users:
+            users.append(email)
+        rule["type"] = "field"
+        rule["outboundTag"] = outbound
+        rule["user"] = users
+        rules[idx] = rule
+
+    if mode_n == "direct":
+        toggle_user_marker("dummy-warp-user", "warp", enable=False)
+        toggle_user_marker("dummy-direct-user", "direct", enable=True)
+    elif mode_n == "warp":
+        toggle_user_marker("dummy-direct-user", "direct", enable=False)
+        toggle_user_marker("dummy-warp-user", "warp", enable=True)
+    else:
+        toggle_user_marker("dummy-direct-user", "direct", enable=False)
+        toggle_user_marker("dummy-warp-user", "warp", enable=False)
+
+    routing["rules"] = rules
+    rt_cfg["routing"] = routing
+    return True, f"Override user di-set: {email} -> {mode_n}"
+
+
+def _routing_set_inbound_warp_mode(rt_cfg: dict[str, Any], inbound_tag: str, mode: str) -> tuple[bool, str]:
+    mode_n = str(mode or "").strip().lower()
+    if mode_n not in {"direct", "warp", "off"}:
+        return False, "Mode inbound harus direct/warp/off."
+
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    rules = routing.get("rules")
+    if not isinstance(rules, list):
+        return False, "Invalid routing config: routing.rules bukan list"
+
+    default_idx = _routing_default_rule_index(rules)
+    if default_idx < 0:
+        return False, "Default rule (port 1-65535 / 0-65535) tidak ditemukan."
+
+    def toggle_inbound_marker(marker: str, outbound: str, enable: bool) -> None:
+        nonlocal default_idx
+        idx = _routing_find_inbound_rule_index(rules, marker, outbound)
+        if idx < 0 and not enable:
+            return
+        if idx < 0 and enable:
+            rules.insert(default_idx, {"type": "field", "inboundTag": [marker], "outboundTag": outbound})
+            idx = default_idx
+            default_idx += 1
+
+        rule = rules[idx]
+        if not isinstance(rule, dict):
+            rule = {"type": "field", "inboundTag": [marker], "outboundTag": outbound}
+        tags = rule.get("inboundTag")
+        if not isinstance(tags, list):
+            tags = []
+        tags = [t for t in tags if t != marker and t != inbound_tag]
+        tags.insert(0, marker)
+        if enable and inbound_tag not in tags:
+            tags.append(inbound_tag)
+        rule["type"] = "field"
+        rule["outboundTag"] = outbound
+        rule["inboundTag"] = tags
+        rules[idx] = rule
+
+    if mode_n == "direct":
+        toggle_inbound_marker("dummy-warp-inbounds", "warp", enable=False)
+        toggle_inbound_marker("dummy-direct-inbounds", "direct", enable=True)
+    elif mode_n == "warp":
+        toggle_inbound_marker("dummy-direct-inbounds", "direct", enable=False)
+        toggle_inbound_marker("dummy-warp-inbounds", "warp", enable=True)
+    else:
+        toggle_inbound_marker("dummy-direct-inbounds", "direct", enable=False)
+        toggle_inbound_marker("dummy-warp-inbounds", "warp", enable=False)
+
+    routing["rules"] = rules
+    rt_cfg["routing"] = routing
+    return True, f"Override inbound di-set: {inbound_tag} -> {mode_n}"
+
+
+def _routing_set_custom_domain_mode(rt_cfg: dict[str, Any], mode: str, entry: str) -> tuple[bool, str]:
+    mode_n = str(mode or "").strip().lower()
+    ent = str(entry or "").strip()
+    if mode_n not in {"direct", "warp", "off"}:
+        return False, "Mode domain harus direct/warp/off."
+    if not ent:
+        return False, "Entry domain/geosite tidak boleh kosong."
+    if ent in {"regexp:^$", "regexp:^$WARP"}:
+        return False, "Entry reserved tidak boleh dipakai."
+    if ent in READONLY_GEOSITE_DOMAINS:
+        return False, f"Readonly geosite tidak boleh diubah: {ent}"
+
+    routing = rt_cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    rules = routing.get("rules")
+    if not isinstance(rules, list):
+        return False, "Invalid routing config: routing.rules bukan list"
+
+    default_idx = _routing_default_rule_index(rules)
+    if default_idx < 0:
+        return False, "Default rule (port 1-65535 / 0-65535) tidak ditemukan."
+
+    def find_template_direct_idx() -> int:
+        for i, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("type") != "field":
+                continue
+            if str(rule.get("outboundTag") or "") != "direct":
+                continue
+            domains = rule.get("domain")
+            if not isinstance(domains, list):
+                continue
+            if "geosite:apple" in domains or "geosite:google" in domains:
+                return i
+        return -1
+
+    def ensure_domain_rule(outbound: str, marker: str, insert_at: int) -> int:
+        idx = _routing_find_domain_rule_index(rules, marker, outbound)
+        if idx >= 0:
+            return idx
+        rules.insert(insert_at, {"type": "field", "domain": [marker], "outboundTag": outbound})
+        return insert_at
+
+    def normalize_rule(idx: int, marker: str, desired_present: bool) -> None:
+        rule = rules[idx]
+        if not isinstance(rule, dict):
+            rule = {"type": "field", "domain": [marker]}
+        domains = rule.get("domain")
+        if not isinstance(domains, list):
+            domains = []
+        domains = [d for d in domains if d != marker and d != ent]
+        domains.insert(0, marker)
+        if desired_present:
+            domains.append(ent)
+        rule["type"] = "field"
+        rule["domain"] = domains
+        rules[idx] = rule
+
+    tpl_idx = find_template_direct_idx()
+    base = (tpl_idx + 1) if tpl_idx >= 0 else default_idx
+
+    direct_marker = "regexp:^$"
+    warp_marker = "regexp:^$WARP"
+    direct_idx = _routing_find_domain_rule_index(rules, direct_marker, "direct")
+    warp_idx = _routing_find_domain_rule_index(rules, warp_marker, "warp")
+
+    if mode_n == "direct":
+        if direct_idx < 0:
+            direct_idx = ensure_domain_rule("direct", direct_marker, base)
+            if direct_idx <= default_idx:
+                default_idx += 1
+        if warp_idx >= 0:
+            normalize_rule(warp_idx, warp_marker, False)
+        normalize_rule(direct_idx, direct_marker, True)
+    elif mode_n == "warp":
+        base_warp = (direct_idx + 1) if direct_idx >= 0 else base
+        if warp_idx < 0:
+            warp_idx = ensure_domain_rule("warp", warp_marker, base_warp)
+            if warp_idx <= default_idx:
+                default_idx += 1
+        if direct_idx >= 0:
+            normalize_rule(direct_idx, direct_marker, False)
+        normalize_rule(warp_idx, warp_marker, True)
+    else:
+        if direct_idx >= 0:
+            normalize_rule(direct_idx, direct_marker, False)
+        if warp_idx >= 0:
+            normalize_rule(warp_idx, warp_marker, False)
+
+    routing["rules"] = rules
+    rt_cfg["routing"] = routing
+    return True, f"Domain/geosite di-set {mode_n}: {ent}"
 
 
 def _apply_routing_transaction(
@@ -3158,6 +3750,273 @@ def op_network_set_balancer_selector(selector: str) -> tuple[bool, str, str]:
 
 def op_network_set_balancer_selector_auto() -> tuple[bool, str, str]:
     return op_network_set_balancer_selector("auto")
+
+
+def op_network_warp_status_report() -> tuple[bool, str, str]:
+    title = "Network Controls - WARP Status"
+
+    ok_rt, rt_payload = _read_json(XRAY_ROUTING_CONF)
+    if not ok_rt:
+        return False, title, str(rt_payload)
+    if not isinstance(rt_payload, dict):
+        return False, title, "Format routing tidak valid."
+
+    routing = rt_payload.get("routing")
+    rules = routing.get("rules") if isinstance(routing, dict) else None
+    if not isinstance(rules, list):
+        return False, title, "Format routing.rules tidak valid."
+
+    global_mode = _routing_default_mode_pretty(rt_payload)
+    user_warp = _routing_list_marker_users(rules, "dummy-warp-user", "warp")
+    user_direct = _routing_list_marker_users(rules, "dummy-direct-user", "direct")
+    inb_warp = _routing_list_marker_inbounds(rules, "dummy-warp-inbounds", "warp")
+    inb_direct = _routing_list_marker_inbounds(rules, "dummy-direct-inbounds", "direct")
+    dom_direct = _routing_list_marker_domains(rules, "regexp:^$", "direct")
+    dom_warp = _routing_list_marker_domains(rules, "regexp:^$WARP", "warp")
+
+    wireproxy_state = "not-installed"
+    if _service_exists("wireproxy"):
+        wireproxy_state = "active" if _service_is_active("wireproxy") else "inactive"
+
+    lines = [
+        f"Egress Global : {global_mode}",
+        f"wireproxy     : {wireproxy_state}",
+        f"User Override : warp={len(user_warp)}, direct={len(user_direct)}",
+        f"Inbound Ovr   : warp={len(inb_warp)}, direct={len(inb_direct)}",
+        f"Domain List   : direct={len(dom_direct)}, warp={len(dom_warp)}",
+        "",
+        "User warp (sample): " + (", ".join(user_warp[:8]) if user_warp else "-"),
+        "User direct (sample): " + (", ".join(user_direct[:8]) if user_direct else "-"),
+        "Inbound warp (sample): " + (", ".join(inb_warp[:8]) if inb_warp else "-"),
+        "Inbound direct (sample): " + (", ".join(inb_direct[:8]) if inb_direct else "-"),
+        "Domain direct (sample): " + (", ".join(dom_direct[:8]) if dom_direct else "-"),
+        "Domain warp (sample): " + (", ".join(dom_warp[:8]) if dom_warp else "-"),
+        "",
+        _warp_tier_status_message(),
+    ]
+    return True, title, "\n".join(lines)
+
+
+def op_network_warp_restart() -> tuple[bool, str, str]:
+    title = "Network Controls - Restart WARP"
+    if not _service_exists("wireproxy"):
+        return False, title, "wireproxy.service tidak terdeteksi."
+    if not _restart_and_wait("wireproxy", timeout_sec=30):
+        return False, title, "wireproxy tidak aktif setelah restart."
+    return True, title, f"wireproxy restart sukses.\nStatus: {'active' if _service_is_active('wireproxy') else 'inactive'}"
+
+
+def op_network_warp_set_global_mode(mode: str) -> tuple[bool, str, str]:
+    title = "Network Controls - WARP Global"
+    mode_n = str(mode or "").strip().lower()
+    if mode_n not in {"direct", "warp"}:
+        return False, title, "Mode global harus direct/warp."
+    ok_op, _, msg = op_network_set_egress_mode(mode_n)
+    if not ok_op:
+        return False, title, msg
+    return True, title, msg
+
+
+def op_network_warp_set_user_mode(proto: str, username: str, mode: str) -> tuple[bool, str, str]:
+    title = "Network Controls - WARP per-user"
+    proto_n = str(proto or "").strip().lower()
+    username_n = str(username or "").strip()
+    mode_n = str(mode or "").strip().lower()
+
+    if proto_n not in PROTOCOLS:
+        return False, title, "Protocol harus vless/vmess/trojan."
+    if not _is_valid_username(username_n):
+        return False, title, "Username tidak valid."
+    if mode_n not in {"direct", "warp", "off"}:
+        return False, title, "Mode user harus direct/warp/off."
+
+    email = _email(proto_n, username_n)
+    if re.match(r"^default@(vless|vmess|trojan)-(ws|hup|grpc)$", email):
+        return False, title, f"User default bersifat readonly: {email}"
+
+    ok_apply, msg_apply = _apply_routing_transaction(
+        lambda rt_cfg, _out_cfg: _routing_set_user_warp_mode(rt_cfg, email, mode_n)
+    )
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply
+
+
+def op_network_warp_set_inbound_mode(inbound_tag: str, mode: str) -> tuple[bool, str, str]:
+    title = "Network Controls - WARP per-inbound"
+    tag = str(inbound_tag or "").strip()
+    mode_n = str(mode or "").strip().lower()
+
+    if not tag:
+        return False, title, "Inbound tag tidak boleh kosong."
+    if tag == "api":
+        return False, title, "Inbound internal 'api' bersifat readonly."
+    if mode_n not in {"direct", "warp", "off"}:
+        return False, title, "Mode inbound harus direct/warp/off."
+
+    ok_inb, inb_cfg = _read_json(XRAY_INBOUNDS_CONF)
+    if not ok_inb:
+        return False, title, str(inb_cfg)
+    inbounds = inb_cfg.get("inbounds") if isinstance(inb_cfg, dict) else None
+    known_tags = set()
+    if isinstance(inbounds, list):
+        for item in inbounds:
+            if not isinstance(item, dict):
+                continue
+            t = str(item.get("tag") or "").strip()
+            if t:
+                known_tags.add(t)
+    if tag not in known_tags:
+        return False, title, f"Inbound tag tidak ditemukan: {tag}"
+
+    ok_apply, msg_apply = _apply_routing_transaction(
+        lambda rt_cfg, _out_cfg: _routing_set_inbound_warp_mode(rt_cfg, tag, mode_n)
+    )
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply
+
+
+def op_network_warp_set_domain_mode(mode: str, entry: str) -> tuple[bool, str, str]:
+    title = "Network Controls - WARP per-domain"
+    mode_n = str(mode or "").strip().lower()
+    entry_n = str(entry or "").strip()
+    if mode_n not in {"direct", "warp", "off"}:
+        return False, title, "Mode domain harus direct/warp/off."
+    if not entry_n:
+        return False, title, "Entry domain/geosite tidak boleh kosong."
+    if entry_n in {"regexp:^$", "regexp:^$WARP"}:
+        return False, title, "Entry reserved tidak valid."
+    if entry_n in READONLY_GEOSITE_DOMAINS:
+        return False, title, f"Readonly geosite tidak boleh diubah: {entry_n}"
+
+    ok_apply, msg_apply = _apply_routing_transaction(
+        lambda rt_cfg, _out_cfg: _routing_set_custom_domain_mode(rt_cfg, mode_n, entry_n)
+    )
+    if not ok_apply:
+        return False, title, msg_apply
+    return True, title, msg_apply
+
+
+def op_network_warp_tier_status() -> tuple[bool, str, str]:
+    title = "Network Controls - WARP Tier Status"
+    return True, title, _warp_tier_status_message()
+
+
+def op_network_warp_tier_switch_free() -> tuple[bool, str, str]:
+    title = "Network Controls - WARP Tier Free"
+    if shutil.which("wgcf") is None:
+        return False, title, "wgcf tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    if shutil.which("wireproxy") is None:
+        return False, title, "wireproxy tidak ditemukan. Jalankan setup.sh terlebih dulu."
+
+    WGCF_DIR.mkdir(parents=True, exist_ok=True)
+    account_file = WGCF_DIR / "wgcf-account.toml"
+    profile_file = WGCF_DIR / "wgcf-profile.conf"
+    if account_file.exists():
+        try:
+            backup = WGCF_DIR / f"wgcf-account.toml.bak.{int(time.time())}"
+            shutil.copy2(account_file, backup)
+        except Exception:
+            pass
+    try:
+        if account_file.exists():
+            account_file.unlink()
+        if profile_file.exists():
+            profile_file.unlink()
+    except Exception:
+        pass
+
+    ok_reg, msg_reg = _warp_wgcf_register_noninteractive()
+    if not ok_reg:
+        return False, title, msg_reg
+
+    ok_build, profile_or_err = _warp_wgcf_build_profile("free")
+    if not ok_build:
+        return False, title, profile_or_err
+
+    ok_apply, msg_apply = _warp_wireproxy_apply_profile(Path(profile_or_err))
+    if not ok_apply:
+        return False, title, msg_apply
+
+    _network_state_set(WARP_TIER_STATE_KEY, "free")
+    if not _restart_and_wait("wireproxy", timeout_sec=30):
+        return False, title, "wireproxy tidak aktif setelah apply profile free."
+
+    msg = (
+        "Switch tier ke free berhasil.\n"
+        f"- Register: {msg_reg}\n"
+        f"- Apply: {msg_apply}\n\n"
+        + _warp_tier_status_message()
+    )
+    return True, title, msg
+
+
+def op_network_warp_tier_switch_plus(license_key: str) -> tuple[bool, str, str]:
+    title = "Network Controls - WARP Tier Plus"
+    if shutil.which("wgcf") is None:
+        return False, title, "wgcf tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    if shutil.which("wireproxy") is None:
+        return False, title, "wireproxy tidak ditemukan. Jalankan setup.sh terlebih dulu."
+
+    key = str(license_key or "").strip()
+    if not key:
+        key = _network_state_get(WARP_PLUS_LICENSE_STATE_KEY).strip()
+    if not key:
+        return False, title, "License key WARP+ kosong."
+
+    ok_build, profile_or_err = _warp_wgcf_build_profile("plus", key)
+    if not ok_build:
+        return False, title, profile_or_err
+
+    ok_apply, msg_apply = _warp_wireproxy_apply_profile(Path(profile_or_err))
+    if not ok_apply:
+        return False, title, msg_apply
+
+    _network_state_set(WARP_TIER_STATE_KEY, "plus")
+    _network_state_set(WARP_PLUS_LICENSE_STATE_KEY, key)
+    if not _restart_and_wait("wireproxy", timeout_sec=30):
+        return False, title, "wireproxy tidak aktif setelah apply profile plus."
+
+    msg = (
+        "Switch tier ke plus berhasil.\n"
+        f"- Apply: {msg_apply}\n\n"
+        + _warp_tier_status_message()
+    )
+    return True, title, msg
+
+
+def op_network_warp_tier_reconnect() -> tuple[bool, str, str]:
+    title = "Network Controls - WARP Reconnect/Regenerate"
+    if shutil.which("wgcf") is None:
+        return False, title, "wgcf tidak ditemukan. Jalankan setup.sh terlebih dulu."
+    if shutil.which("wireproxy") is None:
+        return False, title, "wireproxy tidak ditemukan. Jalankan setup.sh terlebih dulu."
+
+    target = _warp_tier_target_get()
+    if target not in {"free", "plus"}:
+        target = "free"
+
+    if target == "plus":
+        key = _network_state_get(WARP_PLUS_LICENSE_STATE_KEY).strip()
+        if not key:
+            return False, title, "Target plus aktif, tetapi license key kosong."
+        ok_build, profile_or_err = _warp_wgcf_build_profile("plus", key)
+    else:
+        ok_build, profile_or_err = _warp_wgcf_build_profile("free")
+
+    if not ok_build:
+        return False, title, profile_or_err
+
+    ok_apply, msg_apply = _warp_wireproxy_apply_profile(Path(profile_or_err))
+    if not ok_apply:
+        return False, title, msg_apply
+
+    if not _restart_and_wait("wireproxy", timeout_sec=30):
+        return False, title, "wireproxy tidak aktif setelah reconnect/regenerate."
+
+    msg = f"Reconnect/regenerate selesai untuk target: {target}\n- Apply: {msg_apply}\n\n{_warp_tier_status_message()}"
+    return True, title, msg
 
 
 def op_network_set_dns_primary(value: str) -> tuple[bool, str, str]:

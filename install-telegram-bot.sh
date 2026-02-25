@@ -307,6 +307,10 @@ TELEGRAM_BOT_USERNAME=
 TELEGRAM_DEFAULT_CHAT_ID=
 TELEGRAM_ADMIN_CHAT_IDS=
 TELEGRAM_ADMIN_USER_IDS=
+TELEGRAM_ALLOW_UNRESTRICTED_ACCESS=false
+TELEGRAM_ACTION_COOLDOWN_SECONDS=1
+TELEGRAM_CLEANUP_COOLDOWN_SECONDS=30
+TELEGRAM_MAX_INPUT_LENGTH=128
 BACKEND_BASE_URL=http://127.0.0.1:8080
 BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8080
@@ -322,7 +326,7 @@ ENVEOF
 
 validate_required_env() {
   local missing=()
-  local key val
+  local key val admin_chat_ids admin_user_ids allow_unrestricted
   for key in INTERNAL_SHARED_SECRET TELEGRAM_BOT_TOKEN; do
     val="$(get_env_value "$key" "${BOT_ENV_FILE}")"
     [[ -n "${val}" ]] || missing+=("$key")
@@ -331,6 +335,13 @@ validate_required_env() {
   if (( ${#missing[@]} > 0 )); then
     warn "Env belum lengkap: ${missing[*]}"
     return 1
+  fi
+
+  admin_chat_ids="$(get_env_value TELEGRAM_ADMIN_CHAT_IDS "${BOT_ENV_FILE}")"
+  admin_user_ids="$(get_env_value TELEGRAM_ADMIN_USER_IDS "${BOT_ENV_FILE}")"
+  allow_unrestricted="$(printf '%s' "$(get_env_value TELEGRAM_ALLOW_UNRESTRICTED_ACCESS "${BOT_ENV_FILE}")" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${admin_chat_ids}" && -z "${admin_user_ids}" && "${allow_unrestricted}" != "true" ]]; then
+    warn "Admin ACL kosong. Isi TELEGRAM_ADMIN_* atau set TELEGRAM_ALLOW_UNRESTRICTED_ACCESS=true (tidak direkomendasikan)."
   fi
   return 0
 }
@@ -380,8 +391,8 @@ configure_env_interactive() {
   ensure_env_file
   CONFIGURE_ENV_CANCELLED=0
 
-  local current_token current_secret current_bot_username current_default_chat_id current_admin_chat_ids current_admin_user_ids current_dangerous
-  local token bot_username default_chat_id admin_chat_ids admin_user_ids dangerous secret_input
+  local current_token current_secret current_bot_username current_default_chat_id current_admin_chat_ids current_admin_user_ids current_dangerous current_allow_unrestricted
+  local token bot_username default_chat_id admin_chat_ids admin_user_ids dangerous allow_unrestricted secret_input
   local final_token final_secret staged_env
 
   current_token="$(get_env_value TELEGRAM_BOT_TOKEN "${BOT_ENV_FILE}")"
@@ -391,6 +402,7 @@ configure_env_interactive() {
   current_admin_chat_ids="$(get_env_value TELEGRAM_ADMIN_CHAT_IDS "${BOT_ENV_FILE}")"
   current_admin_user_ids="$(get_env_value TELEGRAM_ADMIN_USER_IDS "${BOT_ENV_FILE}")"
   current_dangerous="$(get_env_value ENABLE_DANGEROUS_ACTIONS "${BOT_ENV_FILE}")"
+  current_allow_unrestricted="$(get_env_value TELEGRAM_ALLOW_UNRESTRICTED_ACCESS "${BOT_ENV_FILE}")"
 
   echo "Konfigurasi env: ${BOT_ENV_FILE}"
   echo "- TELEGRAM_BOT_TOKEN: $(mask_secret "${current_token}")"
@@ -432,6 +444,11 @@ configure_env_interactive() {
     cancel_env_config
     return 0
   fi
+  allow_unrestricted="$(prompt_with_default_or_back "TELEGRAM_ALLOW_UNRESTRICTED_ACCESS (true/false)" "${current_allow_unrestricted}")"
+  if [[ "${allow_unrestricted}" == "${BACK_INPUT_SENTINEL}" ]]; then
+    cancel_env_config
+    return 0
+  fi
 
   if [[ -z "${current_secret}" ]]; then
     secret_input="$(generate_secret)"
@@ -453,6 +470,7 @@ configure_env_interactive() {
   set_env_value TELEGRAM_ADMIN_CHAT_IDS "${admin_chat_ids}" "${staged_env}"
   set_env_value TELEGRAM_ADMIN_USER_IDS "${admin_user_ids}" "${staged_env}"
   set_env_value ENABLE_DANGEROUS_ACTIONS "${dangerous:-true}" "${staged_env}"
+  set_env_value TELEGRAM_ALLOW_UNRESTRICTED_ACCESS "${allow_unrestricted:-false}" "${staged_env}"
 
   set_env_value BACKEND_BASE_URL "http://127.0.0.1:8080" "${staged_env}"
   set_env_value BACKEND_HOST "127.0.0.1" "${staged_env}"
