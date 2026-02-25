@@ -90,6 +90,27 @@
                 "style": "short",
                 "required": false,
                 "placeholder": "0 = OFF"
+              },
+              {
+                "id": "speed_limit_enabled",
+                "label": "Speed Limit (opsional)",
+                "style": "short",
+                "required": false,
+                "placeholder": "on/off"
+              },
+              {
+                "id": "speed_down_mbit",
+                "label": "Speed Down Mbps",
+                "style": "short",
+                "required": false,
+                "placeholder": "contoh: 20"
+              },
+              {
+                "id": "speed_up_mbit",
+                "label": "Speed Up Mbps",
+                "style": "short",
+                "required": false,
+                "placeholder": "contoh: 10"
               }
             ]
           }

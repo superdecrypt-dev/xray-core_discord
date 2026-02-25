@@ -22,6 +22,12 @@ class BackendActionResponse:
     data: dict
 
 
+@dataclass(frozen=True)
+class BackendUserOption:
+    proto: str
+    username: str
+
+
 class BackendError(RuntimeError):
     pass
 
@@ -56,6 +62,34 @@ class BackendClient:
             message=str(data.get("message") or ""),
             data=data.get("data") if isinstance(data.get("data"), dict) else {},
         )
+
+    async def list_user_options(self, proto: str | None = None) -> list[BackendUserOption]:
+        params = {"proto": proto} if proto else None
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, headers=self._headers, timeout=15.0) as client:
+                response = await client.get("/api/users/options", params=params)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text.strip()
+            raise BackendError(f"HTTP {exc.response.status_code}: {body[:400]}") from exc
+        except Exception as exc:
+            raise BackendError(str(exc)) from exc
+
+        users_raw = data.get("users") if isinstance(data, dict) else None
+        if not isinstance(users_raw, list):
+            return []
+
+        out: list[BackendUserOption] = []
+        for item in users_raw:
+            if not isinstance(item, dict):
+                continue
+            p = str(item.get("proto") or "").strip().lower()
+            u = str(item.get("username") or "").strip()
+            if not p or not u:
+                continue
+            out.append(BackendUserOption(proto=p, username=u))
+        return out
 
     async def health(self) -> dict:
         try:
