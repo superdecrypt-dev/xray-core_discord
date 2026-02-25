@@ -17,6 +17,7 @@ main_menu() {
     echo -e "  ${UI_ACCENT}8)${UI_RESET} Maintenance"
     echo -e "  ${UI_ACCENT}9)${UI_RESET} Install BOT Discord"
     echo -e "  ${UI_ACCENT}10)${UI_RESET} Traffic Analytics"
+    echo -e "  ${UI_ACCENT}11)${UI_RESET} Install BOT Telegram"
     echo -e "  ${UI_ACCENT}0)${UI_RESET} Keluar"
     hr
     if ! read -r -p "Pilih: " c; then
@@ -34,6 +35,7 @@ main_menu() {
       8) run_action "Maintenance" maintenance_menu ;;
       9) run_action "Install BOT Discord" install_discord_bot_menu ;;
       10|12) run_action "Traffic Analytics" traffic_analytics_menu ;;
+      11) run_action "Install BOT Telegram" install_telegram_bot_menu ;;
       0|kembali|k|back|b) exit 0 ;;
       *) invalid_choice ;;
     esac

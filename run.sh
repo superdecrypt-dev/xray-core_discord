@@ -21,6 +21,7 @@ MANAGE_BIN="/usr/local/bin/manage"
 MANAGE_MODULES_SRC_DIR="${REPO_DIR}/opt/manage"
 MANAGE_MODULES_DST_DIR="/opt/manage"
 BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
+TELEGRAM_INSTALLER_BIN="/usr/local/bin/install-telegram-bot"
 
 # -------------------------
 # Warna output
@@ -194,9 +195,11 @@ sync_repo_compat_alias() {
 install_manage() {
   local src="${REPO_DIR}/manage.sh"
   local bot_installer_src="${REPO_DIR}/install-discord-bot.sh"
+  local telegram_installer_src="${REPO_DIR}/install-telegram-bot.sh"
 
   [[ -f "${src}" ]] || die "File manage.sh tidak ditemukan di repositori."
   [[ -f "${bot_installer_src}" ]] || die "File install-discord-bot.sh tidak ditemukan di repositori."
+  [[ -f "${telegram_installer_src}" ]] || die "File install-telegram-bot.sh tidak ditemukan di repositori."
 
   log "Menginstal 'manage' ke ${MANAGE_BIN} ..."
   install -m 0755 "${src}" "${MANAGE_BIN}"
@@ -217,6 +220,10 @@ install_manage() {
   log "Menginstal installer bot Discord ke ${BOT_INSTALLER_BIN} ..."
   install -m 0755 "${bot_installer_src}" "${BOT_INSTALLER_BIN}"
   ok "Installer bot Discord tersedia di: ${BOT_INSTALLER_BIN}"
+
+  log "Menginstal installer bot Telegram (placeholder) ke ${TELEGRAM_INSTALLER_BIN} ..."
+  install -m 0755 "${telegram_installer_src}" "${TELEGRAM_INSTALLER_BIN}"
+  ok "Installer bot Telegram tersedia di: ${TELEGRAM_INSTALLER_BIN}"
 }
 
 run_setup() {

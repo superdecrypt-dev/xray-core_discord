@@ -1260,6 +1260,33 @@ install_discord_bot_menu() {
   return 0
 }
 
+install_telegram_bot_menu() {
+  local installer_cmd="/usr/local/bin/install-telegram-bot"
+  title
+  echo "11) Install BOT Telegram"
+  hr
+
+  if [[ ! -x "${installer_cmd}" ]]; then
+    warn "Installer bot Telegram tidak ditemukan / tidak executable:"
+    echo "  ${installer_cmd}"
+    echo
+    echo "Hint: jalankan ulang run.sh agar installer ikut dipasang."
+    hr
+    pause
+    return 0
+  fi
+
+  echo "Menjalankan installer:"
+  echo "  ${installer_cmd} menu"
+  hr
+  if ! "${installer_cmd}" menu; then
+    warn "Installer bot Telegram keluar dengan status error."
+    hr
+    pause
+  fi
+  return 0
+}
+
 daemon_status_menu() {
   title
   echo "8) Maintenance > Daemon Status"
