@@ -48,6 +48,9 @@ ACME_SH_INSTALL_REF="${ACME_SH_INSTALL_REF:-f39d066ced0271d87790dc426556c1e02a88
 ACME_SH_SCRIPT_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/acme.sh"
 ACME_SH_TARBALL_URL="https://codeload.github.com/acmesh-official/acme.sh/tar.gz/${ACME_SH_INSTALL_REF}"
 ACME_SH_DNS_CF_HOOK_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/dnsapi/dns_cf.sh"
+ACME_SH_SCRIPT_SHA256="${ACME_SH_SCRIPT_SHA256:-3c15d539f2b670040c67b596161297ef4e402a969e686ee53d5a083923e761db}"
+ACME_SH_TARBALL_SHA256="${ACME_SH_TARBALL_SHA256:-3be27ab630d5dd53439a46e56cbe77d998b788c3f0a3eb6b95cdd77e074389a9}"
+ACME_SH_DNS_CF_HOOK_SHA256="${ACME_SH_DNS_CF_HOOK_SHA256:-9628ee8238cb3f9cfa1b1a985c0e9593436a3e4f8a9d65a6f775b981be9e76c8}"
 
 # Runtime state untuk Domain Control
 DOMAIN=""
@@ -406,17 +409,18 @@ need_root() {
 ensure_path_writable() {
   # args: file_path (existing)
   local path="$1"
-  local dir tmp
+  local dir probe tmp
 
   [[ -e "${path}" ]] || die "Path tidak ditemukan: ${path}"
   dir="$(dirname "${path}")"
 
   # Best-effort check: directory writable (detect read-only fs, weird perms)
-  if ! touch "${dir}/.writetest.$$" 2>/dev/null; then
+  probe="$(mktemp "${dir}/.writetest.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "${probe}" ]]; then
     warn "Directory tidak bisa ditulis: ${dir}"
     die "Tidak dapat menulis ke ${dir} (kemungkinan filesystem read-only / permission khusus)."
   fi
-  rm -f "${dir}/.writetest.$$" 2>/dev/null || true
+  rm -f "${probe}" 2>/dev/null || true
 
   # Immutable attribute check (best-effort)
   if have_cmd lsattr; then
@@ -426,8 +430,12 @@ ensure_path_writable() {
   fi
 
   # Temp file test (same dir) for atomic replace
-  tmp="${dir}/.tmp.$$.$(basename "${path}")"
+  tmp="$(mktemp "${dir}/.tmp.$(basename "${path}").XXXXXX" 2>/dev/null || true)"
+  if [[ -z "${tmp}" ]]; then
+    die "Gagal membuat temp file di ${dir} untuk atomic replace. Cek permission/immutable."
+  fi
   if ! cp -a "${path}" "${tmp}" 2>/dev/null; then
+    rm -f "${tmp}" 2>/dev/null || true
     die "Gagal membuat temp file di ${dir} untuk atomic replace. Cek permission/immutable."
   fi
   rm -f "${tmp}" 2>/dev/null || true
@@ -1047,8 +1055,47 @@ main_menu_info_header_print() {
 download_file_or_die() {
   local url="$1"
   local out="$2"
-  curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$out" \
-    || die "Gagal download: $url"
+  local expected_sha="${3:-}"
+  local label="${4:-$url}"
+
+  if ! download_file_with_sha_check "${url}" "${out}" "${expected_sha}" "${label}"; then
+    die "Gagal download/verify: ${label}"
+  fi
+}
+
+download_file_with_sha_check() {
+  local url="$1"
+  local out="$2"
+  local expected_sha="${3:-}"
+  local label="${4:-$url}"
+  local actual_sha=""
+
+  if ! curl -fsSL --connect-timeout 15 --max-time 120 "${url}" -o "${out}"; then
+    rm -f "${out}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if [[ ! -s "${out}" ]]; then
+    warn "File hasil download kosong: ${label}"
+    rm -f "${out}" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if [[ -n "${expected_sha}" ]]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+      warn "sha256sum tidak tersedia untuk verifikasi checksum: ${label}"
+      rm -f "${out}" >/dev/null 2>&1 || true
+      return 1
+    fi
+    actual_sha="$(sha256sum "${out}" | awk '{print tolower($1)}')"
+    if [[ -z "${actual_sha}" || "${actual_sha}" != "${expected_sha,,}" ]]; then
+      warn "Checksum mismatch: ${label}"
+      warn "  expected: ${expected_sha,,}"
+      warn "  actual  : ${actual_sha:-<empty>}"
+      rm -f "${out}" >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+  return 0
 }
 
 rand_str() {
@@ -1514,7 +1561,7 @@ install_acme_and_issue_cert() {
   acme_install_log="${acme_tmpdir}/acme-install.log"
   acme_src_dir=""
 
-  if curl -fsSL --connect-timeout 15 --max-time 120 "${ACME_SH_TARBALL_URL}" -o "${acme_tgz}" 2>/dev/null; then
+  if download_file_with_sha_check "${ACME_SH_TARBALL_URL}" "${acme_tgz}" "${ACME_SH_TARBALL_SHA256}" "acme.sh tarball"; then
     if tar -xzf "${acme_tgz}" -C "${acme_tmpdir}" >/dev/null 2>&1; then
       acme_src_dir="$(find "${acme_tmpdir}" -maxdepth 1 -type d -name 'acme.sh-*' -print -quit)"
     fi
@@ -1524,7 +1571,7 @@ install_acme_and_issue_cert() {
     warn "Source bundle acme.sh tidak tersedia, fallback ke single-file installer."
     acme_src_dir="${acme_tmpdir}/acme-single"
     mkdir -p "${acme_src_dir}"
-    download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_src_dir}/acme.sh"
+    download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_src_dir}/acme.sh" "${ACME_SH_SCRIPT_SHA256}" "acme.sh script"
   fi
 
   chmod 700 "${acme_src_dir}/acme.sh"
@@ -1552,7 +1599,7 @@ install_acme_and_issue_cert() {
     if [[ ! -s /root/.acme.sh/dnsapi/dns_cf.sh ]]; then
       warn "dns_cf hook tidak ditemukan, mencoba bootstrap dari ref ${ACME_SH_INSTALL_REF} ..."
       mkdir -p /root/.acme.sh/dnsapi
-      download_file_or_die "${ACME_SH_DNS_CF_HOOK_URL}" /root/.acme.sh/dnsapi/dns_cf.sh
+      download_file_or_die "${ACME_SH_DNS_CF_HOOK_URL}" /root/.acme.sh/dnsapi/dns_cf.sh "${ACME_SH_DNS_CF_HOOK_SHA256}" "acme dns_cf hook"
       chmod 700 /root/.acme.sh/dnsapi/dns_cf.sh >/dev/null 2>&1 || true
     fi
     [[ -s /root/.acme.sh/dnsapi/dns_cf.sh ]] || die "Hook dns_cf tetap tidak ditemukan setelah bootstrap."
@@ -2817,15 +2864,20 @@ xray_write_file_atomic() {
 
   dir="$(dirname "${dest}")"
   base="$(basename "${dest}")"
-  tmp_target="${dir}/.${base}.new.$$"
 
   ensure_path_writable "${dest}"
+
+  tmp_target="$(mktemp "${dir}/.${base}.new.XXXXXX" 2>/dev/null || true)"
+  [[ -n "${tmp_target}" ]] || die "Gagal membuat temp file untuk replace: ${dest}"
 
   mode="$(stat -c '%a' "${dest}" 2>/dev/null || echo '600')"
   uid="$(stat -c '%u' "${dest}" 2>/dev/null || echo '0')"
   gid="$(stat -c '%g' "${dest}" 2>/dev/null || echo '0')"
 
-  cp -f "${src_tmp}" "${tmp_target}"
+  if ! cp -f "${src_tmp}" "${tmp_target}"; then
+    rm -f "${tmp_target}" 2>/dev/null || true
+    die "Gagal menyiapkan temp file untuk replace: ${dest}"
+  fi
   chmod "${mode}" "${tmp_target}" 2>/dev/null || chmod 600 "${tmp_target}" || true
   chown "${uid}:${gid}" "${tmp_target}" 2>/dev/null || chown 0:0 "${tmp_target}" || true
 
@@ -5088,7 +5140,7 @@ PY
   fi
 
   # Update quota JSON
-  quota_atomic_update_file "${quota_file}" "d['expired_at'] = '${new_expiry}'"
+  quota_atomic_update_file "${quota_file}" set_expired_at "${new_expiry}"
 
   # Update account txt (baris Valid Until)
   # BUG-18 fix: use atomic write via tmp file instead of sed -i (which is not atomic)
@@ -5147,7 +5199,7 @@ PY
 
   if [[ "${st_quota}" == "true" ]]; then
     # Reset quota_exhausted flag and remove from dummy-quota-user routing rule
-    quota_atomic_update_file "${quota_file}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); il=bool(st.get('ip_limit_locked')); st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('ip_limit' if il else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+    quota_atomic_update_file "${quota_file}" clear_quota_exhausted_recompute
     xray_routing_set_user_in_marker "dummy-quota-user" "${username}@${proto}" off
     log "Quota exhausted flag di-reset setelah extend expiry."
   fi
@@ -5771,43 +5823,192 @@ quota_print_table_page() {
 }
 
 quota_atomic_update_file() {
-  # args: json_file python_code
-  # python_code dijalankan untuk memodifikasi dict 'd'
-  # BUG-02 fix: code is passed as sys.argv[2] (NOT via heredoc string interpolation).
-  # Previously the heredoc used <<PY (unquoted) which caused bash to expand ${code}
-  # before passing it to Python — creating a code injection risk if the code string
-  # contained shell metacharacters or triple-quotes.
+  # args: json_file action [action_args...]
+  # Security hardening:
+  # - Tidak lagi menjalankan python `exec()` dari string dinamis.
+  # - Update dibatasi ke action yang sudah di-whitelist.
   local qf="$1"
-  local code="$2"
+  local action="${2:-}"
+  local lockf="${qf}.lock"
+  shift 2 || true
   need_python3
 
-  python3 - "${qf}" "${code}" <<'PY'
-import json, sys, os, tempfile
+  python3 - "${qf}" "${lockf}" "${action}" "$@" <<'PY'
+import fcntl
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime
+
 p = sys.argv[1]
-code = sys.argv[2]
+lock_path = sys.argv[2]
+action = sys.argv[3]
+args = sys.argv[4:]
 
-with open(p, 'r', encoding='utf-8') as f:
-  d = json.load(f)
+os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
 
-ns = {"d": d}
-exec(code, ns, ns)
+def now_iso():
+  return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-out = json.dumps(ns["d"], ensure_ascii=False, indent=2) + "\n"
+def parse_onoff(raw):
+  v = str(raw or "").strip().lower()
+  if v in ("on", "true", "1", "yes"):
+    return True
+  if v in ("off", "false", "0", "no"):
+    return False
+  raise SystemExit(f"aksi {action}: nilai on/off tidak valid: {raw}")
 
-dirn = os.path.dirname(p) or "."
-fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
-try:
-  with os.fdopen(fd, "w", encoding="utf-8") as wf:
-    wf.write(out)
-    wf.flush()
-    os.fsync(wf.fileno())
-  os.replace(tmp, p)
-finally:
+def parse_int(raw, name, min_value=None):
   try:
-    if os.path.exists(tmp):
-      os.remove(tmp)
+    val = int(float(str(raw).strip()))
   except Exception:
-    pass
+    raise SystemExit(f"aksi {action}: {name} harus angka")
+  if min_value is not None and val < min_value:
+    raise SystemExit(f"aksi {action}: {name} minimal {min_value}")
+  return val
+
+def parse_float(raw, name, min_value=None):
+  try:
+    val = float(str(raw).strip())
+  except Exception:
+    raise SystemExit(f"aksi {action}: {name} harus angka")
+  if min_value is not None and val < min_value:
+    raise SystemExit(f"aksi {action}: {name} minimal {min_value}")
+  return val
+
+def ensure_status(meta):
+  st = meta.get("status")
+  if not isinstance(st, dict):
+    st = {}
+    meta["status"] = st
+  return st
+
+def recompute_lock_reason(st):
+  mb = bool(st.get("manual_block"))
+  qe = bool(st.get("quota_exhausted"))
+  il = bool(st.get("ip_limit_locked"))
+
+  if mb:
+    lr = "manual"
+  elif qe:
+    lr = "quota"
+  elif il:
+    lr = "ip_limit"
+  else:
+    lr = ""
+
+  st["lock_reason"] = lr
+  if lr:
+    st["locked_at"] = str(st.get("locked_at") or now_iso())
+  else:
+    st["locked_at"] = ""
+
+with open(lock_path, "a+", encoding="utf-8") as lf:
+  fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+  try:
+    with open(p, "r", encoding="utf-8") as f:
+      d = json.load(f)
+    if not isinstance(d, dict):
+      raise SystemExit("quota metadata invalid: root bukan object")
+
+    st = ensure_status(d)
+
+    if action == "set_expired_at":
+      if len(args) != 1:
+        raise SystemExit("set_expired_at butuh 1 argumen (YYYY-MM-DD)")
+      value = str(args[0]).strip()
+      if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise SystemExit("set_expired_at: format tanggal wajib YYYY-MM-DD")
+      d["expired_at"] = value
+
+    elif action == "clear_quota_exhausted_recompute":
+      st["quota_exhausted"] = False
+      recompute_lock_reason(st)
+
+    elif action == "set_quota_limit_recompute":
+      if len(args) != 1:
+        raise SystemExit("set_quota_limit_recompute butuh 1 argumen (bytes)")
+      d["quota_limit"] = parse_int(args[0], "quota_limit", 0)
+      recompute_lock_reason(st)
+
+    elif action == "reset_quota_used_recompute":
+      d["quota_used"] = 0
+      st["quota_exhausted"] = False
+      recompute_lock_reason(st)
+
+    elif action == "manual_block_set":
+      if len(args) != 1:
+        raise SystemExit("manual_block_set butuh 1 argumen (on/off)")
+      enabled = parse_onoff(args[0])
+      st["manual_block"] = bool(enabled)
+      if enabled:
+        st["lock_reason"] = "manual"
+        st["locked_at"] = str(st.get("locked_at") or now_iso())
+      else:
+        recompute_lock_reason(st)
+
+    elif action == "ip_limit_enabled_set":
+      if len(args) != 1:
+        raise SystemExit("ip_limit_enabled_set butuh 1 argumen (on/off)")
+      enabled = parse_onoff(args[0])
+      st["ip_limit_enabled"] = bool(enabled)
+      if not enabled:
+        st["ip_limit_locked"] = False
+        recompute_lock_reason(st)
+
+    elif action == "set_ip_limit":
+      if len(args) != 1:
+        raise SystemExit("set_ip_limit butuh 1 argumen (angka)")
+      st["ip_limit"] = parse_int(args[0], "ip_limit", 1)
+
+    elif action == "clear_ip_limit_locked_recompute":
+      st["ip_limit_locked"] = False
+      recompute_lock_reason(st)
+
+    elif action == "set_speed_down":
+      if len(args) != 1:
+        raise SystemExit("set_speed_down butuh 1 argumen (Mbps)")
+      st["speed_down_mbit"] = parse_float(args[0], "speed_down_mbit", 0.000001)
+
+    elif action == "set_speed_up":
+      if len(args) != 1:
+        raise SystemExit("set_speed_up butuh 1 argumen (Mbps)")
+      st["speed_up_mbit"] = parse_float(args[0], "speed_up_mbit", 0.000001)
+
+    elif action == "speed_limit_set":
+      if len(args) != 1:
+        raise SystemExit("speed_limit_set butuh 1 argumen (on/off)")
+      st["speed_limit_enabled"] = bool(parse_onoff(args[0]))
+
+    elif action == "set_speed_all_enable":
+      if len(args) != 2:
+        raise SystemExit("set_speed_all_enable butuh 2 argumen (down up)")
+      st["speed_down_mbit"] = parse_float(args[0], "speed_down_mbit", 0.000001)
+      st["speed_up_mbit"] = parse_float(args[1], "speed_up_mbit", 0.000001)
+      st["speed_limit_enabled"] = True
+
+    else:
+      raise SystemExit(f"aksi quota_atomic_update_file tidak dikenali: {action}")
+
+    out = json.dumps(d, ensure_ascii=False, indent=2) + "\n"
+    dirn = os.path.dirname(p) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp.", suffix=".json", dir=dirn)
+    try:
+      with os.fdopen(fd, "w", encoding="utf-8") as wf:
+        wf.write(out)
+        wf.flush()
+        os.fsync(wf.fileno())
+      os.replace(tmp, p)
+    finally:
+      try:
+        if os.path.exists(tmp):
+          os.remove(tmp)
+      except Exception:
+        pass
+  finally:
+    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 PY
 
   chmod 600 "${qf}" 2>/dev/null || true
@@ -5970,14 +6171,14 @@ quota_edit_flow() {
           continue
         fi
         qb="$(bytes_from_gb "${gb_num}")"
-        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); d['quota_limit']=int(${qb}); now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else ('ip_limit' if il else ''))); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+        quota_atomic_update_file "${qf}" set_quota_limit_recompute "${qb}"
         log "Quota limit diubah: ${gb_num} GB"
         pause
         ;;
       3)
         # BUG-06 fix: read mb/il BEFORE resetting qe so lock_reason is computed correctly.
         # BUG-05 fix: correct priority quota > ip_limit.
-        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); il=bool(st.get('ip_limit_locked')); d['quota_used']=0; st['quota_exhausted']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('ip_limit' if il else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+        quota_atomic_update_file "${qf}" reset_quota_used_recompute
         xray_routing_set_user_in_marker "dummy-quota-user" "${email_for_routing}" off
         log "Quota used di-reset: 0 (status quota dibersihkan)"
         pause
@@ -5990,11 +6191,11 @@ quota_edit_flow() {
           # Previously mb was read AFTER being set to False, so it was always False
           # and lock_reason could never be 'manual' in this branch.
           # BUG-05 fix applied here too: correct priority is quota > ip_limit (not reversed).
-          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); qe=bool(st.get('quota_exhausted')); il=bool(st.get('ip_limit_locked')); st['manual_block']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('quota' if qe else ('ip_limit' if il else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+          quota_atomic_update_file "${qf}" manual_block_set off
           xray_routing_set_user_in_marker "dummy-block-user" "${email_for_routing}" off
           log "Manual block: OFF"
         else
-          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); st['manual_block']=True; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); st['lock_reason']='manual'; st['locked_at']=st.get('locked_at') or now"
+          quota_atomic_update_file "${qf}" manual_block_set on
           xray_routing_set_user_in_marker "dummy-block-user" "${email_for_routing}" on
           log "Manual block: ON"
         fi
@@ -6006,12 +6207,12 @@ quota_edit_flow() {
         if [[ "${ip_on}" == "true" ]]; then
           # BUG-06 fix: read il BEFORE resetting ip_limit_locked, then determine lock_reason.
           # BUG-05 fix: correct priority is quota > ip_limit.
-          quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); st['ip_limit_enabled']=False; st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+          quota_atomic_update_file "${qf}" ip_limit_enabled_set off
           xray_routing_set_user_in_marker "dummy-limit-user" "${email_for_routing}" off
           svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
           log "IP limit: OFF"
         else
-          quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['ip_limit_enabled']=True"
+          quota_atomic_update_file "${qf}" ip_limit_enabled_set on
           svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
           log "IP limit: ON"
         fi
@@ -6028,7 +6229,7 @@ quota_edit_flow() {
           pause
           continue
         fi
-        quota_atomic_update_file "${qf}" "d.setdefault('status',{}); d['status']['ip_limit']=int(${lim})"
+        quota_atomic_update_file "${qf}" set_ip_limit "${lim}"
         svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP limit diubah: ${lim}"
         account_info_refresh_warn "${proto}" "${speed_username}" || true
@@ -6038,7 +6239,7 @@ quota_edit_flow() {
         /usr/local/bin/limit-ip unlock "${email_for_routing}" >/dev/null 2>&1 || true
         # BUG-06 fix: read il BEFORE resetting, evaluate lock_reason correctly after.
         # BUG-05 fix: correct priority quota > ip_limit.
-        quota_atomic_update_file "${qf}" "from datetime import datetime; st=d.setdefault('status',{}); mb=bool(st.get('manual_block')); qe=bool(st.get('quota_exhausted')); st['ip_limit_locked']=False; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); lr=('manual' if mb else ('quota' if qe else '')); st['lock_reason']=lr; st['locked_at']=(st.get('locked_at') or now) if lr else ''"
+        quota_atomic_update_file "${qf}" clear_ip_limit_locked_recompute
         svc_restart_any xray-limit-ip xray-limit >/dev/null 2>&1 || true
         log "IP lock di-unlock"
         pause
@@ -6054,7 +6255,7 @@ quota_edit_flow() {
           pause
           continue
         fi
-        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_down_mbit']=float(${speed_down_input})"
+        quota_atomic_update_file "${qf}" set_speed_down "${speed_down_input}"
         if [[ "$(quota_get_status_bool "${qf}" "speed_limit_enabled")" == "true" ]]; then
           quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
         fi
@@ -6073,7 +6274,7 @@ quota_edit_flow() {
           pause
           continue
         fi
-        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_up_mbit']=float(${speed_up_input})"
+        quota_atomic_update_file "${qf}" set_speed_up "${speed_up_input}"
         if [[ "$(quota_get_status_bool "${qf}" "speed_limit_enabled")" == "true" ]]; then
           quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
         fi
@@ -6085,7 +6286,7 @@ quota_edit_flow() {
         local speed_on speed_down_now speed_up_now
         speed_on="$(quota_get_status_bool "${qf}" "speed_limit_enabled")"
         if [[ "${speed_on}" == "true" ]]; then
-          quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_limit_enabled']=False"
+          quota_atomic_update_file "${qf}" speed_limit_set off
           quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
           log "Speed limit: OFF"
           account_info_refresh_warn "${proto}" "${speed_username}" || true
@@ -6121,7 +6322,7 @@ quota_edit_flow() {
           fi
         fi
 
-        quota_atomic_update_file "${qf}" "st=d.setdefault('status',{}); st['speed_down_mbit']=float(${speed_down_now}); st['speed_up_mbit']=float(${speed_up_now}); st['speed_limit_enabled']=True"
+        quota_atomic_update_file "${qf}" set_speed_all_enable "${speed_down_now}" "${speed_up_now}"
         quota_sync_speed_policy_for_user "${proto}" "${speed_username}" "${qf}" || true
         log "Speed limit: ON"
         account_info_refresh_warn "${proto}" "${speed_username}" || true

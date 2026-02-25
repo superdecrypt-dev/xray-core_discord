@@ -66,13 +66,19 @@ XRAY_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${X
 ACME_SH_SCRIPT_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/acme.sh"
 ACME_SH_TARBALL_URL="https://codeload.github.com/acmesh-official/acme.sh/tar.gz/${ACME_SH_INSTALL_REF}"
 ACME_SH_DNS_CF_HOOK_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_INSTALL_REF}/dnsapi/dns_cf.sh"
+XRAY_INSTALL_SCRIPT_SHA256="${XRAY_INSTALL_SCRIPT_SHA256:-7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555}"
+ACME_SH_SCRIPT_SHA256="${ACME_SH_SCRIPT_SHA256:-3c15d539f2b670040c67b596161297ef4e402a969e686ee53d5a083923e761db}"
+ACME_SH_TARBALL_SHA256="${ACME_SH_TARBALL_SHA256:-3be27ab630d5dd53439a46e56cbe77d998b788c3f0a3eb6b95cdd77e074389a9}"
+ACME_SH_DNS_CF_HOOK_SHA256="${ACME_SH_DNS_CF_HOOK_SHA256:-9628ee8238cb3f9cfa1b1a985c0e9593436a3e4f8a9d65a6f775b981be9e76c8}"
 CUSTOM_GEOSITE_URL="${CUSTOM_GEOSITE_URL:-https://github.com/superdecrypt-dev/custom-geosite-xray/raw/main/custom.dat}"
+CUSTOM_GEOSITE_SHA256="${CUSTOM_GEOSITE_SHA256:-}"
 XRAY_ASSET_DIR="/usr/local/share/xray"
 CUSTOM_GEOSITE_DEST="${XRAY_ASSET_DIR}/custom.dat"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MANAGE_MODULES_SRC_DIR="${SCRIPT_DIR}/opt/manage"
 MANAGE_MODULES_DST_DIR="/opt/manage"
 MANAGE_BUNDLE_URL="${MANAGE_BUNDLE_URL:-https://raw.githubusercontent.com/superdecrypt-dev/autoscript/main/manage_bundle.zip}"
+MANAGE_BUNDLE_SHA256="${MANAGE_BUNDLE_SHA256:-}"
 MANAGE_BIN="${MANAGE_BIN:-/usr/local/bin/manage}"
 
 die() {
@@ -144,8 +150,47 @@ ui_header() {
 download_file_or_die() {
   local url="$1"
   local out="$2"
-  curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$out" \
-    || die "Gagal download: $url"
+  local expected_sha="${3:-}"
+  local label="${4:-$url}"
+
+  if ! download_file_with_sha_check "${url}" "${out}" "${expected_sha}" "${label}"; then
+    die "Gagal download/verify: ${label}"
+  fi
+}
+
+download_file_with_sha_check() {
+  local url="$1"
+  local out="$2"
+  local expected_sha="${3:-}"
+  local label="${4:-$url}"
+  local actual_sha=""
+
+  if ! curl -fsSL --connect-timeout 15 --max-time 120 "${url}" -o "${out}"; then
+    rm -f "${out}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if [[ ! -s "${out}" ]]; then
+    warn "File hasil download kosong: ${label}"
+    rm -f "${out}" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if [[ -n "${expected_sha}" ]]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+      warn "sha256sum tidak tersedia untuk verifikasi checksum: ${label}"
+      rm -f "${out}" >/dev/null 2>&1 || true
+      return 1
+    fi
+    actual_sha="$(sha256sum "${out}" | awk '{print tolower($1)}')"
+    if [[ -z "${actual_sha}" || "${actual_sha}" != "${expected_sha,,}" ]]; then
+      warn "Checksum mismatch: ${label}"
+      warn "  expected: ${expected_sha,,}"
+      warn "  actual  : ${actual_sha:-<empty>}"
+      rm -f "${out}" >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+  return 0
 }
 
 service_enable_restart_checked() {
@@ -773,7 +818,7 @@ install_acme_and_issue_cert() {
   acme_install_log="${acme_tmpdir}/acme-install.log"
   acme_src_dir=""
 
-  if curl -fsSL --connect-timeout 15 --max-time 120 "${ACME_SH_TARBALL_URL}" -o "${acme_tgz}" 2>/dev/null; then
+  if download_file_with_sha_check "${ACME_SH_TARBALL_URL}" "${acme_tgz}" "${ACME_SH_TARBALL_SHA256}" "acme.sh tarball"; then
     if tar -xzf "${acme_tgz}" -C "${acme_tmpdir}" >/dev/null 2>&1; then
       acme_src_dir="$(find "${acme_tmpdir}" -maxdepth 1 -type d -name 'acme.sh-*' -print -quit)"
     fi
@@ -783,7 +828,7 @@ install_acme_and_issue_cert() {
     warn "Source bundle acme.sh tidak tersedia, fallback ke single-file installer."
     acme_src_dir="${acme_tmpdir}/acme-single"
     mkdir -p "${acme_src_dir}"
-    download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_src_dir}/acme.sh"
+    download_file_or_die "${ACME_SH_SCRIPT_URL}" "${acme_src_dir}/acme.sh" "${ACME_SH_SCRIPT_SHA256}" "acme.sh script"
   fi
 
   chmod 700 "${acme_src_dir}/acme.sh"
@@ -812,7 +857,7 @@ install_acme_and_issue_cert() {
     if [[ ! -s /root/.acme.sh/dnsapi/dns_cf.sh ]]; then
       warn "dns_cf hook tidak ditemukan, mencoba bootstrap dari ref ${ACME_SH_INSTALL_REF} ..."
       mkdir -p /root/.acme.sh/dnsapi
-      download_file_or_die "${ACME_SH_DNS_CF_HOOK_URL}" /root/.acme.sh/dnsapi/dns_cf.sh
+      download_file_or_die "${ACME_SH_DNS_CF_HOOK_URL}" /root/.acme.sh/dnsapi/dns_cf.sh "${ACME_SH_DNS_CF_HOOK_SHA256}" "acme dns_cf hook"
       chmod 700 /root/.acme.sh/dnsapi/dns_cf.sh >/dev/null 2>&1 || true
     fi
     [[ -s /root/.acme.sh/dnsapi/dns_cf.sh ]] || die "Hook dns_cf tetap tidak ditemukan setelah bootstrap."
@@ -856,7 +901,7 @@ install_xray() {
   ok "Install Xray-core..."
   local xray_installer
   xray_installer="$(mktemp)"
-  download_file_or_die "${XRAY_INSTALL_SCRIPT_URL}" "${xray_installer}"
+  download_file_or_die "${XRAY_INSTALL_SCRIPT_URL}" "${xray_installer}" "${XRAY_INSTALL_SCRIPT_SHA256}" "xray installer script"
   chmod 700 "${xray_installer}"
   bash "${xray_installer}" install >/dev/null \
     || { rm -f "${xray_installer}" >/dev/null 2>&1 || true; die "Gagal install Xray dari ref ${XRAY_INSTALL_REF}."; }
@@ -2227,7 +2272,9 @@ setup_xray_geodata_updater() {
 set -euo pipefail
 
 URL="${XRAY_INSTALL_SCRIPT_URL}"
+URL_SHA256="${XRAY_INSTALL_SCRIPT_SHA256}"
 CUSTOM_URL="${CUSTOM_GEOSITE_URL}"
+CUSTOM_SHA256="${CUSTOM_GEOSITE_SHA256}"
 CUSTOM_DEST="${CUSTOM_GEOSITE_DEST}"
 tmp="\$(mktemp)"
 tmp_custom="\$(mktemp)"
@@ -2238,11 +2285,29 @@ cleanup() {
 trap cleanup EXIT
 
 curl -fsSL --connect-timeout 15 --max-time 120 "\${URL}" -o "\${tmp}"
+if [[ -n "\${URL_SHA256}" ]]; then
+  got="\$(sha256sum "\${tmp}" | awk '{print tolower(\$1)}')"
+  [[ "\${got}" == "\${URL_SHA256,,}" ]] || {
+    echo "[xray-update-geodata] checksum mismatch installer geodata" >&2
+    echo " expected=\${URL_SHA256,,}" >&2
+    echo " actual=\${got}" >&2
+    exit 1
+  }
+fi
 bash "\${tmp}" install-geodata >/dev/null 2>&1
 
 mkdir -p "\$(dirname "\${CUSTOM_DEST}")"
 curl -fsSL --connect-timeout 15 --max-time 120 "\${CUSTOM_URL}" -o "\${tmp_custom}"
 [[ -s "\${tmp_custom}" ]] || { echo "[xray-update-geodata] custom.dat kosong: \${CUSTOM_URL}" >&2; exit 1; }
+if [[ -n "\${CUSTOM_SHA256}" ]]; then
+  got_custom="\$(sha256sum "\${tmp_custom}" | awk '{print tolower(\$1)}')"
+  [[ "\${got_custom}" == "\${CUSTOM_SHA256,,}" ]] || {
+    echo "[xray-update-geodata] checksum mismatch custom geosite" >&2
+    echo " expected=\${CUSTOM_SHA256,,}" >&2
+    echo " actual=\${got_custom}" >&2
+    exit 1
+  }
+fi
 install -m 644 "\${tmp_custom}" "\${CUSTOM_DEST}"
 EOF
 
@@ -2270,7 +2335,7 @@ install_custom_geosite_adblock() {
 
   local tmp
   tmp="$(mktemp)"
-  download_file_or_die "${CUSTOM_GEOSITE_URL}" "${tmp}"
+  download_file_or_die "${CUSTOM_GEOSITE_URL}" "${tmp}" "${CUSTOM_GEOSITE_SHA256}" "custom geosite"
   [[ -s "${tmp}" ]] || {
     rm -f "${tmp}" >/dev/null 2>&1 || true
     die "File custom geosite kosong: ${CUSTOM_GEOSITE_URL}"
@@ -4872,9 +4937,15 @@ EOF
 }
 
 sync_manage_modules_layout() {
-  local tmpdir bundle_file downloaded="0"
+  local tmpdir bundle_file downloaded="0" bundle_expected_sha="" local_bundle_file=""
   tmpdir="$(mktemp -d)"
   bundle_file="${tmpdir}/manage_bundle.zip"
+  bundle_expected_sha="${MANAGE_BUNDLE_SHA256:-}"
+  local_bundle_file="${SCRIPT_DIR}/manage_bundle.zip"
+
+  if [[ -z "${bundle_expected_sha}" && -f "${local_bundle_file}" ]] && command -v sha256sum >/dev/null 2>&1; then
+    bundle_expected_sha="$(sha256sum "${local_bundle_file}" | awk '{print tolower($1)}')"
+  fi
 
   install_bot_installer_if_present() {
     # args: src_path dst_path label
@@ -4891,11 +4962,11 @@ sync_manage_modules_layout() {
 
   ok "Sinkronisasi modular manage ke ${MANAGE_MODULES_DST_DIR} ..."
 
-  if curl -fsSL --connect-timeout 15 --max-time 120 "${MANAGE_BUNDLE_URL}" -o "${bundle_file}"; then
+  if download_file_with_sha_check "${MANAGE_BUNDLE_URL}" "${bundle_file}" "${bundle_expected_sha}" "manage_bundle.zip"; then
     downloaded="1"
     ok "manage_bundle.zip berhasil diunduh dari repo."
   else
-    warn "Gagal unduh manage_bundle.zip dari repo: ${MANAGE_BUNDLE_URL}"
+    warn "Gagal unduh/verifikasi manage_bundle.zip dari repo: ${MANAGE_BUNDLE_URL}"
   fi
 
   if [[ "${downloaded}" == "1" ]]; then
