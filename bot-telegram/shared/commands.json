@@ -1,0 +1,902 @@
+{
+  "menus": [
+    {
+      "id": "1",
+      "label": "Status & Diagnostics",
+      "description": "Status server, validasi konfigurasi Xray, dan informasi TLS.",
+      "actions": [
+        {
+          "id": "overview",
+          "label": "View Status",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "xray_test",
+          "label": "Run Xray Test",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "tls_info",
+          "label": "View TLS Info",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "observe_snapshot",
+          "label": "Run Observe Snap",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "observe_status",
+          "label": "View Observe Stat",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "observe_alert_log",
+          "label": "View Alert Log",
+          "mode": "direct",
+          "style": "secondary"
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "label": "User Management",
+      "description": "Kelola pengguna, masa aktif, pencarian, dan informasi akun.",
+      "actions": [
+        {
+          "id": "add_user",
+          "label": "Add User",
+          "mode": "modal",
+          "style": "success",
+          "modal": {
+            "title": "Add User",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: alice"
+              },
+              {
+                "id": "days",
+                "label": "Masa Aktif (hari)",
+                "style": "short",
+                "required": true,
+                "placeholder": "30"
+              },
+              {
+                "id": "quota_gb",
+                "label": "Quota (GB)",
+                "style": "short",
+                "required": true,
+                "placeholder": "100"
+              },
+              {
+                "id": "ip_limit",
+                "label": "IP Limit (opsional)",
+                "style": "short",
+                "required": false,
+                "placeholder": "0 = OFF"
+              }
+            ]
+          }
+        },
+        {
+          "id": "delete_user",
+          "label": "Delete User",
+          "mode": "modal",
+          "style": "danger",
+          "confirm": true,
+          "modal": {
+            "title": "Delete User",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: alice"
+              }
+            ]
+          }
+        },
+        {
+          "id": "extend_expiry",
+          "label": "Set User Expiry",
+          "mode": "modal",
+          "style": "primary",
+          "modal": {
+            "title": "Extend/Set Expiry",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: alice"
+              },
+              {
+                "id": "mode",
+                "label": "Mode",
+                "style": "short",
+                "required": true,
+                "placeholder": "extend / set"
+              },
+              {
+                "id": "value",
+                "label": "Value",
+                "style": "short",
+                "required": true,
+                "placeholder": "7 atau 2026-12-31"
+              }
+            ]
+          }
+        },
+        {
+          "id": "list_users",
+          "label": "View User List",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "search_user",
+          "label": "Search User",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Search User",
+            "fields": [
+              {
+                "id": "query",
+                "label": "Username Query",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: alice"
+              }
+            ]
+          }
+        },
+        {
+          "id": "account_info",
+          "label": "View Account Info",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "User Account Info",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: alice"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "label": "Quota & Access Control",
+      "description": "Ringkasan kuota dan kontrol akses per pengguna.",
+      "actions": [
+        {
+          "id": "summary",
+          "label": "View Quota Summary",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "detail",
+          "label": "View Quota Detail",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Quota Detail",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: alice"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_quota_limit",
+          "label": "Set Quota Limit",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Quota Limit",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "quota_gb",
+                "label": "Quota GB",
+                "style": "short",
+                "required": true,
+                "placeholder": "100"
+              }
+            ]
+          }
+        },
+        {
+          "id": "reset_quota_used",
+          "label": "Reset Quota Used",
+          "mode": "modal",
+          "style": "danger",
+          "confirm": true,
+          "modal": {
+            "title": "Reset Quota Used",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              }
+            ]
+          }
+        },
+        {
+          "id": "manual_block",
+          "label": "Toggle Manual Block",
+          "mode": "modal",
+          "style": "danger",
+          "modal": {
+            "title": "Manual Block",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "enabled",
+                "label": "Enabled",
+                "style": "short",
+                "required": true,
+                "placeholder": "on / off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "ip_limit_enable",
+          "label": "Toggle IP Limit",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "IP Limit Enable/Disable",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "enabled",
+                "label": "Enabled",
+                "style": "short",
+                "required": true,
+                "placeholder": "on / off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_ip_limit",
+          "label": "Set IP Limit",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set IP Limit",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "ip_limit",
+                "label": "IP Limit",
+                "style": "short",
+                "required": true,
+                "placeholder": "2"
+              }
+            ]
+          }
+        },
+        {
+          "id": "unlock_ip_lock",
+          "label": "Unlock IP Lock",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Unlock IP Lock",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_speed_download",
+          "label": "Set Speed Down",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Speed Download",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "speed_down_mbit",
+                "label": "Speed Down Mbps",
+                "style": "short",
+                "required": true,
+                "placeholder": "20"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_speed_upload",
+          "label": "Set Speed Up",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Speed Upload",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "speed_up_mbit",
+                "label": "Speed Up Mbps",
+                "style": "short",
+                "required": true,
+                "placeholder": "10"
+              }
+            ]
+          }
+        },
+        {
+          "id": "speed_limit",
+          "label": "Toggle Speed Limit",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Speed Limit Enable/Disable",
+            "fields": [
+              {
+                "id": "proto",
+                "label": "Protocol",
+                "style": "short",
+                "required": true,
+                "placeholder": "vless/vmess/trojan"
+              },
+              {
+                "id": "username",
+                "label": "Username",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice"
+              },
+              {
+                "id": "enabled",
+                "label": "Enabled",
+                "style": "short",
+                "required": true,
+                "placeholder": "on / off"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "label": "Network Controls",
+      "description": "Ringkasan outbound, routing, DNS, dan status network.",
+      "actions": [
+        {
+          "id": "egress_summary",
+          "label": "View Egress Sum",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "set_egress_mode",
+          "label": "Set Egress Mode",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Egress Mode",
+            "fields": [
+              {
+                "id": "mode",
+                "label": "Mode",
+                "style": "short",
+                "required": true,
+                "placeholder": "direct / warp / balancer"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_balancer_strategy",
+          "label": "Set Balance Strat",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Balancer Strategy",
+            "fields": [
+              {
+                "id": "strategy",
+                "label": "Strategy",
+                "style": "short",
+                "required": true,
+                "placeholder": "random / roundRobin / leastPing / leastLoad"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_balancer_selector_auto",
+          "label": "Auto Balance Sel",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "set_balancer_selector",
+          "label": "Set Balance Sel",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Balancer Selector",
+            "fields": [
+              {
+                "id": "selector",
+                "label": "Selector",
+                "style": "short",
+                "required": true,
+                "placeholder": "auto atau direct,warp"
+              }
+            ]
+          }
+        },
+        {
+          "id": "dns_summary",
+          "label": "View DNS Summary",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "set_dns_primary",
+          "label": "Set Primary DNS",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Primary DNS",
+            "fields": [
+              {
+                "id": "dns",
+                "label": "Primary DNS",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: 1.1.1.1"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_dns_secondary",
+          "label": "Set Secondary DNS",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set Secondary DNS",
+            "fields": [
+              {
+                "id": "dns",
+                "label": "Secondary DNS",
+                "style": "short",
+                "required": true,
+                "placeholder": "contoh: 8.8.8.8"
+              }
+            ]
+          }
+        },
+        {
+          "id": "set_dns_query_strategy",
+          "label": "Set DNS Strategy",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Set DNS Query Strategy",
+            "fields": [
+              {
+                "id": "strategy",
+                "label": "Query Strategy",
+                "style": "short",
+                "required": true,
+                "placeholder": "UseIP/UseIPv4/UseIPv6/PreferIPv4/PreferIPv6"
+              }
+            ]
+          }
+        },
+        {
+          "id": "toggle_dns_cache",
+          "label": "Toggle DNS Cache",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "state_file",
+          "label": "State File",
+          "mode": "direct",
+          "style": "secondary"
+        }
+      ]
+    },
+    {
+      "id": "5",
+      "label": "Domain Control",
+      "description": "Atur domain aktif + sertifikat.\nManual: pakai domain sendiri yang sudah pointing ke IP VPS.\nAuto: pakai root domain bawaan sistem (subdomain dibuat otomatis via API Cloudflare).",
+      "actions": [
+        {
+          "id": "setup_domain_custom",
+          "label": "Set Domain Manual",
+          "mode": "modal",
+          "style": "danger",
+          "confirm": true,
+          "modal": {
+            "title": "Set Domain Manual",
+            "fields": [
+              {
+                "id": "domain",
+                "label": "Domain (FQDN)",
+                "style": "short",
+                "required": true,
+                "placeholder": "vpn.example.com"
+              }
+            ]
+          }
+        },
+        {
+          "id": "setup_domain_cloudflare",
+          "label": "Set Domain Auto",
+          "mode": "modal",
+          "style": "danger",
+          "confirm": true,
+          "modal": {
+            "title": "Set Domain Auto (API Cloudflare)",
+            "fields": [
+              {
+                "id": "root_domain",
+                "label": "Root Domain",
+                "style": "short",
+                "required": true,
+                "placeholder": "1 atau vyxara1.web.id"
+              },
+              {
+                "id": "subdomain_mode",
+                "label": "Subdomain Mode",
+                "style": "short",
+                "required": false,
+                "placeholder": "auto / manual (default: auto)"
+              },
+              {
+                "id": "subdomain",
+                "label": "Subdomain",
+                "style": "short",
+                "required": false,
+                "placeholder": "Isi jika mode manual, contoh: vpn01"
+              },
+              {
+                "id": "proxied",
+                "label": "Cloudflare Proxy",
+                "style": "short",
+                "required": false,
+                "placeholder": "on / off (default: off)"
+              },
+              {
+                "id": "allow_existing_same_ip",
+                "label": "Lanjut jika ada A record dengan IP sama?",
+                "style": "short",
+                "required": false,
+                "placeholder": "on / off (default: off)"
+              }
+            ]
+          }
+        },
+        {
+          "id": "domain_info",
+          "label": "View Domain Info",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "domain_guard_check",
+          "label": "Run Guard Check",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "domain_guard_status",
+          "label": "View Guard Stat",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "domain_guard_renew",
+          "label": "Run Guard Renew",
+          "mode": "direct",
+          "style": "danger",
+          "confirm": true
+        },
+        {
+          "id": "nginx_server_name",
+          "label": "View Nginx Name",
+          "mode": "direct",
+          "style": "secondary"
+        },
+        {
+          "id": "refresh_account_info",
+          "label": "Refresh Accounts",
+          "mode": "direct",
+          "style": "secondary"
+        }
+      ]
+    },
+    {
+      "id": "6",
+      "label": "Speedtest",
+      "description": "Pengujian kecepatan jaringan dan versi binary.",
+      "actions": [
+        {
+          "id": "run",
+          "label": "Run Speedtest",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "version",
+          "label": "View Version",
+          "mode": "direct",
+          "style": "secondary"
+        }
+      ]
+    },
+    {
+      "id": "7",
+      "label": "Security",
+      "description": "Status fail2ban dan parameter hardening kernel.",
+      "actions": [
+        {
+          "id": "fail2ban_status",
+          "label": "View Fail2ban",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "sysctl_summary",
+          "label": "View Sysctl",
+          "mode": "direct",
+          "style": "secondary"
+        }
+      ]
+    },
+    {
+      "id": "8",
+      "label": "Maintenance",
+      "description": "Status layanan dan restart layanan.",
+      "actions": [
+        {
+          "id": "service_status",
+          "label": "View Services",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "restart_xray",
+          "label": "Restart Xray",
+          "mode": "direct",
+          "style": "danger",
+          "confirm": true
+        },
+        {
+          "id": "restart_nginx",
+          "label": "Restart Nginx",
+          "mode": "direct",
+          "style": "danger",
+          "confirm": true
+        }
+      ]
+    },
+    {
+      "id": "9",
+      "label": "Traffic Analytics",
+      "description": "Analitik traffic user berdasarkan metadata quota (overview, top users, search, dan export).",
+      "actions": [
+        {
+          "id": "overview",
+          "label": "View Overview",
+          "mode": "direct",
+          "style": "primary"
+        },
+        {
+          "id": "top_users",
+          "label": "View Top Users",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Top Users by Usage",
+            "fields": [
+              {
+                "id": "limit",
+                "label": "Limit",
+                "style": "short",
+                "required": true,
+                "placeholder": "15 (maks 200)"
+              }
+            ]
+          }
+        },
+        {
+          "id": "search_user",
+          "label": "Search User",
+          "mode": "modal",
+          "style": "secondary",
+          "modal": {
+            "title": "Search User Traffic",
+            "fields": [
+              {
+                "id": "query",
+                "label": "Keyword",
+                "style": "short",
+                "required": true,
+                "placeholder": "alice atau vless"
+              }
+            ]
+          }
+        },
+        {
+          "id": "export_json",
+          "label": "Export JSON",
+          "mode": "direct",
+          "style": "secondary"
+        }
+      ]
+    }
+  ]
+}

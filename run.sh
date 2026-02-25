@@ -23,6 +23,8 @@ BOT_INSTALLER_BIN="/usr/local/bin/install-discord-bot"
 TELEGRAM_INSTALLER_BIN="/usr/local/bin/install-telegram-bot"
 DISCORD_BOT_HOME="/opt/bot-discord"
 DISCORD_BOT_SRC_DIR="${REPO_DIR}/bot-discord"
+TELEGRAM_BOT_HOME="/opt/bot-telegram"
+TELEGRAM_BOT_SRC_DIR="${REPO_DIR}/bot-telegram"
 
 # -------------------------
 # Warna output
@@ -187,7 +189,7 @@ install_manage() {
   install -m 0755 "${bot_installer_src}" "${BOT_INSTALLER_BIN}"
   ok "Installer bot Discord tersedia di: ${BOT_INSTALLER_BIN}"
 
-  log "Menginstal installer bot Telegram (placeholder) ke ${TELEGRAM_INSTALLER_BIN} ..."
+  log "Menginstal installer bot Telegram ke ${TELEGRAM_INSTALLER_BIN} ..."
   install -m 0755 "${telegram_installer_src}" "${TELEGRAM_INSTALLER_BIN}"
   ok "Installer bot Telegram tersedia di: ${TELEGRAM_INSTALLER_BIN}"
 }
@@ -208,6 +210,24 @@ seed_discord_bot_home() {
   cp -a "${DISCORD_BOT_SRC_DIR}/." "${DISCORD_BOT_HOME}/"
   chown -R root:root "${DISCORD_BOT_HOME}" 2>/dev/null || true
   ok "Bootstrap bot Discord selesai: ${DISCORD_BOT_HOME}"
+}
+
+seed_telegram_bot_home() {
+  if [[ ! -d "${TELEGRAM_BOT_SRC_DIR}" ]]; then
+    warn "Source bot Telegram tidak ditemukan di repo (${TELEGRAM_BOT_SRC_DIR}); lewati bootstrap /opt/bot-telegram."
+    return 0
+  fi
+
+  if [[ -d "${TELEGRAM_BOT_HOME}" ]] && [[ -n "$(find "${TELEGRAM_BOT_HOME}" -mindepth 1 -maxdepth 1 2>/dev/null || true)" ]]; then
+    ok "Bot home sudah ada: ${TELEGRAM_BOT_HOME}"
+    return 0
+  fi
+
+  log "Menyiapkan source awal bot Telegram ke ${TELEGRAM_BOT_HOME} ..."
+  mkdir -p "${TELEGRAM_BOT_HOME}"
+  cp -a "${TELEGRAM_BOT_SRC_DIR}/." "${TELEGRAM_BOT_HOME}/"
+  chown -R root:root "${TELEGRAM_BOT_HOME}" 2>/dev/null || true
+  ok "Bootstrap bot Telegram selesai: ${TELEGRAM_BOT_HOME}"
 }
 
 cleanup_repo_after_success() {
@@ -269,6 +289,7 @@ main() {
   clone_repo
   install_manage
   seed_discord_bot_home
+  seed_telegram_bot_home
   run_setup
   cleanup_repo_after_success
 

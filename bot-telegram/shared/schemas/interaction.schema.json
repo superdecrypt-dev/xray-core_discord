@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TelegramMenuActionResponse",
+  "type": "object",
+  "required": ["ok", "code", "title", "message"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "code": { "type": "string" },
+    "title": { "type": "string" },
+    "message": { "type": "string" },
+    "data": { "type": "object" }
+  }
+}
