@@ -4918,6 +4918,7 @@ mapping = {
   "domain_menu.sh": "menus/domain_menu.sh",
   "main_menu.sh": "menus/main_menu.sh",
   "maintenance_menu.sh": "menus/maintenance_menu.sh",
+  "wg_inbound_menu.sh": "menus/wg_inbound_menu.sh",
   "network_menu.sh": "menus/network_menu.sh",
   "user_menu.sh": "menus/user_menu.sh",
   "main.sh": "app/main.sh",
