@@ -1,4 +1,5 @@
 from . import (
+    menu_10_backup,
     menu_1_status,
     menu_2_user,
     menu_3_quota,
@@ -20,6 +21,7 @@ MENU_HANDLERS = {
     "7": menu_7_security.handle,
     "8": menu_8_maintenance.handle,
     "9": menu_12_traffic.handle,
+    "10": menu_10_backup.handle,
     # Backward compatibility for older cached interaction payloads.
     "12": menu_12_traffic.handle,
 }

@@ -74,8 +74,6 @@ CLOUDFLARE_API_TOKEN = os.getenv(
 PROVIDED_ROOT_DOMAINS = (
     "vyxara1.web.id",
     "vyxara2.web.id",
-    "vyxara1.qzz.io",
-    "vyxara2.qzz.io",
 )
 ACME_SH_INSTALL_REF = os.getenv("ACME_SH_INSTALL_REF", "f39d066ced0271d87790dc426556c1e02a88c91b").strip()
 ACME_SH_TARBALL_URL = f"https://codeload.github.com/acmesh-official/acme.sh/tar.gz/{ACME_SH_INSTALL_REF}"
@@ -3528,6 +3526,10 @@ def op_domain_cloudflare_root_list() -> tuple[bool, str, str]:
     msg = "Root domain Cloudflare yang tersedia:\n" + "\n".join(lines)
     msg += "\n\nInput bisa nomor (contoh: 1) atau nama domain penuh."
     return True, "Domain Control - Root Domain List", msg
+
+
+def list_provided_root_domains() -> list[str]:
+    return [str(root).strip() for root in PROVIDED_ROOT_DOMAINS if str(root).strip()]
 
 
 def op_domain_setup_custom(domain: str) -> tuple[bool, str, str]:

@@ -5,6 +5,7 @@ import socket
 import time
 from dataclasses import dataclass
 import html
+from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -18,7 +19,14 @@ from telegram.ext import (
     filters,
 )
 
-from .backend_client import BackendClient, BackendDomainOption, BackendError, BackendInboundOption, BackendUserOption
+from .backend_client import (
+    BackendClient,
+    BackendDomainOption,
+    BackendError,
+    BackendInboundOption,
+    BackendRootDomainOption,
+    BackendUserOption,
+)
 from .commands_loader import ActionSpec, CommandCatalog, MenuSpec
 from .config import AppConfig, load_config
 from .render import (
@@ -45,6 +53,10 @@ DELETE_PICK_PAGE_SIZE = 12
 DELETE_PICK_PROTOCOLS = ("vless", "vmess", "trojan")
 FORM_CHOICE_PAGE_SIZE = 12
 FORM_CHOICE_PROTOCOLS = ("vless", "vmess", "trojan")
+ROOT_DOMAIN_FALLBACK_OPTIONS = (
+    "vyxara1.web.id",
+    "vyxara2.web.id",
+)
 FORM_CHOICE_MANUAL_VALUE = "__manual_input__"
 FORM_CHOICE_SKIP_VALUE = "__skip_optional__"
 FORM_CHOICE_USERNAME_ACTIONS = {
@@ -65,8 +77,21 @@ FORM_CHOICE_USERNAME_ACTIONS = {
 KEY_PENDING_FORM = "pending_form"
 KEY_PENDING_CONFIRM = "pending_confirm"
 KEY_PENDING_DELETE_PICK = "pending_delete_pick"
+KEY_PENDING_UPLOAD_RESTORE = "pending_upload_restore"
 KEY_LAST_ACTION_TS = "last_action_ts"
 KEY_LAST_CLEANUP_TS = "last_cleanup_ts"
+BOT_ROOT = Path(__file__).resolve().parents[2]
+UPLOAD_RESTORE_MAX_BYTES = 20 * 1024 * 1024
+UPLOAD_RESTORE_DIRS = (
+    Path("/var/lib/xray-telegram-bot/tmp/uploads"),
+    Path("/opt/bot-telegram/runtime/tmp/uploads"),
+    BOT_ROOT / "runtime" / "tmp" / "uploads",
+)
+DOWNLOAD_LOCAL_ALLOW_DIRS = (
+    Path("/var/lib/xray-telegram-bot/backups/archives"),
+    Path("/opt/bot-telegram/runtime/backups/archives"),
+    BOT_ROOT / "runtime" / "backups" / "archives",
+)
 
 
 @dataclass
@@ -101,9 +126,79 @@ def _is_authorized(runtime: Runtime, update: Update) -> tuple[bool, str]:
 
 
 def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+    pending_confirm = context.user_data.get(KEY_PENDING_CONFIRM)
+    if isinstance(pending_confirm, dict):
+        action_id = str(pending_confirm.get("action_id") or "").strip()
+        params = pending_confirm.get("params") if isinstance(pending_confirm.get("params"), dict) else {}
+        if action_id == "restore_from_upload" and isinstance(params, dict):
+            _cleanup_uploaded_archive(str(params.get("upload_path") or ""))
     context.user_data.pop(KEY_PENDING_FORM, None)
     context.user_data.pop(KEY_PENDING_CONFIRM, None)
     context.user_data.pop(KEY_PENDING_DELETE_PICK, None)
+    context.user_data.pop(KEY_PENDING_UPLOAD_RESTORE, None)
+
+
+def _fmt_size(num: int) -> str:
+    n = max(0, int(num))
+    if n >= 1024**3:
+        return f"{n / (1024**3):.2f} GiB"
+    if n >= 1024**2:
+        return f"{n / (1024**2):.2f} MiB"
+    if n >= 1024:
+        return f"{n / 1024:.2f} KiB"
+    return f"{n} B"
+
+
+def _is_subpath(path: Path, base: Path) -> bool:
+    try:
+        rp = path.resolve()
+        rb = base.resolve()
+    except Exception:
+        return False
+    return rp == rb or rb in rp.parents
+
+
+def _resolve_restore_upload_dir() -> Path:
+    for candidate in UPLOAD_RESTORE_DIRS:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except Exception:
+            continue
+    return UPLOAD_RESTORE_DIRS[0]
+
+
+def _cleanup_uploaded_archive(raw_path: str) -> None:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return
+    try:
+        resolved = Path(path_text).resolve()
+    except Exception:
+        return
+    if not any(_is_subpath(resolved, root) for root in UPLOAD_RESTORE_DIRS):
+        return
+    try:
+        resolved.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _resolve_local_download(data: dict) -> tuple[str, Path] | None:
+    raw_path = str(data.get("download_local_path") or "").strip()
+    if not raw_path:
+        return None
+    try:
+        resolved = Path(raw_path).resolve()
+    except Exception:
+        return None
+    if not resolved.exists() or not resolved.is_file():
+        return None
+    if not any(_is_subpath(resolved, root) for root in DOWNLOAD_LOCAL_ALLOW_DIRS):
+        return None
+
+    filename = str(data.get("download_filename") or "").strip() or resolved.name
+    return filename, resolved
 
 
 def _cooldown_remaining(
@@ -412,6 +507,10 @@ def _pending_choice_options(pending: dict) -> list[dict[str, str]]:
     return out
 
 
+def _is_click_only_field(action_id: str, field_id: str) -> bool:
+    return action_id == "setup_domain_cloudflare" and field_id == "root_domain"
+
+
 def _choice_total_pages(choice_options: list[dict[str, str]]) -> int:
     if not choice_options:
         return 1
@@ -481,6 +580,17 @@ async def _resolve_form_choice_options(runtime: Runtime, pending: dict, field_id
 
     if field_id == "subdomain_mode":
         return [("AUTO", "auto"), ("MANUAL", "manual")]
+
+    if field_id == "root_domain" and action_id == "setup_domain_cloudflare":
+        try:
+            options: list[BackendRootDomainOption] = await runtime.backend.list_domain_root_options()
+            roots = list(dict.fromkeys([o.root_domain for o in options if o.root_domain]))
+        except BackendError:
+            roots = []
+
+        if not roots:
+            roots = list(ROOT_DOMAIN_FALLBACK_OPTIONS)
+        return [(root, root) for root in roots]
 
     if field_id == "days":
         return [("7", "7"), ("30", "30"), ("60", "60"), ("90", "90")]
@@ -637,6 +747,21 @@ async def _run_action(
         reply_markup=_result_keyboard(menu_id),
     )
 
+    local_attachment = _resolve_local_download(result.data)
+    if local_attachment is not None:
+        filename, local_path = local_attachment
+        try:
+            with local_path.open("rb") as fp:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=fp,
+                    filename=filename,
+                    caption=f"File hasil: {filename}",
+                )
+        except Exception as exc:
+            LOGGER.warning("Gagal kirim lampiran lokal %s: %s", local_path, exc)
+        return
+
     attachment = decode_download_payload(result.data)
     if attachment is None:
         return
@@ -779,13 +904,15 @@ async def _prompt_next_form_field(
         raise RuntimeError("Index form tidak valid.")
 
     field = action.modal.fields[idx]
+    click_only_field = _is_click_only_field(action.id, field.id)
     choice_options = await _resolve_form_choice_options(runtime, pending, field.id)
     choice_with_manual: list[tuple[str, str]] = list(choice_options)
-    if choice_options:
-        choice_with_manual.append(("✍️ Lainnya (input manual)", FORM_CHOICE_MANUAL_VALUE))
-    else:
-        choice_with_manual.append(("✍️ Input Manual", FORM_CHOICE_MANUAL_VALUE))
-    if not _field_is_required(pending, field):
+    if not click_only_field:
+        if choice_options:
+            choice_with_manual.append(("✍️ Lainnya (input manual)", FORM_CHOICE_MANUAL_VALUE))
+        else:
+            choice_with_manual.append(("✍️ Input Manual", FORM_CHOICE_MANUAL_VALUE))
+    if not click_only_field and not _field_is_required(pending, field):
         choice_with_manual.append(("⏭️ Lewati", FORM_CHOICE_SKIP_VALUE))
 
     pending.pop("manual_entry", None)
@@ -963,11 +1090,96 @@ async def _submit_pending_form_value(
     )
 
 
+async def on_document_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    runtime = _get_runtime(context)
+    ok, reason = _is_authorized(runtime, update)
+    if not ok:
+        if update.effective_message:
+            await update.effective_message.reply_text(reason)
+        return
+
+    pending_upload = context.user_data.get(KEY_PENDING_UPLOAD_RESTORE)
+    if not isinstance(pending_upload, dict):
+        return
+
+    msg = update.effective_message
+    chat = update.effective_chat
+    doc = msg.document if msg else None
+    if msg is None or chat is None or doc is None:
+        return
+
+    name = str(doc.file_name or "").strip()
+    if not name.lower().endswith(".tar.gz"):
+        await msg.reply_text("File restore harus berekstensi .tar.gz")
+        return
+
+    size_bytes = int(doc.file_size or 0)
+    if size_bytes > UPLOAD_RESTORE_MAX_BYTES:
+        await msg.reply_text(
+            (
+                "Ukuran file terlalu besar untuk restore upload.\n"
+                f"Maksimal: {_fmt_size(UPLOAD_RESTORE_MAX_BYTES)}\n"
+                f"File ini: {_fmt_size(size_bytes)}"
+            )
+        )
+        return
+
+    upload_dir = _resolve_restore_upload_dir()
+    upload_id = f"{int(time.time())}-{doc.file_unique_id}"
+    upload_name = f"restore-upload-{upload_id}.tar.gz"
+    upload_path = upload_dir / upload_name
+
+    try:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=str(upload_path))
+    except Exception as exc:
+        LOGGER.warning("Gagal download file restore upload: %s", exc)
+        await msg.reply_text("Gagal mengunduh file dari Telegram. Coba kirim ulang.")
+        return
+
+    menu_id = str(pending_upload.get("menu_id") or "10")
+    action_id = str(pending_upload.get("action_id") or "restore_from_upload")
+    menu = runtime.catalog.get_menu(menu_id)
+    action = runtime.catalog.get_action(menu_id, action_id)
+    if menu is None or action is None:
+        context.user_data.pop(KEY_PENDING_UPLOAD_RESTORE, None)
+        _cleanup_uploaded_archive(str(upload_path))
+        await msg.reply_text("Action restore upload tidak ditemukan. Jalankan /panel lagi.")
+        return
+
+    params = {"upload_path": str(upload_path)}
+    context.user_data.pop(KEY_PENDING_UPLOAD_RESTORE, None)
+    context.user_data[KEY_PENDING_CONFIRM] = {
+        "menu_id": menu_id,
+        "action_id": action_id,
+        "params": params,
+    }
+
+    confirm_msg = (
+        f"<b>Konfirmasi: {html.escape(menu.label)} · {html.escape(action.label)}</b>\n\n"
+        f"- File: <code>{html.escape(name or upload_name)}</code>\n"
+        f"- Ukuran: <code>{html.escape(_fmt_size(size_bytes))}</code>\n\n"
+        "Lanjutkan eksekusi restore?"
+    )
+    await msg.reply_text(
+        confirm_msg,
+        parse_mode=ParseMode.HTML,
+        reply_markup=_confirm_keyboard(menu_id),
+    )
+
+
 async def on_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     runtime = _get_runtime(context)
     ok, reason = _is_authorized(runtime, update)
     if not ok:
         await update.effective_message.reply_text(reason)
+        return
+
+    pending_upload = context.user_data.get(KEY_PENDING_UPLOAD_RESTORE)
+    if isinstance(pending_upload, dict):
+        await update.effective_message.reply_text(
+            "Sesi restore upload aktif. Kirim file backup .tar.gz atau tekan Batal."
+        )
         return
 
     pending = context.user_data.get(KEY_PENDING_FORM)
@@ -1228,6 +1440,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             params=params,
             query=query,
         )
+        if action_id == "restore_from_upload":
+            _cleanup_uploaded_archive(str(params.get("upload_path") or ""))
         return
 
     parts = data.split(CALLBACK_SEP)
@@ -1284,6 +1498,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 chat_id=chat_id,
                 query=query,
                 menu_id=menu_id,
+            )
+            return
+
+        if menu_id == "10" and action_id == "restore_from_upload":
+            context.user_data[KEY_PENDING_UPLOAD_RESTORE] = {
+                "menu_id": menu_id,
+                "action_id": action_id,
+            }
+            await _send_or_edit(
+                query=query,
+                chat_id=chat_id,
+                context=context,
+                text=(
+                    "<b>Restore Upload</b>\n"
+                    "Kirim file backup berekstensi <code>.tar.gz</code> lewat Telegram.\n"
+                    f"Ukuran maksimal: <code>{html.escape(_fmt_size(UPLOAD_RESTORE_MAX_BYTES))}</code>\n\n"
+                    "Setelah file diterima, bot akan minta konfirmasi sebelum restore dijalankan."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("❌ Batal", callback_data=f"cf{CALLBACK_SEP}{menu_id}")]]
+                ),
             )
             return
 
@@ -1395,6 +1630,7 @@ def main() -> None:
     application.add_handler(CommandHandler("cleanup", cmd_cleanup))
 
     application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageHandler(filters.Document.ALL, on_document_input))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_input))
 
     LOGGER.info("Starting xray-telegram-gateway")

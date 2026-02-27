@@ -172,6 +172,10 @@ Highlight kemampuan:
   - ACL default-deny (wajib isi admin IDs, kecuali override eksplisit).
   - Output hasil action disanitasi agar token/secret sensitif tidak bocor ke chat.
   - Throttle/cooldown action dan cleanup untuk menekan spam/double-trigger.
+- Menu `10) Backup/Restore`:
+  - `create_backup`, `list_backups`, `restore_latest`, `restore_from_upload`.
+  - Scope backup mencakup conf Xray/Nginx, state account/quota/speed, network state, wireproxy config, dan cert TLS.
+  - Restore memakai safety snapshot + rollback otomatis saat validasi/restart service gagal.
 - Deploy produksi via `install-telegram-bot.sh` ke `/opt/bot-telegram` + systemd service terpisah.
 
 ## Transport Yang Didukung

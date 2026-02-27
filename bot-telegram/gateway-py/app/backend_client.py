@@ -62,6 +62,11 @@ class BackendDomainOption:
     entry: str
 
 
+@dataclass(frozen=True)
+class BackendRootDomainOption:
+    root_domain: str
+
+
 class BackendError(RuntimeError):
     pass
 
@@ -185,6 +190,32 @@ class BackendClient:
             if not entry:
                 continue
             out.append(BackendDomainOption(entry=entry))
+        return out
+
+    async def list_domain_root_options(self) -> list[BackendRootDomainOption]:
+        try:
+            async with self._new_client(timeout=15.0) as client:
+                response = await client.get("/api/domain/root-options")
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text.strip()
+            raise BackendError(f"HTTP {exc.response.status_code}: {_sanitize_text(body[:400])}") from exc
+        except Exception as exc:
+            raise BackendError(_sanitize_text(str(exc))) from exc
+
+        raw_roots = data.get("roots") if isinstance(data, dict) else None
+        if not isinstance(raw_roots, list):
+            return []
+
+        out: list[BackendRootDomainOption] = []
+        for item in raw_roots:
+            if not isinstance(item, dict):
+                continue
+            root_domain = str(item.get("root_domain") or "").strip().lower()
+            if not root_domain:
+                continue
+            out.append(BackendRootDomainOption(root_domain=root_domain))
         return out
 
     async def health(self) -> dict:
