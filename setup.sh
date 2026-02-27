@@ -46,8 +46,6 @@ CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-ZEbavEuJawHqX4-Jwj-L5Vj0nHOD-uPXtd
 PROVIDED_ROOT_DOMAINS=(
 "vyxara1.web.id"
 "vyxara2.web.id"
-"vyxara1.qzz.io"
-"vyxara2.qzz.io"
 )
 
 # NOTE: Script ini dipakai pribadi. Isi token di atas jika tidak memakai env var.
